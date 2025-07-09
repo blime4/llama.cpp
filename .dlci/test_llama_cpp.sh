@@ -35,3 +35,5 @@ cd ${build_dir}/bin
 ./test-backend-ops
 
 cd -
+
+echo "<>test-backend-ops end ...<>"

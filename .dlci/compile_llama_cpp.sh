@@ -97,3 +97,5 @@ cd ../build
 ninja -j 12
 
 cd -
+
+echo "<> compile succed ... <>"
