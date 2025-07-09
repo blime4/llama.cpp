@@ -23,6 +23,7 @@ if [ ! -f "$case_file" ]; then
   exit 1
 fi
 
+export GGML_DEBUG=1
 export PATH=${build_dir}/bin:$PATH
 export LD_LIBRARY_PATH=${build_dir}/bin:$LD_LIBRARY_PATH
 
