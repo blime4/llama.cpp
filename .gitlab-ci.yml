@@ -1,0 +1,52 @@
+variables:
+  PAGES_BRANCH: "gh-pages"
+  SDK_TAG: V2_SOFTWARE_master_202506262155
+  SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
+  DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
+  DOCKER_IMAGE_COMPILE: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
+  DOCKER_IMAGE_TEST: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
+
+.docker_envs: &docker_envs |
+  DOCKER_ENVS=()
+  while IFS='=' read -r key value; do
+    DOCKER_ENVS+=(--env "${key}=${value}")
+  done < <(env | grep -E '^(SDK_|CI_|sdk_)')
+
+stages:
+  - compile_llama_cpp_x86_64
+  - test_llama_cpp_x86_64
+  - deploy
+
+compile_llama_cpp_x86_64:
+  stage: compile_llama_cpp_x86_64
+  tags:
+    - llama_cpp
+  script:
+    - git submodule sync && git submodule update --init --recursive
+    - echo "[INFO] Starting $CI_JOB_NAME stage"
+    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+
+test_llama_cpp_x86_64:
+  stage: test_llama_cpp_x86_64
+  tags:
+    - llama_cpp
+  script:
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh
+
+pages:
+  stage: deploy
+  script:
+    - bash deploy-docs.sh
+  artifacts:
+    paths:
+      - public
+  only:
+    - tags
+  tags:
+    - pages
+  after_script:
+    - pwd && ls -al
