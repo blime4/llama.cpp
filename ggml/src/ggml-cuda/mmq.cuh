@@ -100,6 +100,10 @@ static int get_mmq_x_max_host(const int cc) {
 }
 
 static constexpr __device__ int get_mmq_x_max_device() {
+#if defined(GGML_USE_DLCU)
+    return 64;
+#endif // defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)
+
 #ifdef NEW_MMA_AVAILABLE
     return 128;
 #else // NEW_MMA_AVAILABLE
@@ -124,6 +128,9 @@ static constexpr __device__ int get_mmq_x_max_device() {
 }
 
 static int get_mmq_y_host(const int cc) {
+    #if  (defined(GGML_USE_DLCU))
+    return 64;
+    #endif
     return GGML_CUDA_CC_IS_AMD(cc) ? (GGML_CUDA_CC_IS_RDNA1(cc) ? 64 : 128) :
         ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ? 128 : 64);
 }
@@ -136,7 +143,7 @@ static constexpr __device__ int get_mmq_y_device() {
     return 128;
 #endif // defined RDNA1
 #else
-#if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
+#if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA && (!defined(GGML_USE_DLCU))
     return 128;
 #else
     return 64;
@@ -2616,6 +2623,13 @@ static __global__ void mul_mat_q(
         return;
     }
 
+#if defined(GGML_USE_DLCU)
+    {
+        NO_DEVICE_CODE;
+        return;
+    }
+#endif
+
     constexpr int qk    = ggml_cuda_type_traits<type>::qk;
     constexpr int mmq_y = get_mmq_y_device();
 
@@ -2639,7 +2653,7 @@ static __global__ void mul_mat_q(
     __syncthreads();
 
     // On AMD or old CUDA the performance with stream-k was worse, use conventional tiling instead:
-#if (defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)) || __CUDA_ARCH__ < GGML_CUDA_CC_VOLTA
+#if (defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)) || defined(GGML_USE_DLCU) || __CUDA_ARCH__ < GGML_CUDA_CC_VOLTA
     {
         const int wt = blockIdx.z / nchannels_y;
         const int zt = blockIdx.z - wt*nchannels_y;
@@ -2844,6 +2858,14 @@ static __global__ void mul_mat_q_stream_k_fixup(
         const int32_t * ids_dst, const int32_t * expert_bounds, float * __restrict__ dst, const float * __restrict__ tmp_last_tile,
         const int ncols_x, const int nrows_x, const int ncols_dst, const int stride_col_dst,
         const int nchannels_y, const int stride_channel_dst, const int nsamples_y, const int stride_sample_dst) {
+
+#if defined(GGML_USE_DLCU)
+    {
+        NO_DEVICE_CODE;
+        return;
+    }
+#endif
+
     constexpr int     mmq_y           = get_mmq_y_device();
     constexpr int     qk              = ggml_cuda_type_traits<type>::qk;
     constexpr int     blocks_per_iter = MMQ_ITER_K / qk;
@@ -3094,6 +3116,10 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 
 template <ggml_type type>
 void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
+    #if defined(GGML_USE_DLCU)
+        //throw std::runtime_error("no support by dl");
+        return;
+    #endif
     const int    id    = ggml_cuda_get_device();
     const int    cc    = ggml_cuda_info().devices[id].cc;
     const size_t smpbo = ggml_cuda_info().devices[id].smpbo;

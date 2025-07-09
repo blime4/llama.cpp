@@ -1,4 +1,5 @@
 #include "mmq.cuh"
+#include <stdexcept>
 #include "quantize.cuh"
 
 #include <vector>
@@ -229,6 +230,10 @@ void ggml_cuda_op_mul_mat_q(
     const char * src1_ddq_i, float * dst_dd_i, const int64_t row_low, const int64_t row_high, const int64_t src1_ncols,
     const int64_t src1_padded_row_size, cudaStream_t stream) {
 
+    #if defined(GGML_USE_DLCU)
+        throw std::runtime_error("no support by dl");
+        return;
+    #endif
     const int64_t ne00 = src0->ne[0];
 
     const int64_t ne10 = src1->ne[0];
@@ -250,8 +255,12 @@ void ggml_cuda_op_mul_mat_q(
     // The stream-k decomposition is only faster for recent NVIDIA GPUs.
     // Also its fixup needs to allocate a temporary buffer in the memory pool.
     // There are multiple parallel CUDA streams for src1_ncols != ne11 which would introduce a race condition for this buffer.
+#if defined(GGML_USE_DLCU)
+    const bool use_stream_k = false;
+#else
     const bool use_stream_k = GGML_CUDA_CC_IS_NVIDIA(cc) &&
         ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA && src1_ncols == ne11;
+#endif
     const mmq_args args = {
         src0_dd_i, src0->type, (const int *) src1_ddq_i, nullptr, nullptr, dst_dd_i,
         ne00, row_diff, src1_ncols, stride01, ne11, nrows_dst,

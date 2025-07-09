@@ -207,7 +207,10 @@ typedef float2 dfloat2;
 #endif // GGML_CUDA_F16
 
 #if (!defined(GGML_USE_HIP) && !defined(GGML_CUDA_NO_VMM)) || (defined(GGML_USE_HIP) && !defined(GGML_HIP_NO_VMM))
+
+#if (!defined(GGML_USE_DLCU))
 #define GGML_USE_VMM
+#endif
 #endif // (!defined(GGML_USE_HIP) && !defined(GGML_CUDA_NO_VMM)) || (defined(GGML_USE_HIP) && !defined(GGML_HIP_NO_VMM))
 
 #if (defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)) || __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
@@ -238,6 +241,22 @@ typedef float2 dfloat2;
 #define FLASH_ATTN_AVAILABLE
 #endif // !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && __MUSA_ARCH__ < 220)
 
+#if defined(GGML_USE_DLCU)
+
+#if defined(NEW_MMA_AVAILABLE)
+#undef NEW_MMA_AVAILABLE
+#endif
+
+#if defined(CP_ASYNC_AVAILABLE)
+#undef CP_ASYNC_AVAILABLE
+#endif
+
+#if defined(FLASH_ATTN_AVAILABLE)
+#undef FLASH_ATTN_AVAILABLE
+#endif
+
+#endif
+
 static bool fp16_available(const int cc) {
     return ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_PASCAL;
 }
@@ -251,6 +270,7 @@ static bool fast_fp16_hardware_available(const int cc) {
     return (GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_PASCAL && cc != 610) || GGML_CUDA_CC_IS_AMD(cc) ||
         (GGML_CUDA_CC_IS_MTHREADS(cc) && cc >= GGML_CUDA_CC_QY2);
 }
+
 
 // Any FP16 tensor core instructions are available for ggml code.
 static bool fp16_mma_available(const int cc) {
@@ -290,10 +310,16 @@ static bool fp32_mma_hardware_available(const int cc) {
 
 // Volta technically had FP16 tensor cores but they work very differently compared to Turing and later.
 static bool new_mma_available(const int cc) {
+    #if defined(GGML_USE_DLCU)
+        return false;
+    #endif
     return GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_TURING;
 }
 
 static bool cp_async_available(const int cc) {
+    #if defined(GGML_USE_DLCU)
+        return false;
+    #endif
     return cc < GGML_CUDA_CC_OFFSET_AMD && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_AMPERE;
 }
 
@@ -511,7 +537,7 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 
 #else // defined(GGML_USE_HIP) && defined(__HIP_PLATFORM_AMD__)
 
-#if __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
+#if (__CUDA_ARCH__ >= GGML_CUDA_CC_DP4A and !defined(GGML_USE_DLCU))|| defined(GGML_USE_MUSA)
     return __dp4a(a, b, c);
 #else // __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
     const int8_t * a8 = (const int8_t *) &a;
@@ -765,8 +791,11 @@ struct ggml_tensor_extra_gpu {
 };
 
 
-#if (defined(GGML_CUDA_USE_GRAPHS) || defined(GGML_HIP_GRAPHS))
+#if ((CUDART_VERSION >= 12000) && defined(GGML_CUDA_USE_GRAPHS)) || defined(GGML_HIP_GRAPHS)
+#if (!defined(GGML_USE_DLCU))
 #define USE_CUDA_GRAPH
+#endif
+
 #endif
 
 struct ggml_graph_node_properties {

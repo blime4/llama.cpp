@@ -35,7 +35,7 @@ static  __global__ void pool2d_nchw_kernel(
 
     for (int i = bh; i < eh; i += 1) {
         for (int j = bw; j < ew; j += 1) {
-#if __CUDA_ARCH__ >= 350
+#if __CUDA_ARCH__ >= 350 and !defined(GGML_USE_DLCU)
             Ti cur = __ldg(i_ptr + i * iw + j);
 #else
             Ti cur = i_ptr[i * iw + j];
