@@ -1,7 +1,6 @@
 set -e
 env
 source ${SDK_WORKSPACE}/sdk/env.sh
-source env.sh
 env
 
 ccache --set-config cache_dir=/LocalRun/$(whoami)/cache/llama_cpp_ccache
@@ -87,9 +86,14 @@ cmake -G Ninja -B ../build \
     -DGGML_CUDA_GRAPHS=OFF \
     -DLLAMA_CURL=OFF \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-    -DGGML_CUDA_FA_ALL_QUANTS=ON \
+    -DGGML_CUDA_FA_ALL_QUANTS=OFF \
     -DSDK_DIR=${sdk}
 
 ccache --show-stats
 
-cmake --build ../build --config Release -j 12
+#cmake --build ../build --config Release -j 12
+cd ../build
+
+ninja -j 12
+
+cd -
