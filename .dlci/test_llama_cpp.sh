@@ -1,7 +1,6 @@
 set -e
 env
 source ${SDK_WORKSPACE}/sdk/env.sh
-source env.sh
 env
 
 ccache --set-config cache_dir=/LocalRun/$(whoami)/cache/llama_cpp_ccache
