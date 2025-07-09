@@ -614,10 +614,6 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
             cross_kq_mask_cnv->extra = cross_kq_mask->extra;
         }
     }
-#else
-    if (cross_kq_mask_cnv && cross_kq_mask_cnv != cross_kq_mask) {
-        cross_kq_mask_cnv->extra = cross_kq_mask->extra;
-    }
 #endif
 }
 
