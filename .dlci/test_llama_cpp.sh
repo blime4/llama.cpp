@@ -29,9 +29,13 @@ export LD_LIBRARY_PATH=${build_dir}/bin:$LD_LIBRARY_PATH
 
 chmod +x $case_file
 
-ldd $case_file | grep -q "not found"
+#ldd $case_file | grep -q "not found"
+#
+ldd $case_file
 
 cd ${build_dir}/bin
+
+ls -al ${build_dir}
 
 ./test-backend-ops
 

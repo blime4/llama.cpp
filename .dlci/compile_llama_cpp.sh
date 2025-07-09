@@ -98,4 +98,4 @@ ninja -j 12
 
 cd -
 
-echo "<> compile succed ... <>"
+echo "<> compile succeed ... <>"
