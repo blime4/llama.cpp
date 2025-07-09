@@ -20,7 +20,7 @@ stages:
 compile_llama_cpp_x86_64:
   stage: compile_llama_cpp_x86_64
   tags:
-    - llama_cpp
+    - pytorch
   script:
     - git submodule sync && git submodule update --init --recursive
     - echo "[INFO] Starting $CI_JOB_NAME stage"
@@ -32,7 +32,7 @@ compile_llama_cpp_x86_64:
 test_llama_cpp_x86_64:
   stage: test_llama_cpp_x86_64
   tags:
-    - llama_cpp
+    - pytorch
   script:
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh
