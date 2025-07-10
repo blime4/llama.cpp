@@ -6323,6 +6323,7 @@ static void usage(char ** argv) {
     printf("    --output specifies output format (default: console, options: console, sql, csv)\n");
 }
 
+#ifdef GGML_USE_DLFA
 #if defined(_WIN32)
 static void set_env_var(const char * name, const char * value) {
     _putenv_s(name, value);
@@ -6330,6 +6331,7 @@ static void set_env_var(const char * name, const char * value) {
 #else
 static void set_env_var(const char * name, const char * value) {
     setenv(name, value, 1);
+#endif
 }
 #endif
 
@@ -6392,8 +6394,10 @@ int main(int argc, char ** argv) {
         }
     }
 
+#ifdef GGML_USE_DLFA
     // Ensure GPU kernels know they are running under the backend test harness.
     set_env_var("GGML_IS_TEST", "1");
+#endif
 
     // load and enumerate backends
     ggml_backend_load_all();
