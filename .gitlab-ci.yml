@@ -1,6 +1,7 @@
 variables:
   PAGES_BRANCH: "gh-pages"
   SDK_TAG: V2_SOFTWARE_master_202506262155
+  REPO_PATH: "${CI_PROJECT_DIR}"
   SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
   DOCKER_IMAGE_COMPILE: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
@@ -10,7 +11,7 @@ variables:
   DOCKER_ENVS=()
   while IFS='=' read -r key value; do
     DOCKER_ENVS+=(--env "${key}=${value}")
-  done < <(env | grep -E '^(SDK_|CI_|sdk_)')
+  done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH)')
 
 stages:
   - compile_llama_cpp_x86_64

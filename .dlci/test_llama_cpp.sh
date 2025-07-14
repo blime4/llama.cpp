@@ -8,7 +8,9 @@ ccache --set-config max_size=20G
 ccache --zero-stats
 
 # --- test-backend-ops ---
-build_dir=$(pwd)/../build
+echo "[INFO] REPO_PATH: ${REPO_PATH}"
+cd ${REPO_PATH}
+build_dir=$(pwd)/build
 
 if [ ! -d "${build_dir}" ]; then
     echo "[ERROR] $build_dir is not exist ..."
