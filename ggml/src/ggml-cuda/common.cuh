@@ -247,10 +247,6 @@ typedef float2 dfloat2;
 #undef NEW_MMA_AVAILABLE
 #endif
 
-#if defined(CP_ASYNC_AVAILABLE)
-#undef CP_ASYNC_AVAILABLE
-#endif
-
 #if defined(FLASH_ATTN_AVAILABLE)
 #undef FLASH_ATTN_AVAILABLE
 #endif
@@ -317,9 +313,6 @@ static bool new_mma_available(const int cc) {
 }
 
 static bool cp_async_available(const int cc) {
-    #if defined(GGML_USE_DLCU)
-        return false;
-    #endif
     return cc < GGML_CUDA_CC_OFFSET_AMD && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_AMPERE;
 }
 
