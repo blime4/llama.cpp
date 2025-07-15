@@ -35,11 +35,22 @@ chmod +x $case_file
 #
 ldd $case_file
 
-cd ${build_dir}/bin
+cd ${build_dir}
 
-ls -al ${build_dir}
-
-./test-backend-ops
+./bin/test-arg-parser
+./bin/test-c
+./bin/test-gguf
+./bin/test-grammar-parser
+./bin/test-sampling
+./bin/test-llama-grammar
+./bin/test-log
+./bin/test-chat-parser
+./bin/test-chat-template
+./bin/test-grammar-integration
+./bin/test-json-partial
+./bin/test-mtmd-c-api
+./bin/test-regex-partial
+./bin/test-backend-ops
 
 cd -
 
