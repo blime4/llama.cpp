@@ -29,11 +29,17 @@ compile_llama_cpp_x86_64:
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+  artifacts:
+    paths:
+      - ${REPO_PATH}/build
+    expire_in: 1 day
 
 test_llama_cpp_x86_64:
   stage: test_llama_cpp_x86_64
   tags:
     - pytorch
+  dependencies:
+    - compile_llama_cpp_x86_64
   script:
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh

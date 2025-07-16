@@ -137,7 +137,7 @@ echo "Using direct docker run to ensure interactive session..."
 DOCKER_ENV_ARGS=()
 while IFS='=' read -r key value; do
     DOCKER_ENV_ARGS+=(--env "${key}=${value}")
-done < <(env | grep -E '^(SDK_|CI_|sdk_)')
+done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH)')
 
 git_email=`git config user.email || echo "example@example.com"`
 git_name=`git config user.name || echo "example"`
