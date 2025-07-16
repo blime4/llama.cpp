@@ -201,6 +201,11 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     }
 
     if (!supports_set_rows) {
+        // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+        GGML_ASSERT(unified && "cannot use non-unified KV cache without ggml_set_rows() support");
+    }
+
+    if (!supports_set_rows) {
         LLAMA_LOG_WARN("%s: LLAMA_SET_ROWS=0, using old ggml_cpy() method for backwards compatibility\n", __func__);
     }
 }
@@ -1036,10 +1041,6 @@ uint32_t llama_kv_cache_unified::get_n_kv() const {
     return result;
 }
 
-bool llama_kv_cache_unified::get_supports_set_rows() const {
-    return supports_set_rows;
-}
-
 ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
 
@@ -1280,6 +1281,20 @@ void llama_kv_cache_unified::set_input_k_shift(ggml_tensor * dst) const {
     }
 }
 
+void llama_kv_cache_unified::set_input_k_shift(ggml_tensor * dst) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+
+    int32_t * data = (int32_t *) dst->data;
+
+    for (uint32_t s = 0; s < n_stream; ++s) {
+        const auto & cells = v_cells[s];
+
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            data[i] = cells.is_empty(i) ? 0 : cells.get_shift(i);
+        }
+    }
+}
+
 void llama_kv_cache_unified::set_input_kq_mask(
         ggml_tensor * dst,
         const llama_ubatch * ubatch,
@@ -1298,9 +1313,6 @@ void llama_kv_cache_unified::set_input_kq_mask(
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
     float * data = (float *) dst->data;
 
-#ifdef GGML_USE_DLFA
-    size_t unmasked_last_row = 0;
-#endif
     const int64_t n_kv     = dst->ne[0];
     const int64_t n_stream = dst->ne[3]; // num streams in the current ubatch
 
@@ -1313,8 +1325,6 @@ void llama_kv_cache_unified::set_input_kq_mask(
     #else
     const int64_t n_tps_pad = GGML_PAD( ubatch->n_tokens/n_stream, GGML_KQ_MASK_PAD);
     #endif
-
-    std::fill(data, data + ggml_nelements(dst), -INFINITY);
 
     // Use only the previous KV cells of the correct sequence for each token of the ubatch.
     // It's assumed that if a token in the batch has multiple sequences, they are equivalent.
@@ -1340,73 +1350,51 @@ void llama_kv_cache_unified::set_input_kq_mask(
 
                 const llama_pos p1 = ubatch->pos[i];
 
-                const uint64_t idst = n_kv*(h*n_stream*n_tps_pad + s*n_tps_pad + ii);
-
                 for (uint32_t j = 0; j < n_kv; ++j) {
+                    float f = 0.0f;
+
+                    bool masked = false;
+
                     if (cells.is_empty(j)) {
-                        continue;
+                        masked = true;
+                    } else {
+                        const llama_pos p0 = cells.pos_get(j);
+
+                        // mask the token if not the same sequence
+                        masked = masked || (!cells.seq_has(j, seq_id));
+
+                        // mask future tokens
+                        masked = masked || (causal_attn && p0 > p1);
+
+                        // apply SWA if any
+                        masked = masked || (is_masked_swa(p0, p1));
+
+                        if (!masked && hparams.use_alibi) {
+                            f = -std::abs(p0 - p1);
+                        }
                     }
 
-                    // mask the token if not the same sequence
-                    if (!cells.seq_has(j, seq_id)) {
-                        continue;
+                    if (masked) {
+                        f = -INFINITY;
                     }
 
-                    const llama_pos p0 = cells.pos_get(j);
-
-                    // mask future tokens
-                    if (causal_attn && p0 > p1) {
-                        continue;
-                    }
-
-                    // apply SWA if any
-                    if (is_masked_swa(p0, p1)) {
-                        continue;
-                    }
-#ifdef GGML_USE_DLFA
-                    else if (i == n_tokens - 1) {
-                        // Only count unmasked cells for the last row (latest token)
-                        unmasked_last_row++;
-                    }
-#endif
-
-                    data[idst + j] = hparams.use_alibi ? -std::abs(p0 - p1) : 0.0f;
+                    data[h*n_stream*n_tps_pad*n_kv + s*n_tps_pad*n_kv + ii*n_kv + j] = f;
                 }
-            }
-        }
-    }
-    // const bool is_prefill = n_tokens > 1;
-    // LLAMA_LOG_INFO(
-    //         "%s: phase=%s n_tokens=%u n_kv=%lld last_row_unmasked=%zu\n",
-    //         __func__,
-    //         is_prefill ? "PREFILL" : "DECODE ",
-    //         n_tokens,
-    //         (long long) n_kv,
-    //         unmasked_last_row);
 
-#ifdef GGML_USE_DLFA
-    if (out_info != nullptr) {
-        ggml_flash_attn_mask_params info{};
-        info.present          = true;
-        info.is_causal        = causal_attn;
-        info.window_right     = causal_attn ? 0 : -1;
-        info.window_left      = (swa_type == LLAMA_SWA_TYPE_STANDARD && n_swa > 0)
-                                    ? (int32_t) n_swa - 1
-                                    : -1;
-        info.per_token_window = (swa_type == LLAMA_SWA_TYPE_CHUNKED);
-
-        bool multi_seq = (ubatch->n_seqs_unq > 1);
-        for (uint32_t i = 0; i < n_tokens && !multi_seq; ++i) {
-            if (ubatch->n_seq_id[i] > 1) {
-                multi_seq = true;
+                // mask padded tokens
+                if (data) {
+                    for (uint32_t ii = n_tps; ii < n_tps_pad; ++ii) {
+                        for (uint32_t j = 0; j < n_kv; ++j) {
+                            data[h*n_stream*n_tps_pad*n_kv + s*n_tps_pad*n_kv + ii*n_kv + j] = -INFINITY;
+                        }
+                    }
+                }
             }
         }
         info.multi_sequence = multi_seq;
         info.has_alibi_bias = hparams.use_alibi;
         *out_info = info;
     }
-    dst->extra = nullptr;
-#endif
 }
 
 void llama_kv_cache_unified::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
@@ -1582,6 +1570,10 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
         const defrag_info & dinfo) const {
     auto * ctx = res->get_ctx();
     auto * gf  = res->get_gf();
+
+    GGML_ASSERT(n_stream == 1 && "n_stream > 1 does not support defrag");
+
+    const auto & cells = v_cells[0];
 
     GGML_ASSERT(n_stream == 1 && "n_stream > 1 does not support defrag");
 

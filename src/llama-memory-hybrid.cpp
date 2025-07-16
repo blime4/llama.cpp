@@ -41,6 +41,7 @@ llama_memory_hybrid::llama_memory_hybrid(
         1,
         kv_size,
         n_seq_max,
+        1,
         n_pad,
         n_swa,
         swa_type

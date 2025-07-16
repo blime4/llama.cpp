@@ -34,10 +34,6 @@ struct llama_cparams {
     bool warmup;
     bool op_offload;
     bool kv_unified;
-#ifdef GGML_USE_DLCU
-    bool use_fp16;
-    bool ops_fusion;
-#endif  // GGML_USE_DLCU
 
     enum llama_pooling_type pooling_type;
 
