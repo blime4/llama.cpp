@@ -26,7 +26,7 @@ else
 fi
 
 # Set up PATH for build/bin commands
-BUILD_BIN_PATH="$(pwd)/build/bin"
+BUILD_BIN_PATH="/workspace/build/bin"
 if [ -d "$BUILD_BIN_PATH" ]; then
     echo "Adding $BUILD_BIN_PATH to PATH..."
     export PATH="$BUILD_BIN_PATH:$PATH"
@@ -73,6 +73,7 @@ else
     echo "[WARNING] Alias file $ALIAS_FILE not found."
 fi
 
+export REPO_PATH="/workspace"
 
 echo ""
 echo "Environment setup complete! You can now use llama.cpp commands."

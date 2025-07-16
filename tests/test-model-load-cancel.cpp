@@ -15,6 +15,7 @@ int main(int argc, char *argv[] ) {
     fclose(file);
 
     llama_backend_init();
+    ggml_backend_load_all(); // DL : load a backend before calling llama_model_load_from_file
     auto params = llama_model_params{};
     params.use_mmap = false;
     params.progress_callback = [](float progress, void * ctx){

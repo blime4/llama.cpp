@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+# ---------- ci/cd ----------
 env
 source "${SDK_WORKSPACE}/sdk/env.sh"
 env
@@ -9,9 +10,11 @@ ccache_dir="/LocalRun/$(whoami)/cache/llama_cpp_ccache"
 ccache --set-config cache_dir="${ccache_dir}"
 ccache --set-config max_size=20G
 ccache --zero-stats
+# ---------- ci/cd ----------
 
 # Enter repository directory
 echo "[INFO] REPO_PATH: ${REPO_PATH}"
+echo "[INFO] LOCAL_MODEL_PATH: ${LOCAL_MODEL_PATH}"
 cd "${REPO_PATH}"
 build_dir="$(pwd)/build"
 
@@ -27,49 +30,80 @@ export PATH="${build_dir}/bin:$PATH"
 export LD_LIBRARY_PATH="${build_dir}/bin:$LD_LIBRARY_PATH"
 
 # Enter build directory and run all test cases
-cd "${build_dir}"
+cd "${build_dir}/bin"
 
-test_bins=(
-    ./bin/test-arg-parser
-    ./bin/test-c
-    ./bin/test-gguf
-    ./bin/test-grammar-parser
-    ./bin/test-sampling
-    ./bin/test-llama-grammar
-    ./bin/test-log
-    ./bin/test-chat-parser
-    ./bin/test-chat-template
-    ./bin/test-grammar-integration
-    ./bin/test-json-partial
-    ./bin/test-mtmd-c-api
-    ./bin/test-regex-partial
-    ./bin/test-backend-ops
-    ./bin/test-arg-parser
-    ./bin/test-autorelease
+# basic tests
+test_cases_part1=(
+    "test-arg-parser"
+    "test-autorelease"
+    "test-backend-ops"
+    "test-c"
+    "test-chat"
+    "test-chat-parser"
+    "test-chat-template"
+    # "test-gbnf-validator"         # TODO: fix it
+    "test-gguf"
+    "test-grammar-integration"
+    "test-grammar-parser"
+    "test-json-partial"
+    # "test-json-schema-to-grammar" # TODO: fix it
+    "test-llama-grammar"
+    "test-log"
+    "test-model-load-cancel"
+    "test-mtmd-c-api"
+    "test-regex-partial"
+    "test-sampling"
+    "test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+)
+
+# tokenizer tests
+test_cases_part2=(
+    # "test-tokenizer-1-bpe ../../models/ggml-vocab-llama-bpe.gguf" # TODO: fix it
+    # "test-tokenizer-1-spm ../../models/ggml-vocab-llama-spm.gguf" # TODO: fix it
+)
+
+# Function to auto-discover vocab test cases
+add_tokenizer_vocab_tests() {
+    for vocab in ../../models/*.gguf; do
+        inp="${vocab}.inp"
+        out="${vocab}.out"
+        if [[ -f "$inp" && -f "$out" ]]; then
+            test_cases_part2+=("test-tokenizer-0 $vocab")
+        fi
+    done
+}
+
+add_tokenizer_vocab_tests
+
+test_cases=(
+    "${test_cases_part1[@]}"
+    "${test_cases_part2[@]}"
 )
 
 fail_count=0
 fail_list=()
 
-for test_bin in "${test_bins[@]}"; do
+for test_case in "${test_cases[@]}"; do
+    # Get the executable name (first word)
+    test_bin=$(echo "$test_case" | awk '{print $1}')
     if [ ! -x "$test_bin" ]; then
         echo "[LLAMA_CPP_FAIL] $test_bin does not exist or is not executable, skipping"
         fail_count=$((fail_count+1))
-        fail_list+=("$test_bin (not found or not executable)")
+        fail_list+=("$test_case (not found or not executable)")
         continue
     fi
-    echo "Running: $test_bin"
+    echo "Running: $test_case"
     start_time=$(date +%s)
-    "$test_bin"
+    eval $test_case
     ret=$?
     end_time=$(date +%s)
     duration=$((end_time - start_time))
     if [ $ret -eq 0 ]; then
-        echo "[LLAMA_CPP_PASS] Test $test_bin succeeded, duration: ${duration} seconds"
+        echo "[LLAMA_CPP_PASS] Test $test_case succeeded, duration: ${duration} seconds"
     else
-        echo "[LLAMA_CPP_FAIL] Test $test_bin failed, duration: ${duration} seconds, exit code $ret"
+        echo "[LLAMA_CPP_FAIL] Test $test_case failed, duration: ${duration} seconds, exit code $ret"
         fail_count=$((fail_count+1))
-        fail_list+=("$test_bin (exit code $ret)")
+        fail_list+=("$test_case (exit code $ret)")
     fi
     echo "-----------------------------"
 done

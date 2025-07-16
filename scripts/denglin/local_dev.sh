@@ -10,6 +10,7 @@ show_help() {
     echo "Options:"
     echo "  -t, --sdk-tag TAG    Set SDK_TAG (default: $DEFAULT_SDK_TAG)"
     echo "  -c, --compile        Compile llama.cpp before entering docker"
+    echo "  -cc, --re-compile    Re-compile (clean and build) llama.cpp before entering docker"
     echo "  -h, --help           Show this help message"
     echo ""
     echo "Examples:"
@@ -22,6 +23,7 @@ show_help() {
 # Parse command line arguments
 SDK_TAG="$DEFAULT_SDK_TAG"
 COMPILE_FIRST=false
+RE_COMPILE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -30,6 +32,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -c|--compile)
+            COMPILE_FIRST=true
+            shift
+            ;;
+        -cc|--re-compile)
+            RE_COMPILE=true
             COMPILE_FIRST=true
             shift
             ;;
@@ -48,11 +55,13 @@ done
 echo "=== Local Development Environment ==="
 echo "SDK_TAG: $SDK_TAG"
 echo "Compile first: $COMPILE_FIRST"
+echo "Re-compile: $RE_COMPILE"
 
 # Set environment variables
 export SDK_TAG="$SDK_TAG"
 export LOCAL_BUILDS_DIR="/tmp/local_builds"
 export REPO_PATH="$(cd "$(dirname "$0")/../.." && pwd)"
+export LOCAL_MODEL_PATH="/models"
 export SDK_WORKSPACE="${LOCAL_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
 export DOCKER_REPO_PATH="${LOCAL_BUILDS_DIR}/sdk_llama_cpp/docker"
 export DOCKER_IMAGE_COMPILE="ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
@@ -85,16 +94,23 @@ fi
 
 # Step 4: Prepare docker environment variables
 echo "[Step 4] Preparing docker environment variables..."
+export git_email=`git config user.email || echo "example@example.com"`
+export git_name=`git config user.name || echo "example"`
 DOCKER_ENVS=()
 while IFS='=' read -r key value; do
     DOCKER_ENVS+=(--env "${key}=${value}")
-done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH)')
+done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH|git_)')
 
 echo "Number of Docker environment variables: ${#DOCKER_ENVS[@]}"
 
 # Step 5: Compile if requested
 if [ "$COMPILE_FIRST" = true ]; then
     echo "[Step 5] Compiling llama.cpp first..."
+    if [ "$RE_COMPILE" = true ]; then
+        echo "[Step 5] Cleaning local build cache..."
+        rm -rf "${REPO_PATH}/build"
+    fi
+
     if [ ! -f "../../.dlci/compile_llama_cpp.sh" ]; then
         echo "[ERROR] Cannot find ../../.dlci/compile_llama_cpp.sh script"
         exit 1
@@ -122,7 +138,6 @@ echo "Available commands:"
 echo "  - llama-cli --help"
 echo "  - llama-server --help"
 echo "  - llama-bench --help"
-echo "  - ninja -j 12 (to recompile)"
 echo "  - exit (to leave docker)"
 echo ""
 
@@ -133,26 +148,15 @@ cd ../..
 echo "Entering docker container for interactive development..."
 echo "Using direct docker run to ensure interactive session..."
 
-# Set up environment variables for docker
-DOCKER_ENV_ARGS=()
-while IFS='=' read -r key value; do
-    DOCKER_ENV_ARGS+=(--env "${key}=${value}")
-done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH)')
-
-git_email=`git config user.email || echo "example@example.com"`
-git_name=`git config user.name || echo "example"`
-
 # Use exec to replace current shell with docker bash
 exec docker run --rm -it                                   \
     --runtime=dlrt -e DENGLIN_DEVICES=all                  \
     -v "$(pwd):/workspace"                                 \
     -v "${sdk_path}:/sdk_path"                             \
     -v /mars/aebox/LLM/model:/models                       \
-    --env git_email="$git_email"                           \
-    --env git_name="$git_name"                             \
     -w /workspace                                          \
     --network host                                         \
-    "${DOCKER_ENV_ARGS[@]}"                                \
+    "${DOCKER_ENVS[@]}"                                    \
     "${DOCKER_IMAGE_COMPILE}"                              \
     /bin/bash
 

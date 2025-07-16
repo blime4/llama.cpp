@@ -47,6 +47,7 @@ alias hd="cat /proc/driver/denglin0/hang_detect"
 # cd
 alias cdw="cd /workspace"
 alias cds="cd /workspace/scripts/denglin"
+alias cdb="cd /workspace/build/bin"
 
 # python
 alias p="python"
