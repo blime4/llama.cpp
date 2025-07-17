@@ -201,11 +201,6 @@ llama_kv_cache_unified::llama_kv_cache_unified(
     }
 
     if (!supports_set_rows) {
-        // ref: https://github.com/ggml-org/llama.cpp/pull/14363
-        GGML_ASSERT(unified && "cannot use non-unified KV cache without ggml_set_rows() support");
-    }
-
-    if (!supports_set_rows) {
         LLAMA_LOG_WARN("%s: LLAMA_SET_ROWS=0, using old ggml_cpy() method for backwards compatibility\n", __func__);
     }
 }
@@ -1041,6 +1036,10 @@ uint32_t llama_kv_cache_unified::get_n_kv() const {
     return result;
 }
 
+bool llama_kv_cache_unified::get_supports_set_rows() const {
+    return supports_set_rows;
+}
+
 ggml_tensor * llama_kv_cache_unified::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
 
@@ -1559,10 +1558,6 @@ ggml_cgraph * llama_kv_cache_unified::build_graph_defrag(
         const defrag_info & dinfo) const {
     auto * ctx = res->get_ctx();
     auto * gf  = res->get_gf();
-
-    GGML_ASSERT(n_stream == 1 && "n_stream > 1 does not support defrag");
-
-    const auto & cells = v_cells[0];
 
     GGML_ASSERT(n_stream == 1 && "n_stream > 1 does not support defrag");
 
