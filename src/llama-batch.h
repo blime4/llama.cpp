@@ -8,12 +8,17 @@
 #include <vector>
 #include <set>
 #include <bitset>
+#include <memory>
 #include <unordered_map>
 
 // keep this struct lightweight
-// it points to data in `llama_batch_allocr`
 struct llama_ubatch {
-    bool equal_seqs;
+    bool equal_seqs() const {
+        return b_equal_seqs != 0;
+    }
+
+    uint32_t b_equal_seqs; // note: this is a boolean, but we use an int32_t for alignment
+                           //       otherwise address sanitizer complains
     // TODO: whole_seqs for embeddings?
 
     uint32_t n_tokens;     // total tokens (n_seq_tokens * n_seqs)
@@ -52,6 +57,19 @@ struct llama_ubatch {
     // seq_id[1] → [0, 1]
     // seq_id[2] → [0]
     // DL note --------------------------------------------------
+    struct data_t {
+        std::vector<llama_token>    token;
+        std::vector<float>          embd;
+        std::vector<llama_pos>      pos;
+        std::vector<int32_t>        n_seq_id;
+        std::vector<llama_seq_id *> seq_id;
+        std::vector<llama_seq_id>   seq_id_unq;
+        std::vector<int32_t>        seq_idx;
+        std::vector<int8_t>         output;
+    };
+
+    // the llama_ubatch pointers above point to this data if set. otherwise - points to non-owning data
+    std::shared_ptr<data_t> data;
 };
 
 // a helper for sanitizing, fulfilling and splitting a batch
@@ -154,21 +172,6 @@ private:
 
     // used[i] indicates if token i has already been used in a previous ubatch
     std::vector<bool> used;
-
-    // llama_ubatch points to this data:
-    struct ubatch {
-        std::vector<llama_token>    token;
-        std::vector<float>          embd;
-        std::vector<llama_pos>      pos;
-        std::vector<int32_t>        n_seq_id;
-        std::vector<llama_seq_id *> seq_id;
-        std::vector<llama_seq_id>   seq_id_unq;
-        std::vector<int32_t>        seq_idx;
-        std::vector<int8_t>         output;
-    };
-
-    // current splitting state:
-    std::vector<ubatch> ubatches;
 
     int debug;
 };
