@@ -1,5 +1,4 @@
 variables:
-  PAGES_BRANCH: "gh-pages"
   SDK_TAG: V2_SOFTWARE_master_202506262155
   REPO_PATH: "${CI_PROJECT_DIR}"
   LOCAL_MODEL_PATH: "/mars/aebox/LLM/model"
@@ -15,46 +14,33 @@ variables:
   done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH)')
 
 stages:
-  - compile_llama_cpp_x86_64
-  - test_llama_cpp_x86_64
-  - deploy
+  - compile_and_test_llama_cpp_x86_64
+  - release_llama_cpp_x86_64
 
-compile_llama_cpp_x86_64:
-  stage: compile_llama_cpp_x86_64
+compile_and_test_llama_cpp_x86_64:
+  stage: compile_and_test_llama_cpp_x86_64
   tags:
     - pytorch
   script:
     - git submodule sync && git submodule update --init --recursive
-    - echo "[INFO] Starting $CI_JOB_NAME stage"
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh
   artifacts:
     paths:
-      - ${REPO_PATH}/build
+      - build/bin
     expire_in: 1 day
 
-test_llama_cpp_x86_64:
-  stage: test_llama_cpp_x86_64
+release_llama_cpp_x86_64:
+  stage: release_llama_cpp_x86_64
   tags:
     - pytorch
   dependencies:
-    - compile_llama_cpp_x86_64
+    - compile_and_test_llama_cpp_x86_64
+  only:
+    - /^dl-release-.*$/
   script:
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh
-
-pages:
-  stage: deploy
-  script:
-    - bash deploy-docs.sh
-  artifacts:
-    paths:
-      - public
-  only:
-    - tags
-  tags:
-    - pages
-  after_script:
-    - pwd && ls -al
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/release_llama_cpp.sh
