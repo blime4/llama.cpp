@@ -1206,28 +1206,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // aggregate experts
+    // note: here we explicitly use hparams.n_expert_used instead of n_expert_used
+    //       to avoid potentially a large number of add nodes during warmup
+    //       ref: https://github.com/ggml-org/llama.cpp/pull/14753
     ggml_tensor * moe_out = nullptr;
-#ifdef GGML_USE_DLCU
-    if (cparams.ops_fusion) {
-        if (n_expert_used == 1) {
-            moe_out = ggml_reshape_2d(ctx0, experts, n_embd, n_tokens);
-        } else {
-            moe_out = ggml_moe_sum(ctx0, experts, n_expert_used);
-        }
-    } else {
-        for (int i = 0; i < n_expert_used; ++i) {
-            ggml_tensor * cur_expert = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
-                    experts->nb[2], i*experts->nb[1]);
-
-            if (i == 0) {
-                moe_out = cur_expert;
-            } else {
-                moe_out = ggml_add(ctx0, moe_out, cur_expert);
-            }
-        }
-    }
-#else
-    for (int i = 0; i < n_expert_used; ++i) {
+    for (uint32_t i = 0; i < hparams.n_expert_used; ++i) {
         ggml_tensor * cur_expert = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
                 experts->nb[2], i*experts->nb[1]);
 
@@ -1239,7 +1222,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 #endif  // GGML_USE_DLCU
 
-    if (n_expert_used == 1) {
+    if (hparams.n_expert_used == 1) {
         // avoid returning a non-contiguous tensor
         moe_out = ggml_cont(ctx0, moe_out);
     }
