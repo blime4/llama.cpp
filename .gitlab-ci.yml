@@ -6,6 +6,7 @@ variables:
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
   DOCKER_IMAGE_COMPILE: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
   DOCKER_IMAGE_TEST: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
+  DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv_20250707"
 
 .docker_envs: &docker_envs |
   DOCKER_ENVS=()
@@ -16,6 +17,7 @@ variables:
 stages:
   - compile_and_test_llama_cpp_x86_64
   - release_llama_cpp_x86_64
+  - compile_and_test_llama_cpp_riscv64
 
 compile_and_test_llama_cpp_x86_64:
   stage: compile_and_test_llama_cpp_x86_64
@@ -28,6 +30,22 @@ compile_and_test_llama_cpp_x86_64:
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh
+  artifacts:
+    paths:
+      - build/bin
+    expire_in: 1 day
+
+compile_and_test_llama_cpp_riscv64:
+  stage: compile_and_test_llama_cpp_riscv64
+  tags:
+    - pytorch-aarch64
+  script:
+    - git submodule sync && git submodule update --init --recursive
+    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/compile_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/test_llama_cpp.sh
   artifacts:
     paths:
       - build/bin
