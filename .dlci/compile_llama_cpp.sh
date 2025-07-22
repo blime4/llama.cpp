@@ -89,7 +89,6 @@ cmake -G Ninja -B build \
     -DLLAMA_CURL=OFF \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DGGML_CUDA_FA_ALL_QUANTS=OFF \
-    -DGGML_RVV=OFF \
     -DSDK_DIR=${sdk}
 
 ccache --show-stats

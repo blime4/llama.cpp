@@ -25,16 +25,9 @@ if [[ "$ARCH" == "x86_64" ]]; then
     echo "[INFO] SDK archive already exists, skipping download"
   fi
 elif [[ "$ARCH" == "aarch64" ]]; then
-  if [[ ! -f *-kylin-arm64.tar.bz2 ]]; then
+  if [[ ! -f *-kylin-arm64.tar ]]; then
     echo "[INFO] Downloading SDK archive for aarch64: $SDK_TAG"
-    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-kylin-arm64.tar.bz2 -flat=true
-  else
-    echo "[INFO] SDK archive already exists, skipping download"
-  fi
-elif [[ "$ARCH" == "risv64" ]]; then
-  if [[ ! -f *-riscv-riscv64.tar.bz2 ]]; then
-    echo "[INFO] Downloading SDK archive for risv64: $SDK_TAG"
-    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-riscv-riscv64.tar.bz2 -flat=true
+    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-kylin-arm64.tar -flat=true
   else
     echo "[INFO] SDK archive already exists, skipping download"
   fi
@@ -49,11 +42,7 @@ if [[ "$ARCH" == "x86_64" && ! -d sdk ]]; then
   tar xf sdk.tar.bz2
 elif [[ "$ARCH" == "aarch64" && ! -d sdk ]]; then
   echo "[INFO] Extracting SDK archive for aarch64..."
-  tar xf *-kylin-arm64.tar.bz2
-  sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
-elif [[ "$ARCH" == "risv64" && ! -d sdk ]]; then
-  echo "[INFO] Extracting SDK archive for risv64..."
-  tar xf *-riscv-riscv64.tar.bz2
+  tar xf *-kylin-arm64.tar
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
 else
   echo "[INFO] SDK already extracted, skipping"
