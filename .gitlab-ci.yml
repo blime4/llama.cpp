@@ -1,11 +1,11 @@
 variables:
-  SDK_TAG: V2_SOFTWARE_master_202506262155
+  SDK_TAG: V2_SOFTWARE_master_202507212139
   REPO_PATH: "${CI_PROJECT_DIR}"
   LOCAL_MODEL_PATH: "/mars/aebox/LLM/model"
   SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
-  DOCKER_IMAGE_COMPILE: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
-  DOCKER_IMAGE_TEST: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
+  DOCKER_IMAGE_X86: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
+  DOCKER_IMAGE_AARCH64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702"
   DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv_20250707"
 
 .docker_envs: &docker_envs |
@@ -16,8 +16,11 @@ variables:
 
 stages:
   - compile_and_test_llama_cpp_x86_64
+  - compile_and_test_llama_cpp_aarch64
+  #- compile_and_test_llama_cpp_riscv64
   - release_llama_cpp_x86_64
-  - compile_and_test_llama_cpp_riscv64
+  - release_llama_cpp_aarch64
+  #- release_llama_cpp_riscv64
 
 compile_and_test_llama_cpp_x86_64:
   stage: compile_and_test_llama_cpp_x86_64
@@ -28,8 +31,24 @@ compile_and_test_llama_cpp_x86_64:
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/test_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
+  artifacts:
+    paths:
+      - build/bin
+    expire_in: 1 day
+
+compile_and_test_llama_cpp_aarch64:
+  stage: compile_and_test_llama_cpp_aarch64
+  tags:
+    - pytorch-aarch64
+  script:
+    - git submodule sync && git submodule update --init --recursive
+    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
   artifacts:
     paths:
       - build/bin
@@ -38,7 +57,7 @@ compile_and_test_llama_cpp_x86_64:
 compile_and_test_llama_cpp_riscv64:
   stage: compile_and_test_llama_cpp_riscv64
   tags:
-    - pytorch-aarch64
+    - pytorch-riscv64
   script:
     - git submodule sync && git submodule update --init --recursive
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
@@ -61,7 +80,7 @@ release_llama_cpp_x86_64:
     - /^dl-release-.*$/
   script:
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_TEST}" ./.dlci/release_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
   release:
     tag_name: "${CI_COMMIT_TAG}"
     name: "Release ${CI_COMMIT_TAG}"
@@ -72,5 +91,53 @@ release_llama_cpp_x86_64:
     ref: "${CI_COMMIT_SHA}"
     assets:
       links:
-        - name: "llama-${CI_COMMIT_TAG}-bin-ubuntu-x64.zip"
-          url: "http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp/llama-${CI_COMMIT_TAG}-bin-ubuntu-x64.zip"
+        - name: "llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-x86_64.zip"
+          url: "http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp/llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-x86_64.zip"
+
+release_llama_cpp_aarch64:
+  stage: release_llama_cpp_aarch64
+  tags:
+    - pytorch-aarch64
+  dependencies:
+    - compile_and_test_llama_cpp_aarch64
+  only:
+    - /^dl-release-.*$/
+  script:
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
+  release:
+    tag_name: "${CI_COMMIT_TAG}"
+    name: "Release ${CI_COMMIT_TAG}"
+    description: |
+      Release ${CI_COMMIT_TAG}
+      This release contains the following submissions:
+      ${CI_PROJECT_DIR:+$(git log $(git describe --tags --abbrev=0 --match "dl-release*" HEAD^)..HEAD --pretty=format:"%s")}
+    ref: "${CI_COMMIT_SHA}"
+    assets:
+      links:
+        - name: "llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-aarch64.zip"
+          url: "http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp/llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-aarch64.zip"
+
+release_llama_cpp_riscv64:
+  stage: release_llama_cpp_riscv64
+  tags:
+    - pytorch-riscv64
+  dependencies:
+    - compile_and_test_llama_cpp_riscv64
+  only:
+    - /^dl-release-.*$/
+  script:
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/release_llama_cpp.sh
+  release:
+    tag_name: "${CI_COMMIT_TAG}"
+    name: "Release ${CI_COMMIT_TAG}"
+    description: |
+      Release ${CI_COMMIT_TAG}
+      This release contains the following submissions:
+      ${CI_PROJECT_DIR:+$(git log $(git describe --tags --abbrev=0 --match "dl-release*" HEAD^)..HEAD --pretty=format:"%s")}
+    ref: "${CI_COMMIT_SHA}"
+    assets:
+      links:
+        - name: "llama-${CI_COMMIT_TAG}-bin-ubuntu-riscv64.zip"
+          url: "http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp/llama-${CI_COMMIT_TAG}-bin-ubuntu-riscv64.zip"
