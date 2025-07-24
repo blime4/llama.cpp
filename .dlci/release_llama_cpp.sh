@@ -18,19 +18,20 @@ mkdir -p release
 if [ -d "${REPO_PATH}/build/bin" ]; then
     echo "[INFO] Copying release files from build/bin"
     find "${REPO_PATH}/build/bin" -type f ! -name "test*" -exec cp {} release/ \;
-    
+
     echo "[INFO] Files to be released:"
     ls -la release/
-    
+
     echo "Release Version: ${CI_COMMIT_TAG}" > release/version.txt
     echo "Build Date: $(date)" >> release/version.txt
     echo "Commit SHA: ${CI_COMMIT_SHA}" >> release/version.txt
     echo "Build Platform: x86" >> release/version.txt
     echo "Architecture: $(uname -m)" >> release/version.txt
-    
-    RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-ubuntu-x64.zip"
+
+    ARCH=${uname -m}
+    RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-${ARCH}.zip"
     zip -r "${RELEASE_NAME}" release/*
-    
+
     echo "[INFO] Release package created: ${RELEASE_NAME}"
     ls -la "${RELEASE_NAME}"
 
@@ -40,4 +41,4 @@ if [ -d "${REPO_PATH}/build/bin" ]; then
 else
     echo "[ERROR] build/bin directory not found at ${REPO_PATH}/build/bin"
     exit 1
-fi 
+fi
