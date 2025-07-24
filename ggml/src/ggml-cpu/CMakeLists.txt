@@ -154,6 +154,7 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
                 check_arm_feature(sme     "#include <arm_sme.h>\n__arm_locally_streaming int main() { __asm__ volatile(\"smstart; smstop;\"); return 0; }")
 
                 list(APPEND ARCH_FLAGS "${ARM_MCPU_FLAG}${ARM_MCPU_FLAG_FIX}")
+                ggml_add_cpu_backend_features(${GGML_CPU_NAME} arm "")
             else()
                 if (GGML_CPU_ARM_ARCH)
                     list(APPEND ARCH_FLAGS -march=${GGML_CPU_ARM_ARCH})
@@ -200,14 +201,6 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
                     endif()
                     list(APPEND ARCH_FLAGS "-march=${ARM_MCPU}${ARCH_TAGS}")
                     ggml_add_cpu_backend_features(${GGML_CPU_NAME} arm ${ARCH_DEFINITIONS})
-                endif()
-            endif()
-
-            if(GGML_BACKEND_DL AND GGML_SYSTEM_ARCH STREQUAL "ARM")
-                # Only add if not already added above
-                if(NOT TARGET ${GGML_CPU_NAME}-feats)
-                    message(STATUS "Adding ARM cpu-feats as fallback for ${GGML_CPU_NAME}")
-                    ggml_add_cpu_backend_features(${GGML_CPU_NAME} arm "")
                 endif()
             endif()
 
