@@ -203,6 +203,14 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
                 endif()
             endif()
 
+            if(GGML_BACKEND_DL AND GGML_SYSTEM_ARCH STREQUAL "ARM")
+                # Only add if not already added above
+                if(NOT TARGET ${GGML_CPU_NAME}-feats)
+                    message(STATUS "Adding ARM cpu-feats as fallback for ${GGML_CPU_NAME}")
+                    ggml_add_cpu_backend_features(${GGML_CPU_NAME} arm "")
+                endif()
+            endif()
+
             # show enabled features
             if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
                 set(FEAT_INPUT_FILE "NUL")
