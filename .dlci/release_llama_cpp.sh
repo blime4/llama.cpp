@@ -28,7 +28,7 @@ if [ -d "${REPO_PATH}/build/bin" ]; then
     echo "Build Platform: x86" >> release/version.txt
     echo "Architecture: $(uname -m)" >> release/version.txt
 
-    ARCH=${uname -m}
+    ARCH=$(uname -m)
     RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-${ARCH}.zip"
     zip -r "${RELEASE_NAME}" release/*
 
