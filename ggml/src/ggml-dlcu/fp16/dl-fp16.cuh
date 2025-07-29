@@ -14,3 +14,4 @@ void rms_norm_mul_f16_cuda(
 
 void scale_f16_cuda(const half * x, half * dst, const float scale, const float bias, const int k, cudaStream_t stream);
 
+void softcap_f16_cuda(const half * x, half * dst, const float scale, const float softcap, const int k, cudaStream_t stream);
