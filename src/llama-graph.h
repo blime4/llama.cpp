@@ -147,7 +147,7 @@ public:
 
     ggml_tensor * pos_bucket = nullptr; // I32 [n_batch, n_batch]
 
-    const llama_hparams & hparams;
+    const llama_hparams hparams;
 };
 
 class llm_graph_input_pos_bucket_kv : public llm_graph_input_i {
@@ -161,7 +161,7 @@ public:
 
     ggml_tensor * pos_bucket = nullptr; // I32 [n_kv, n_batch]
 
-    const llama_hparams & hparams;
+    const llama_hparams hparams;
 
     const llama_kv_cache_unified_context * mctx;
 };
@@ -180,8 +180,8 @@ public:
 
     ggml_tensor * out_ids; // I32 [n_outputs]
 
-    const llama_hparams & hparams;
-    const llama_cparams & cparams;
+    const llama_hparams hparams;
+    const llama_cparams cparams;
 
     const uint32_t n_outputs;
 };
@@ -195,7 +195,7 @@ public:
 
     ggml_tensor * mean; // F32 [n_batch, n_batch]
 
-    const llama_cparams & cparams;
+    const llama_cparams cparams;
 };
 
 class llm_graph_input_cls : public llm_graph_input_i {
@@ -207,7 +207,7 @@ public:
 
     ggml_tensor * cls; // I32 [n_batch]
 
-    const llama_cparams & cparams;
+    const llama_cparams cparams;
 };
 
 class llm_graph_input_rs : public llm_graph_input_i {
@@ -259,8 +259,8 @@ public:
     ggml_tensor * kq_mask     = nullptr; // F32 [n_tokens, n_batch, 1, 1]
     ggml_tensor * kq_mask_cnv = nullptr; //     [n_tokens, n_batch, 1, 1]
 
-    const llama_hparams & hparams;
-    const llama_cparams & cparams;
+    const llama_hparams hparams;
+    const llama_cparams cparams;
 };
 
 class llm_graph_input_attn_kv_unified : public llm_graph_input_masked {
@@ -290,8 +290,11 @@ public:
     ggml_tensor * self_kq_mask     = nullptr; // F32 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_cnv = nullptr; //     [n_kv, n_batch/n_stream, 1, n_stream]
 
-    const llama_hparams & hparams;
-    const llama_cparams & cparams;
+    // note: these have to be copies because in order to be able to reuse a graph, its inputs
+    //       need to carry these parameters with them. otherwise, they can point to freed
+    //       llm_graph_params from a previous batch, causing stack-use-after-return
+    const llama_hparams hparams;
+    const llama_cparams cparams;
 
     const llama_kv_cache_unified_context * mctx;
 };
@@ -330,8 +333,8 @@ public:
     ggml_tensor * self_kq_mask_swa     = nullptr; // F32 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_swa_cnv = nullptr; //     [n_kv, n_batch/n_stream, 1, n_stream]
 
-    const llama_hparams & hparams;
-    const llama_cparams & cparams;
+    const llama_hparams hparams;
+    const llama_cparams cparams;
 
     const llama_kv_cache_unified_iswa_context * mctx;
 };
