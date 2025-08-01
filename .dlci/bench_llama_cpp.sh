@@ -177,15 +177,14 @@ echo "" | tee -a "$summary_log"
 
 # Run benchmark
 echo "[INFO] Starting llama-bench..." | tee -a "$summary_log"
-echo "[INFO] Command: QWEN_USE_FP16=1 ${build_dir_bin}/llama-bench -m \"$MODEL_PATH\" -ngl $GPU_LAYERS --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1" | tee -a "$summary_log"
+echo "[INFO] Command: LLAMA_SET_ROWS=1 QWEN_USE_FP16=1 ${build_dir_bin}/llama-bench -m \"$MODEL_PATH\" -ngl $GPU_LAYERS --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1" | tee -a "$summary_log"
 echo "" | tee -a "$summary_log"
 echo "-----------------------------" | tee -a "$bench_log"
 
 start_time=$(date +%s)
 set +e
 
-# Run benchmark with QWEN_USE_FP16=1 and additional parameters
-QWEN_USE_FP16=1 "${build_dir_bin}/llama-bench" -m "$MODEL_PATH" -ngl "$GPU_LAYERS" --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1 2>&1 | tee -a "$bench_log"
+LLAMA_SET_ROWS=1 QWEN_USE_FP16=1 "${build_dir_bin}/llama-bench" -m "$MODEL_PATH" -ngl "$GPU_LAYERS" --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1 2>&1 | tee -a "$bench_log"
 ret=$?
 
 set -e
@@ -202,12 +201,12 @@ if [ $ret -eq 0 ]; then
 else
     echo "[ERROR] Benchmark failed with exit code: $ret" | tee -a "$summary_log"
     echo "[ERROR] Duration: ${duration}s" | tee -a "$summary_log"
-    
+
     if [ -f "$bench_log" ]; then
         echo "[ERROR] Last 50 lines of benchmark output:" | tee -a "$summary_log"
         tail -n 50 "$bench_log" | tee -a "$summary_log"
     fi
-    
+
     exit $ret
 fi
 

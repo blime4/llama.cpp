@@ -152,6 +152,15 @@ llama_context::llama_context(
         }
     }
 
+    {
+        const char * LLAMA_GRAPH_REUSE_DISABLE = getenv("LLAMA_GRAPH_REUSE_DISABLE");
+        graph_reuse_disable = LLAMA_GRAPH_REUSE_DISABLE ? (atoi(LLAMA_GRAPH_REUSE_DISABLE) != 0) : graph_reuse_disable;
+
+        if (graph_reuse_disable) {
+            LLAMA_LOG_WARN("%s: graph reuse disabled\n", __func__);
+        }
+    }
+
     const uint32_t n_ctx_per_seq = cparams.n_ctx / cparams.n_seq_max;
 
     LLAMA_LOG_INFO("%s: n_seq_max     = %u\n",   __func__, cparams.n_seq_max);
@@ -841,7 +850,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // t_params_ms = (ggml_time_us() - t_params_start_us) / 1000.0;
 
     // const auto t_reuse_start_us = ggml_time_us();
-    if (res->can_reuse(gparams)) {
+    if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         n_reused++;
