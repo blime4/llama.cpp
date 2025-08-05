@@ -26,53 +26,48 @@ fi
 
 # Set environment variables
 export GGML_DEBUG=1
-export PATH="${build_dir}/bin:$PATH"
-export LD_LIBRARY_PATH="${build_dir}/bin:$LD_LIBRARY_PATH"
-
-# Enter build directory and run all test cases
-cd "${build_dir}/bin"
 
 # basic tests
 test_cases_part1=(
-    "test-arg-parser"
-    "test-autorelease"
-    "test-backend-ops"
-    "test-c"
-    "test-chat"
-    "test-chat-parser"
-    "test-chat-template"
-    "test-gbnf-validator ../../grammars/json.gbnf -c '{\"name\": \"Alice\", \"age\": 25}'"        # Test valid JSON
-    "test-gbnf-validator ../../grammars/json.gbnf -c '{\"name\": \"Bob\", \"age\": thirty}'"      # Test invalid JSON (should fail)
-    "test-gbnf-validator ../../grammars/arithmetic.gbnf -c 'x = 5'"                               # Test valid arithmetic
-    "test-gbnf-validator ../../grammars/arithmetic.gbnf -c 'x = 5 +'"                             # Test invalid arithmetic (should fail)
-    "test-gbnf-validator ../../grammars/list.gbnf -c '- First item\n- Second item\n'"
-    "test-gguf"
-    "test-grammar-integration"
-    "test-grammar-parser"
-    "test-json-partial"
-    # "test-json-schema-to-grammar" # TODO: fix it
-    "test-llama-grammar"
-    "test-log"
-    "test-model-load-cancel"
-    "test-mtmd-c-api"
-    "test-regex-partial"
-    "test-sampling"
-    "test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+    "${build_dir}/bin/test-arg-parser"
+    "${build_dir}/bin/test-autorelease"
+    "${build_dir}/bin/test-backend-ops"
+    "${build_dir}/bin/test-c"
+    "${build_dir}/bin/test-chat"
+    "${build_dir}/bin/test-chat-parser"
+    "${build_dir}/bin/test-chat-template"
+    "${build_dir}/bin/test-gbnf-validator grammars/json.gbnf -c '{\"name\": \"Alice\", \"age\": 25}'"        # Test valid JSON
+    "${build_dir}/bin/test-gbnf-validator grammars/json.gbnf -c '{\"name\": \"Bob\", \"age\": thirty}'"      # Test invalid JSON (should fail)
+    "${build_dir}/bin/test-gbnf-validator grammars/arithmetic.gbnf -c 'x = 5'"                               # Test valid arithmetic
+    "${build_dir}/bin/test-gbnf-validator grammars/arithmetic.gbnf -c 'x = 5 +'"                             # Test invalid arithmetic (should fail)
+    "${build_dir}/bin/test-gbnf-validator grammars/list.gbnf -c '- First item\n- Second item\n'"
+    "${build_dir}/bin/test-gguf"
+    "${build_dir}/bin/test-grammar-integration"
+    "${build_dir}/bin/test-grammar-parser"
+    "${build_dir}/bin/test-json-partial"
+    "${build_dir}/bin/test-json-schema-to-grammar"
+    "${build_dir}/bin/test-llama-grammar"
+    "${build_dir}/bin/test-log"
+    "${build_dir}/bin/test-model-load-cancel"
+    "${build_dir}/bin/test-mtmd-c-api"
+    "${build_dir}/bin/test-regex-partial"
+    "${build_dir}/bin/test-sampling"
+    "${build_dir}/bin/test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
 )
 
 # tokenizer tests
 test_cases_part2=(
-    # "test-tokenizer-1-bpe ../../models/ggml-vocab-llama-bpe.gguf" # TODO: fix it
-    # "test-tokenizer-1-spm ../../models/ggml-vocab-llama-spm.gguf" # TODO: fix it
+    "${build_dir}/bin/test-tokenizer-1-bpe models/ggml-vocab-llama-bpe.gguf"
+    "${build_dir}/bin/test-tokenizer-1-spm models/ggml-vocab-llama-spm.gguf"
 )
 
 # Function to auto-discover vocab test cases
 add_tokenizer_vocab_tests() {
-    for vocab in ../../models/*.gguf; do
+    for vocab in models/*.gguf; do
         inp="${vocab}.inp"
         out="${vocab}.out"
         if [[ -f "$inp" && -f "$out" ]]; then
-            test_cases_part2+=("test-tokenizer-0 $vocab")
+            test_cases_part2+=("${build_dir}/bin/test-tokenizer-0 $vocab")
         fi
     done
 }

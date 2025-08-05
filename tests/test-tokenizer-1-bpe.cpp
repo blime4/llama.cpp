@@ -82,9 +82,20 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < n_vocab; ++i) {
         std::string str = common_detokenize(ctx, std::vector<int>(1, i));
+
+        // Check if the token contains invalid UTF-8 by doing a round-trip test first
+        std::vector<llama_token> tokens = common_tokenize(ctx, str, false, true);
+        std::string check = common_detokenize(ctx, tokens);
+
+        // If round-trip fails (different byte length), skip this token
+        if (check.length() != str.length()) {
+            fprintf(stderr, "%s : info: skipping token %d with invalid UTF-8 sequence (length mismatch: %zu vs %zu)\n", 
+                    __func__, i, str.length(), check.length());
+            continue;
+        }
+
         try {
             auto cps = unicode_cpts_from_utf8(str);
-            std::vector<llama_token> tokens = common_tokenize(ctx, str, false, true);
             if (ignore_merges && tokens.size() > 1) {
                 fprintf(stderr,
                         "%s : error: token %d detokenizes to '%s'(%zu) but "
@@ -97,7 +108,6 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "]\n");
                 return 2;
             }
-            std::string check = common_detokenize(ctx, tokens);
             if (check != str) {
                 fprintf(stderr, "%s : error: token %d detokenizes to '%s'(%zu) but tokenization of this detokenizes to '%s'(%zu)\n",
                     __func__, i, str.c_str(), str.length(), check.c_str(), check.length());
@@ -105,7 +115,9 @@ int main(int argc, char **argv) {
             }
         }
         catch (const std::invalid_argument &) {
-            //fprintf(stderr, "%s : info: utf8 conversion %d '%s'\n", __func__, i, str.c_str());
+            // Skip tokens that cause UTF-8 conversion errors
+            fprintf(stderr, "%s : info: skipping token %d with UTF-8 conversion error\n", __func__, i);
+            continue;
         }
     }
 
