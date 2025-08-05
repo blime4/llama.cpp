@@ -52,13 +52,27 @@ static void print_error_message(const std::string & input_str, size_t error_pos,
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
+    if (argc < 3 || argc > 4) {
         fprintf(stdout, "Usage: %s <grammar_filename> <input_filename>\n", argv[0]);
+        fprintf(stdout, "   or: %s <grammar_filename> -c <input_string>\n", argv[0]);
+        fprintf(stdout, "  -c: Use the next argument as direct string input instead of a file\n");
         return 1;
     }
 
     const std::string grammar_filename = argv[1];
-    const std::string input_filename = argv[2];
+    bool use_input_str = false;
+    std::string input_str;
+
+    if (argc == 4 && std::string(argv[2]) == "-c") {
+        use_input_str = true;
+        input_str = argv[3];
+    } else if (argc == 3) {
+        use_input_str = false;
+        input_str = argv[2];
+    } else {
+        fprintf(stdout, "Invalid arguments\n");
+        return 1;
+    }
 
     // Read the GBNF grammar file
     FILE* grammar_file = fopen(grammar_filename.c_str(), "r");
@@ -81,10 +95,9 @@ int main(int argc, char** argv) {
         fprintf(stdout, "Failed to initialize llama_grammar\n");
         return 1;
     }
-    // Read the input file
-    std::string input_str;
-    {
-        std::ifstream input_file(input_filename);
+    if (!use_input_str) {
+        // Read from file
+        std::ifstream input_file(input_str);
         GGML_ASSERT(input_file.is_open() && "Failed to open input file");
         std::stringstream buffer;
         buffer << input_file.rdbuf();

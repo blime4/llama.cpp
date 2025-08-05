@@ -41,7 +41,11 @@ test_cases_part1=(
     "test-chat"
     "test-chat-parser"
     "test-chat-template"
-    # "test-gbnf-validator"         # TODO: fix it
+    "test-gbnf-validator ../../grammars/json.gbnf -c '{\"name\": \"Alice\", \"age\": 25}'"        # Test valid JSON
+    "test-gbnf-validator ../../grammars/json.gbnf -c '{\"name\": \"Bob\", \"age\": thirty}'"      # Test invalid JSON (should fail)
+    "test-gbnf-validator ../../grammars/arithmetic.gbnf -c 'x = 5'"                               # Test valid arithmetic
+    "test-gbnf-validator ../../grammars/arithmetic.gbnf -c 'x = 5 +'"                             # Test invalid arithmetic (should fail)
+    "test-gbnf-validator ../../grammars/list.gbnf -c '- First item\n- Second item\n'"
     "test-gguf"
     "test-grammar-integration"
     "test-grammar-parser"
