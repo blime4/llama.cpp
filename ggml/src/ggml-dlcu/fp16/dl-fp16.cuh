@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -15,3 +17,29 @@ void rms_norm_mul_f16_cuda(
 void scale_f16_cuda(const half * x, half * dst, const float scale, const float bias, const int k, cudaStream_t stream);
 
 void softcap_f16_cuda(const half * x, half * dst, const float scale, const float softcap, const int k, cudaStream_t stream);
+
+struct soft_max_params {
+
+    int64_t nheads;
+    uint32_t n_head_log2;
+    int64_t ncols;
+    int64_t nrows_x;
+    int64_t nrows_y;
+    int64_t ne00;
+    int64_t ne01;
+    int64_t ne02;
+    int64_t ne03;
+    int64_t nb11;
+    int64_t nb12;
+    int64_t nb13;
+
+    int64_t ne12;
+    int64_t ne13;
+    float scale;
+    float max_bias;
+    float m0;
+    float m1;
+};
+
+template<typename T>
+void soft_max_f16_cuda(const half * x, const T * mask, const float * sinks, half * dst, const soft_max_params & params, cudaStream_t stream);
