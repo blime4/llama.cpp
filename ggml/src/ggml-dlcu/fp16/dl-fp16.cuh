@@ -53,3 +53,9 @@ struct soft_max_params {
 
 template<typename T>
 void soft_max_f16_cuda(const half * x, const T * mask, const float * sinks, half * dst, const soft_max_params & params, cudaStream_t stream);
+
+template <bool norm>
+__global__ void reduce_rows_f16(const half * __restrict__ x, half * __restrict__ dst, const int ncols);
+
+void sum_rows_f16_cuda(const half * x, half * dst, const int ncols, const int nrows, cudaStream_t stream);
+

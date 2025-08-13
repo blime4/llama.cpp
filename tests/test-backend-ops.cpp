@@ -6650,6 +6650,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_sum());
     test_cases.emplace_back(new test_sum_rows());
     test_cases.emplace_back(new test_mean());
+    test_cases.emplace_back(new test_sum(GGML_TYPE_F32, { 33, 1, 1, 1 }));
+    test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F32, { 33, 1, 1, 1 }));
+    test_cases.emplace_back(new test_mean(GGML_TYPE_F32, { 33, 1, 1, 1 }));
+    test_cases.emplace_back(new test_sum(GGML_TYPE_F32, { 33, 1024, 1, 1 }));
+    test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F32, { 33, 1024, 1, 1 }));
+    test_cases.emplace_back(new test_sum(GGML_TYPE_F32, { 33, 256, 1, 1 }));
+    test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F32, { 33, 256, 1, 1 }));
+    test_cases.emplace_back(new test_mean(GGML_TYPE_F32, { 33, 256, 1, 1 }));
+    test_cases.emplace_back(new test_mean(GGML_TYPE_F32, { 32769, 1, 1, 1 }));
     test_cases.emplace_back(new test_group_norm(GGML_TYPE_F32, {64, 64, 320, 1}));
     test_cases.emplace_back(new test_group_norm(GGML_TYPE_F32, {9, 9, 1280, 1}));
     test_cases.emplace_back(new test_acc());
@@ -6659,6 +6668,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_arange());
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_leaky_relu());
+
+#ifdef GGML_USE_DLCU
+    // DL-TODO: add fp16 UT.
+    // test_cases.emplace_back(new test_sum(GGML_TYPE_F16, { 33, 1, 1, 1 }));
+    // test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F16, { 33, 1, 1, 1 }));
+    // test_cases.emplace_back(new test_mean(GGML_TYPE_F16, { 33, 1, 1, 1 }));
+    // test_cases.emplace_back(new test_sum(GGML_TYPE_F16, { 33, 1024, 1, 1 }));
+    // test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F16, { 33, 1024, 1, 1 }));
+    // test_cases.emplace_back(new test_sum(GGML_TYPE_F16, { 33, 256, 1, 1 }));
+    // test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F16, { 33, 256, 1, 1 }));
+    // test_cases.emplace_back(new test_mean(GGML_TYPE_F16, { 33, 256, 1, 1 }));
+    // test_cases.emplace_back(new test_mean(GGML_TYPE_F16, { 32769, 1, 1, 1 }));
+#endif
 
     if (GGML_DLFA_READY) {
     for (int hsk : { 64, 80, 128, 192, 256, 576 }) {
@@ -6855,6 +6877,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     for (int n_token : {1, 512}) {
         test_cases.emplace_back(new test_add_id(GGML_TYPE_F32, GGML_TYPE_F32, 2880, 128, 4, n_token));
         test_cases.emplace_back(new test_add_id(GGML_TYPE_F32, GGML_TYPE_F32, 2880, 32, 4, n_token));
+    }
+
+    std::vector<std::array<int64_t, 4>> reduce_rows_cases = {
+        { 8192, 1,    1, 1 },
+        { 8192, 8192, 1, 1 },
+        { 128,  8192, 1, 1 },
+    };
+
+    for (auto it: reduce_rows_cases){
+        test_cases.emplace_back(new test_mean(GGML_TYPE_F32, it));
+        test_cases.emplace_back(new test_sum_rows(GGML_TYPE_F32, it));
+        test_cases.emplace_back(new test_sum(GGML_TYPE_F32, it));
     }
 
     return test_cases;
