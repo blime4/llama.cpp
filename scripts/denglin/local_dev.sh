@@ -2,7 +2,7 @@
 set -e
 
 # Default SDK_TAG, can be passed as parameter
-DEFAULT_SDK_TAG="V2_SOFTWARE_master_202506262155"
+DEFAULT_SDK_TAG="V2_SOFTWARE_master_202507252139"
 
 # Show help information
 show_help() {
@@ -15,9 +15,9 @@ show_help() {
     echo ""
     echo "Examples:"
     echo "  $0                                    # Enter docker with default SDK_TAG"
-    echo "  $0 -t V2_SOFTWARE_master_202506262155 # Specify SDK_TAG"
+    echo "  $0 -t V2_SOFTWARE_master_202507252139 # Specify SDK_TAG"
     echo "  $0 -c                                 # Compile first, then enter docker"
-    echo "  $0 -t V2_SOFTWARE_master_202506262155 -c # Specify SDK_TAG and compile"
+    echo "  $0 -t V2_SOFTWARE_master_202507252139 -c # Specify SDK_TAG and compile"
 }
 
 # Parse command line arguments
@@ -109,6 +109,7 @@ if [ "$COMPILE_FIRST" = true ]; then
     if [ "$RE_COMPILE" = true ]; then
         echo "[Step 5] Cleaning local build cache..."
         rm -rf "${REPO_PATH}/build"
+        rm -rf /LocalRun/$(whoami)/cache/llama_cpp_ccache
     fi
 
     if [ ! -f "../../.dlci/compile_llama_cpp.sh" ]; then
@@ -133,7 +134,20 @@ fi
 echo "[Step 6] Entering docker for development..."
 echo "You can now interactively develop with llama.cpp in the docker container."
 echo "You need to source $sdk_path/env.sh to use the SDK."
-echo "One-click command: source scripts/denglin/docker_env.sh"
+echo "PASS : /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+echo "DEVING : /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+echo "One-click command: source scripts/denglin/docker_env.sh && llama-bench -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+echo "One-click command: export DEVIT=1 && source scripts/denglin/docker_env.sh && CUDA_VISIBLE_DEVICES=0 llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf > xxx.log 2>&1 &"
+echo "One-click command: source scripts/denglin/docker_env.sh && DLBLAS_LOG_LAYER=1 CUDA_VISIBLE_DEVICES=0 llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf > xxx.log 2>&1 &"
+echo "One-click command: export DEVIT_DEQ=1 && source scripts/denglin/docker_env.sh && DLBLAS_LOG_LAYER=1 CUDA_VISIBLE_DEVICES=0 llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf > xxx.log 2>&1 &"
+
+echo "DEVING : /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+echo "One-click command: source scripts/denglin/docker_env.sh && llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+echo "One-click command: export DEVIT=1 && source scripts/denglin/docker_env.sh && CUDA_VISIBLE_DEVICES=0 llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf > xxx.log 2>&1 &"
+echo "One-click command: source scripts/denglin/docker_env.sh && DLBLAS_LOG_LAYER=1 CUDA_VISIBLE_DEVICES=0 llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf > xxx.log 2>&1 &"
+echo "One-click command: export DEVIT_DEQ=1 && source scripts/denglin/docker_env.sh && CUDA_VISIBLE_DEVICES=0 llama-simple -m /models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf > xxx.log 2>&1 &"
+
+
 echo "Available commands:"
 echo "  - llama-cli --help"
 echo "  - llama-server --help"

@@ -1,8 +1,16 @@
+#include "cuda_runtime_api.h"
+#include "driver_types.h"
 #include "ggml-cuda.h"
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 
 #include "ggml-cuda/common.cuh"
+#include <cstring>
+#include <unordered_map>
+#include <mutex>
+#include <fstream>
+#include <iostream>
+#include <string>
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/arange.cuh"
 #include "ggml-cuda/argmax.cuh"
@@ -51,6 +59,7 @@
 #include <charconv>
 #include <cinttypes>
 #include <condition_variable>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <float.h>
@@ -59,12 +68,30 @@
 #include <memory>
 #include <mutex>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
 #include <vector>
 
+#include "dlblas_ext.h"
+#include "vector_types.h"
+#include <fstream>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
+
+static bool DEVIT_DEQ = getenv("DEVIT_DEQ") != nullptr;
+static int GGML_CUDA_GPTQ_GROUP_SIZE = []() {
+    const char* env = getenv("GGML_CUDA_GPTQ_GROUP_SIZE");
+    if (env) {
+        int val = atoi(env);
+        if (val > 0) return val;
+    }
+    return 32;
+}();
+
 
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
@@ -1296,22 +1323,44 @@ static void ggml_cuda_op_mul_mat_cublas(
                         CUBLAS_COMPUTE_32F,
                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
         } else {
-            ggml_cuda_pool_alloc<half> dst_f16(ctx.pool(id), row_diff*src1_ncols);
+            ggml_cuda_pool_alloc<half> dst_fp16(ctx.pool(id), row_diff*src1_ncols);
 
             const half alpha_f16 = 1.0f;
             const half beta_f16 = 0.0f;
-
+            if(DEVIT_DEQ) {
+                std::vector<half> src1_ptr_cpu(10);
+                CUDA_CHECK(cudaMemcpy(src1_ptr_cpu.data(), src1_ptr, 10*sizeof(half), cudaMemcpyDeviceToHost));
+                for ( int i =0 ; i < 10; i++) {
+                    printf("[cublasGemmEx] src1_ptr_cpu[%d]: %f\n", i, __half2float(src1_ptr_cpu[i]));
+                }
+            }
             CUBLAS_CHECK(
                 cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
                         row_diff, src1_ncols, ne10,
                         &alpha_f16, src0_ptr,      CUDA_R_16F, ne00,
                                     src1_ptr,      CUDA_R_16F, ne10,
-                        &beta_f16,  dst_f16.get(), CUDA_R_16F, ldc,
+                        &beta_f16,  dst_fp16.get(), CUDA_R_16F, ldc,
                         CUBLAS_COMPUTE_16F,
                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
+            if(DEVIT_DEQ) {
+                std::vector<half> dst_fp16_cpu(10);
+                CUDA_CHECK(cudaMemcpy(dst_fp16_cpu.data(), dst_fp16.get(), 10*sizeof(half), cudaMemcpyDeviceToHost));
+                for (int i = 0; i < 10; i++) {
+                    printf("[cublasGemmEx] dst_fp16_cpu[%d]: %f\n", i, __half2float(dst_fp16_cpu[i]));
+                }
+            }
+
             const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
-            to_fp32_cuda(dst_f16.get(), dst_dd_i, row_diff*src1_ncols, stream);
+            to_fp32_cuda(dst_fp16.get(), dst_dd_i, row_diff*src1_ncols, stream);
+            if(DEVIT_DEQ) {
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                std::vector<float> dst_fp32_cpu(10);
+                CUDA_CHECK(cudaMemcpy(dst_fp32_cpu.data(), dst_dd_i, 10*sizeof(float), cudaMemcpyDeviceToHost));
+                for (int i = 0; i < 10; i++) {
+                    printf("[cublasGemmEx] dst_fp32_cpu[%d]: %f\n", i, dst_fp32_cpu[i]);
+                }
+            }
         }
     } else {
         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
@@ -1986,6 +2035,562 @@ static void ggml_cuda_mul_mat_batched_cublas(ggml_backend_cuda_context & ctx, co
     }
 }
 
+__global__ void ggml_cuda_gptq_quantize_8_bit_fp16(
+    const half* __restrict__ w,    // [M, K], half type
+    uint8_t* __restrict__ qweight,
+    half* __restrict__ qzeros,
+    half* __restrict__ scales,
+    int K, int M, int group_size
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int group = blockIdx.y * blockDim.y + threadIdx.y;
+    if (row >= M || group * group_size >= K) return;
+
+    float max_val = -FLT_MAX, min_val = FLT_MAX;
+    for (int k = 0; k < group_size && group * group_size + k < K; ++k) {
+        float v = __half2float(w[row * K + (group * group_size + k)]);
+        if (v > max_val) max_val = v;
+        if (v < min_val) min_val = v;
+    }
+
+    float scale, zero_point;
+    const float qmin = 0.0f;
+    const float qmax = 255.0f;
+
+    if (max_val == min_val) {
+        if (min_val == 0.0f) {
+            scale = 1.0f;
+            zero_point = 0.0f;
+        } else {
+            scale = std::abs(min_val) / 255.0f;
+            if (min_val > 0.0f) {
+                zero_point = qmin;
+            } else {
+                zero_point = qmax;
+            }
+        }
+    } else {
+        scale = (max_val - min_val) / (qmax - qmin);
+        zero_point = qmin - min_val / scale;
+
+        if (zero_point < qmin) zero_point = qmin;
+        if (zero_point > qmax) zero_point = qmax;
+
+        if (scale < 1e-8f) scale = 1e-8f;
+    }
+
+    const int num_groups_row = (K + group_size - 1) / group_size;
+    int scale_idx = row * num_groups_row + group;
+    scales[scale_idx] = __float2half(scale);
+    qzeros[scale_idx] = __float2half(zero_point);
+
+    for (int k = 0; k < group_size && group * group_size + k < K; ++k) {
+        int col = group * group_size + k;
+        float v = __half2float(w[row * K + col]);
+
+        // q = round(v/scale + zero_point)
+        int q;
+        if (max_val == min_val) {
+            if (min_val == 0.0f) {
+                q = 0;
+            } else {
+                q = (int)roundf(v / scale + zero_point);
+            }
+        } else {
+            q = (int)roundf(v / scale + zero_point);
+        }
+
+        if (q < 0) q = 0;
+        if (q > 255) q = 255;
+
+        qweight[row * K + col] = (uint8_t)q;
+    }
+}
+
+struct ggml_gptq_data {
+    void * qweight;
+    void * qzeros;
+    void * scales;
+    int bits;
+    int group_size;
+    cudaDataType_t scales_type;
+    cudaDataType_t qzeros_type;
+    int num_groups;
+    int M;
+    int K;
+    int qweight_size;
+    int qzeros_size;
+    int scales_size;
+};
+
+static cudaDataType_t ggml_ptr_elem_size_to_cuda_dtype(size_t elem_size) {
+    switch (elem_size) {
+        case 2: return CUDA_R_16F;   // half
+        case 4: return CUDA_R_32F;   // float
+        case 1: return CUDA_R_8U;    // uint8
+        default: return CUDA_R_32F;  // fallback
+    }
+}
+
+// DL: used to store the gptq-format weight tensor.
+static std::unordered_map<const ggml_tensor*, ggml_gptq_data*> g_gptq_weights_map;
+static std::mutex g_gptq_weights_mutex;
+
+// DL: used to store the gptq-format weight tensor.
+static void ggml_cuda_gptq_store_weight(const ggml_tensor* tensor, ggml_gptq_data* gptq_data) {
+    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
+
+    // DL: if the weight tensor already exists, release the old one.
+    auto it = g_gptq_weights_map.find(tensor);
+    if (it != g_gptq_weights_map.end()) {
+        ggml_gptq_data* old_data = it->second;
+        if (old_data->qweight) cudaFree(old_data->qweight);
+        if (old_data->qzeros) cudaFree(old_data->qzeros);
+        if (old_data->scales) cudaFree(old_data->scales);
+        delete old_data;
+    }
+
+    g_gptq_weights_map[tensor] = gptq_data;
+}
+
+static ggml_gptq_data* ggml_cuda_gptq_get_weight(const ggml_tensor* tensor) {
+    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
+    auto it = g_gptq_weights_map.find(tensor);
+    return (it != g_gptq_weights_map.end()) ? it->second : nullptr;
+}
+
+static bool ggml_cuda_gptq_has_weight(const ggml_tensor* tensor) {
+    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
+    return g_gptq_weights_map.find(tensor) != g_gptq_weights_map.end();
+}
+
+static void ggml_cuda_gptq_clear_weights() {
+    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
+    for (auto& pair : g_gptq_weights_map) {
+        ggml_gptq_data* data = pair.second;
+        if (data->qweight) cudaFree(data->qweight);
+        if (data->qzeros) cudaFree(data->qzeros);
+        if (data->scales) cudaFree(data->scales);
+        delete data;
+    }
+    g_gptq_weights_map.clear();
+}
+
+static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, const void * src0_ptr, const ggml_tensor * src0) {
+    //update the weight tensor to gptq-format in src0->extra.
+    // 1. get the weight tensor
+    // 2. quantize the weight tensor to gptq-format
+
+    // 1. get the weight tensor
+    void* data = src0->data;
+    int64_t ne00 = src0->ne[0]; // ne [row, col, batch, shard]
+    int64_t ne01 = src0->ne[1];
+    int64_t ne02 = src0->ne[2];
+    int64_t ne03 = src0->ne[3];
+    int64_t nb00 = src0->nb[0];
+    int64_t nb01 = src0->nb[1];
+    int64_t nb02 = src0->nb[2];
+    int64_t nb03 = src0->nb[3];
+
+
+    // 2. quantize the weight tensor to gptq-format
+    int K = src0->ne[0];
+    int M = src0->ne[1];
+    int group_size = GGML_CUDA_GPTQ_GROUP_SIZE;
+    int bits = 8; // TODO: support 4 bits later.
+    int num_groups = (K + group_size - 1) / group_size;
+
+    int id = ggml_cuda_get_device();
+
+    // 3. create gptq_data and allocate persistent GPU memory directly
+    ggml_gptq_data* gptq_data = new ggml_gptq_data;
+
+    // 4. allocate persistent GPU memory directly (avoiding temporary allocations)
+    CUDA_CHECK(cudaMalloc(&gptq_data->qweight, M * K * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMalloc(&gptq_data->qzeros, M * num_groups * sizeof(half)));
+    CUDA_CHECK(cudaMalloc(&gptq_data->scales, M * num_groups * sizeof(half)));
+
+    // nowaday, only support float.
+    dim3 blockDim(32, 8);
+    dim3 gridDim((M + blockDim.x - 1) / blockDim.x, (num_groups + blockDim.y - 1) / blockDim.y);
+    cudaStream_t stream = ctx.stream();
+
+    // 3.1 If src0 is quantized (or not FP16), dequantize/convert to FP16 first on device
+    ggml_cuda_pool_alloc<half> src0_as_f16(ctx.pool(id));
+    if (src0->type != GGML_TYPE_F16) {
+        const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(src0->type);
+        GGML_ASSERT(to_fp16_cuda != nullptr);
+        // TODO: support not contiguous allocated tensor. FYI: ggml_get_to_fp16_nc_cuda.
+        GGML_ASSERT(ggml_is_contiguously_allocated(src0));
+        const size_t ne = (size_t) M * (size_t) K;
+        src0_as_f16.alloc(ne);
+        to_fp16_cuda(src0_ptr, src0_as_f16.get(), ne, stream);
+    }
+    const half * src0_ptr_as_fp16 = src0->type == GGML_TYPE_F16 ? (const half *) src0_ptr : src0_as_f16.get();
+
+    if(DEVIT_DEQ){
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<half> src0_ptr_as_fp16_cpu(10);
+        cudaMemcpy(src0_ptr_as_fp16_cpu.data(), src0_ptr_as_fp16, 10*sizeof(half), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        for(int i = 0; i < 10; i++){
+            printf("[ggml_cuda_gptq_quantize] src0_ptr_as_fp16_cpu[%d]: %f\n", i, __half2float(src0_ptr_as_fp16_cpu[i]));
+        }
+    }
+
+    // 5. kernel launch directly to persistent memory (eliminating one cudaMemcpyDeviceToDevice)
+    // TODO : support bf16 later.
+    CUDA_CHECK(cudaDeviceSynchronize());
+    ggml_cuda_gptq_quantize_8_bit_fp16<<<gridDim, blockDim, 0, stream>>>(
+        src0_ptr_as_fp16, (uint8_t*)gptq_data->qweight, (half*)gptq_data->qzeros, (half*)gptq_data->scales,
+        K, M, group_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // 6. check the CUDA error after kernel launch
+    cudaError_t r = cudaGetLastError();
+    if (r != cudaSuccess) {
+        printf("gptq_quantize_8_bit error: %s\n", cudaGetErrorString(r));
+    }
+
+    gptq_data->group_size = group_size;
+    gptq_data->bits = bits;
+    gptq_data->scales_type = ggml_ptr_elem_size_to_cuda_dtype(sizeof(half));
+    gptq_data->qzeros_type  = ggml_ptr_elem_size_to_cuda_dtype(sizeof(half));
+    gptq_data->num_groups = num_groups;
+    gptq_data->M = M;
+    gptq_data->K = K;
+    gptq_data->qweight_size = M * K * sizeof(uint8_t);
+    gptq_data->qzeros_size = M * num_groups * sizeof(half);
+    gptq_data->scales_size = M * num_groups * sizeof(half);
+    // DL: store it to the mapping table
+    ggml_cuda_gptq_store_weight(src0, gptq_data);
+}
+
+static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, const ggml_tensor * src0) {
+    const int M = gptq_data.M;
+    const int K = gptq_data.K;
+    const int group_size = gptq_data.group_size;
+    const int num_groups = gptq_data.num_groups;
+
+    std::vector<uint8_t> qweight_h((size_t)M * (size_t)K);
+    CUDA_CHECK(cudaMemcpy(qweight_h.data(), gptq_data.qweight, qweight_h.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+
+    std::vector<float> qzeros_f((size_t)M * (size_t)num_groups);
+    std::vector<float> scales_f((size_t)M * (size_t)num_groups);
+    if (gptq_data.qzeros_type == CUDA_R_16F) {
+        std::vector<half> tmp((size_t)M * (size_t)num_groups);
+        CUDA_CHECK(cudaMemcpy(tmp.data(), gptq_data.qzeros, tmp.size() * sizeof(half), cudaMemcpyDeviceToHost));
+        for (size_t i = 0; i < tmp.size(); ++i) qzeros_f[i] = __half2float(tmp[i]);
+    } else if (gptq_data.qzeros_type == CUDA_R_32F) {
+        CUDA_CHECK(cudaMemcpy(qzeros_f.data(), gptq_data.qzeros, qzeros_f.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    } else {
+        printf("[dequant-verify] unsupported qzeros_type=%d\n", (int)gptq_data.qzeros_type);
+        return;
+    }
+
+    if (gptq_data.scales_type == CUDA_R_16F) {
+        std::vector<half> tmp((size_t)M * (size_t)num_groups);
+        CUDA_CHECK(cudaMemcpy(tmp.data(), gptq_data.scales, tmp.size() * sizeof(half), cudaMemcpyDeviceToHost));
+        for (size_t i = 0; i < tmp.size(); ++i) scales_f[i] = __half2float(tmp[i]);
+    } else if (gptq_data.scales_type == CUDA_R_32F) {
+        CUDA_CHECK(cudaMemcpy(scales_f.data(), gptq_data.scales, scales_f.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    } else {
+        printf("[dequant-verify] unsupported scales_type=%d\n", (int)gptq_data.scales_type);
+        return;
+    }
+
+    std::vector<float> weight_ref((size_t)M * (size_t)K);
+    if (src0->type == GGML_TYPE_F16) {
+        std::vector<half> w_h((size_t)M * (size_t)K);
+        CUDA_CHECK(cudaMemcpy(w_h.data(), src0->data, w_h.size() * sizeof(half), cudaMemcpyDeviceToHost));
+        for (size_t i = 0; i < w_h.size(); ++i) weight_ref[i] = __half2float(w_h[i]);
+    } else if (ggml_is_quantized(src0->type)) {
+        const ggml_type qtype = src0->type;
+        const size_t row_size_q = ggml_row_size(qtype, K);
+        std::vector<uint8_t> qbuf((size_t)M * row_size_q);
+        CUDA_CHECK(cudaMemcpy(qbuf.data(), src0->data, qbuf.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+
+        const ggml_type_traits *traits = ggml_get_type_traits(qtype);
+        GGML_ASSERT(traits && traits->to_float && "quantized type missing to_float dequantizer");
+        for (int row = 0; row < M; ++row) {
+            const void *row_q = (const void *)(qbuf.data() + (size_t)row * row_size_q);
+            float *row_f = weight_ref.data() + (size_t)row * (size_t)K;
+            traits->to_float(row_q, row_f, K);
+        }
+    } else {
+        CUDA_CHECK(cudaMemcpy(weight_ref.data(), src0->data, weight_ref.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    }
+
+    printf("[dequant-verify] scales (first 5): ");
+    for (int i = 0; i < 5 && i < (int)scales_f.size(); ++i) printf("%f ", scales_f[i]);
+    printf("\n");
+    printf("[dequant-verify] qzeros (first 5): ");
+    for (int i = 0; i < 5 && i < (int)qzeros_f.size(); ++i) printf("%f ", qzeros_f[i]);
+    printf("\n");
+    printf("[dequant-verify] qweight (first 5): ");
+    for (int i = 0; i < 5 && i < (int)qweight_h.size(); ++i) printf("%d ", (int)qweight_h[i]);
+    printf("\n");
+
+    const size_t total = (size_t)M * (size_t)K;
+    const size_t max_check = std::min(total, (size_t)10000);
+    double total_err = 0.0;
+    double max_err = 0.0;
+
+    for (int i = 0; i < 5 && i < (int)total; ++i) {
+        int col = i % K;
+        int row = i / K;
+        int scale_idx = row * num_groups + (col / group_size);
+        float dq = (float(qweight_h[i]) - qzeros_f[scale_idx]) * scales_f[scale_idx];
+        float abs_err = fabsf(weight_ref[i] - dq);
+        printf("[dequant-verify] w[%d] ref=%f, q=%d, dq=%f, abs_err=%f\n", i, weight_ref[i], (int)qweight_h[i], dq, abs_err);
+    }
+
+    for (size_t i = 0; i < max_check; ++i) {
+        int col = (int)(i % K);
+        int row = (int)(i / K);
+        int scale_idx = row * num_groups + (col / group_size);
+        float dq = (float(qweight_h[i]) - qzeros_f[scale_idx]) * scales_f[scale_idx];
+        float abs_err = fabsf(weight_ref[i] - dq);
+        total_err += abs_err;
+        if (abs_err > max_err) max_err = abs_err;
+    }
+    double avg_err = (max_check > 0) ? (total_err / (double)max_check) : 0.0;
+    printf("[dequant-verify] samples=%zu, avg_abs_err=%e, max_abs_err=%e\n", max_check, avg_err, max_err);
+}
+
+// DL: used to quantize the weight tensor from CPU, and then store it to the mapping table.
+static void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor) {
+    // DL: check if the weight tensor has been quantized.
+    if (ggml_cuda_gptq_has_weight(tensor)) {
+        return;
+    }
+
+    // DL: get the current device ID
+    CUDA_CHECK(cudaSetDevice(device_id));
+
+    // DL: create a simplified context
+    ggml_backend_cuda_context ctx(device_id);
+
+    // DL: call the quantization function
+    ggml_cuda_gptq_quantize_and_store(ctx, tensor->data, tensor);
+}
+
+static cudaDataType_t ggml_type_to_cuda_dtype(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_F16: return CUDA_R_16F;
+        case GGML_TYPE_F32: return CUDA_R_32F;
+        case GGML_TYPE_BF16: return CUDA_R_16BF;
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q5_0:
+        case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q8_1:
+        case GGML_TYPE_Q2_K:
+        case GGML_TYPE_Q3_K:
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q5_K:
+        case GGML_TYPE_Q6_K:
+        case GGML_TYPE_Q8_K:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_IQ3_S:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ4_XS:
+        case GGML_TYPE_I8:
+        case GGML_TYPE_I16:
+        case GGML_TYPE_I32:
+        case GGML_TYPE_I64:
+        case GGML_TYPE_IQ1_M:
+        case GGML_TYPE_TQ1_0:
+        case GGML_TYPE_TQ2_0:
+            return CUDA_R_8U;
+        default:
+            return CUDA_R_32F;
+    }
+}
+
+static void ggml_cuda_dlblas_gemmex(
+    ggml_backend_cuda_context & ctx,
+    ggml_gptq_data & gptq_data,
+    const void * src1_ptr,
+    const ggml_type src1_type,
+    const ggml_tensor * src0,
+    const ggml_tensor * src1,
+    void * dst_ptr,
+    const ggml_type dst_type
+
+){
+
+    int m = (int)src0->ne[1];
+    int k = (int)src0->ne[0];
+    int n = (int)src1->ne[1];
+
+    cublasOperation_t transA = CUBLAS_OP_T;
+    cublasOperation_t transB = CUBLAS_OP_N;
+    int lda = transA == CUBLAS_OP_T ? k : m;
+    int ldb = (int)src1->ne[0];
+    int ldc = m; // dst->ne[0]
+
+    cudaDataType_t Atype = CUDA_R_8U;
+    cudaDataType_t Btype = ggml_type_to_cuda_dtype(src1_type);
+    cudaDataType_t Ctype = ggml_type_to_cuda_dtype(dst_type);
+
+    dlblasExtQuantParametersV2_t extParameters = {};
+    extParameters.a_group_size_k = gptq_data.group_size;
+    extParameters.a_group_size_m = 1;
+    extParameters.a_zeropoints = gptq_data.qzeros;
+    extParameters.a_zeropoints_type = gptq_data.qzeros_type;
+    extParameters.a_scales = gptq_data.scales;
+    extParameters.a_scales_type = gptq_data.scales_type;
+
+    const float alpha_f = 1.0f;
+    const float beta_f  = 0.0f;
+
+    cublasHandle_t handle = ctx.cublas_handle();
+    // !!!! make sure the stream is set.
+    CUBLAS_CHECK(cublasSetStream(handle, ctx.stream()));
+    CUBLAS_CHECK(dlblasGemmExV2(
+        handle,
+        transA, transB,
+        m, n, k,
+        &alpha_f,
+        gptq_data.qweight, Atype, lda,
+        src1_ptr,          Btype, ldb,
+        &beta_f,
+        dst_ptr,           Ctype, ldc,
+        CUDA_R_32F,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+        &extParameters
+    ));
+
+    // if(DEVIT_DEQ) {
+    //     // FIXME : just for debug
+    //     CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+    // }
+    CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+}
+
+static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    // DL: check if the weight tensor has been quantized.
+    ggml_gptq_data* gptq_data = ggml_cuda_gptq_get_weight(src0);
+    if (gptq_data) {
+        // DL: directly use the gptq-format weight tensor to compute.
+        const void * src1_ptr = nullptr;
+        // DL: process the src1 data format conversion (keep the original logic).
+        const int64_t ne10 = src1->ne[0];
+        const int64_t ne11 = src1->ne[1];
+
+        int id = ggml_cuda_get_device();
+        cudaStream_t stream = ctx.stream();
+        ggml_type src1_type = src1->type;
+        ggml_cuda_pool_alloc<half> src1_as_f16(ctx.pool(id));
+        ggml_cuda_pool_alloc<nv_bfloat16> src1_as_bf16(ctx.pool(id));
+
+        if (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16) {
+            if (src1->type != GGML_TYPE_F16) {
+                const to_fp16_cuda_t to_fp16_cuda = ggml_get_to_fp16_cuda(src1->type);
+                GGML_ASSERT(to_fp16_cuda != nullptr);
+                size_t ne = ne10*ne11;
+                src1_as_f16.alloc(ne);
+                to_fp16_cuda(src1->data, src1_as_f16.get(), ne, stream);
+            }
+            src1_ptr = src1->type == GGML_TYPE_F16 ? (const half *) src1->data : src1_as_f16.get();
+            src1_type = GGML_TYPE_F16;
+        } else {
+            // DL: convert other types to bf16
+            GGML_ABORT("DL: do not support other types for now. src1->type: %s", ggml_type_name(src1->type));
+            const to_bf16_cuda_t to_bf16_cuda = ggml_get_to_bf16_cuda(src1->type);
+            GGML_ASSERT(to_bf16_cuda != nullptr);
+            size_t ne = ne10*ne11;
+            src1_as_bf16.alloc(ne);
+            to_bf16_cuda(src1->data, src1_as_bf16.get(), ne, stream);
+            src1_ptr = src1_as_bf16.get();
+            src1_type = GGML_TYPE_BF16;
+        }
+
+        // DL: use the gptq-format weight tensor to compute.
+        if (DEVIT_DEQ) {
+            ggml_cuda_debug_verify_dequant(*gptq_data, src0);
+        }
+        if (dst->type == GGML_TYPE_F32) {
+            ggml_cuda_dlblas_gemmex(ctx, *gptq_data, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F32);
+            if(DEVIT_DEQ) {
+                std::vector<float> dst_fp32_cpu(10);
+                CUDA_CHECK(cudaMemcpy(dst_fp32_cpu.data(), dst->data, 10*sizeof(float), cudaMemcpyDeviceToHost));
+                for (int i = 0; i < 10; i++) {
+                    printf("[ggml_cuda_mul_mat_dlblas] dst_fp32_cpu[%d]: %f\n", i, dst_fp32_cpu[i]);
+                }
+            }
+        } else if (dst->type == GGML_TYPE_F16) {
+            ggml_cuda_dlblas_gemmex(ctx, *gptq_data, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F16);
+            if(DEVIT_DEQ) {
+                std::vector<half> dst_fp16_cpu(10);
+                CUDA_CHECK(cudaMemcpy(dst_fp16_cpu.data(), dst->data, 10*sizeof(half), cudaMemcpyDeviceToHost));
+                for (int i = 0; i < 10; i++) {
+                    printf("[ggml_cuda_mul_mat_dlblas] dst_fp16_cpu[%d]: %f\n", i, __half2float(dst_fp16_cpu[i]));
+                }
+            }
+        } else {
+            ggml_type dst_type = GGML_TYPE_F16;
+            ggml_cuda_pool_alloc<half> dst_fp16(ctx.pool(id), dst->ne[0]*dst->ne[1]);
+            ggml_cuda_dlblas_gemmex(ctx, *gptq_data, src1_ptr, src1_type, src0, src1, dst_fp16.get(), dst_type);
+            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
+            to_fp32_cuda(dst_fp16.get(), (float*)dst->data, dst->ne[0]*dst->ne[1], stream);
+            if(DEVIT_DEQ) {
+                std::vector<half> dst_fp16_cpu(10);
+                CUDA_CHECK(cudaMemcpy(dst_fp16_cpu.data(), dst_fp16.get(), 10*sizeof(half), cudaMemcpyDeviceToHost));
+                for (int i = 0; i < 10; i++) {
+                    printf("[ggml_cuda_mul_mat_dlblas] dst_fp16_cpu[%d]: %f\n", i, __half2float(dst_fp16_cpu[i]));
+                }
+                std::vector<float> dst_fp32_cpu(10);
+                CUDA_CHECK(cudaMemcpy(dst_fp32_cpu.data(), dst->data, 10*sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+                for (int i = 0; i < 10; i++) {
+                    printf("[ggml_cuda_mul_mat_dlblas] dst_fp32_cpu[%d]: %f\n", i, dst_fp32_cpu[i]);
+                }
+            }
+        }
+        return;
+    }
+    printf("src0->name: %s, src0->type: %s\n", src0->name, ggml_type_name(src0->type));
+    GGML_ABORT("DL: [ggml_cuda_mul_mat_dlblas] gptq_data is nullptr");
+}
+
+static void ggml_cuda_op_mul_mat_dlblas(
+    ggml_backend_cuda_context & ctx,        // CUDA context, stream, device, etc.
+    const ggml_tensor * src0,               // weight tensor, original format
+    const ggml_tensor * src1,               // input tensor
+    ggml_tensor * dst,                      // output tensor
+    const char * src0_dd_i,                 // src0 device data pointer, original format, quantized or unquantized weight.
+    const float * src1_ddf_i,               // src1 device data pointer, fp32 input.
+    const char * src1_ddq_i,                // src1 device data pointer, quantized input.
+    float * dst_dd_i,                       // dst device data pointer, fp32 output.
+    const int64_t row_low,                  // the start row of the input tensor.
+    const int64_t row_high,                 // the end row of the input tensor.
+    const int64_t src1_ncols,               // the number of columns of the input tensor. usually is batch_size.
+    const int64_t src1_padded_row_size,     // the padded row size of the input tensor.
+    cudaStream_t stream                     // CUDA stream
+) {
+    // TODO: implement this.
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(src0);
+    GGML_UNUSED(src1);
+    GGML_UNUSED(dst);
+    GGML_UNUSED(src0_dd_i);
+    GGML_UNUSED(src1_ddf_i);
+    GGML_UNUSED(src1_ddq_i);
+    GGML_UNUSED(dst_dd_i);
+    GGML_UNUSED(row_low);
+    GGML_UNUSED(row_high);
+    GGML_UNUSED(src1_ncols);
+    GGML_UNUSED(src1_padded_row_size);
+    GGML_UNUSED(stream);
+    GGML_ABORT("DL: do not support mul_mat_dlblas for now.");
+}
+
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
@@ -2040,12 +2645,66 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
+#if defined(GGML_USE_DLTU)
+    size_t dst_size = ggml_nbytes(dst);
+    int id = ggml_cuda_get_device();
+    ggml_cuda_pool_alloc<float> dst_dlblas_data(ctx.pool(id), dst_size);
+
+    ggml_tensor dst_dlblas = *dst; // copy all attributes from dst
+    dst_dlblas.data = dst_dlblas_data.get();
+    dst_dlblas.buffer = nullptr; // clear buffer, because using new memory allocation
+
+    // additional outputs for comparison
+    ggml_cuda_pool_alloc<float> dst_mmv_data(ctx.pool(id), ggml_nelements(dst));
+    ggml_tensor dst_mmv = *dst;
+    dst_mmv.data = dst_mmv_data.get();
+    dst_mmv.buffer = nullptr;
+
+    ggml_cuda_pool_alloc<float> dst_cublas_mmq_data(ctx.pool(id), ggml_nelements(dst));
+    ggml_tensor dst_cublas_mmq = *dst;
+    dst_cublas_mmq.data = dst_cublas_mmq_data.get();
+    dst_cublas_mmq.buffer = dst->buffer;
+
+    bool need_compare = DEVIT_DEQ ? true : false;
+    const char *env_force_no_dlblas = getenv("GGML_FORCE_NO_DLBLAS");
+    const char *env_dlblas_consistent = getenv("GGML_DLBLAS_CONSISTENT");
+    const char* which_branch = "";
+
+    bool dlblas_available = !split && ggml_is_contiguous(src0) && strstr(src0->name, "view") == nullptr &&
+                           !(env_force_no_dlblas && env_force_no_dlblas[0] == '1');
+
+    // Default is false, can be enabled by setting GGML_DLBLAS_CONSISTENT=1 | bugid : 15564
+    bool use_consistent_path = (env_dlblas_consistent != nullptr && env_dlblas_consistent[0] == '1');
+
+    // If dlblas is available and no comparison is required, use dlblas to ensure consistency
+    // Even if vec conditions are met, use dlblas to avoid mismatch (unless the matrix is too small for dlblas)
+    if (DEVIT_DEQ && !dlblas_available) {
+        printf("[DLBLAS_PATH_OVERRIDE] dlblas is not available, use original path\n");
+    }
+    if (!need_compare && dlblas_available && use_consistent_path) {
+        if (use_mul_mat_vec || use_mul_mat_vec_q) {
+            if (getenv("GGML_DEBUG_PATH_SELECTION")) {
+                printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld satisfies vec conditions but uses dlblas to maintain consistency\n",
+                       src0->ne[0], src0->ne[1]);
+            }
+        }
+        ggml_cuda_mul_mat_dlblas(ctx, src0, src1, dst);
+        return;
+    }
+    // else if (!split && ggml_is_transposed(src0)) {
+    //     // TODO: implement this.
+    //     ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_dlblas, quantize_mmq_q8_1_cuda);
+    //     return;
+    // }
+#endif
     if (!split && use_mul_mat_vec) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
         // but this is only faster for GPUs without tensor cores or with a thin src0 matrix (particularly KQV in attention)
         ggml_cuda_mul_mat_vec(ctx, src0, src1, nullptr, dst);
+        which_branch = "!split && use_mul_mat_vec";
     } else if (!split && use_mul_mat_vec_q) {
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
+        which_branch = "!split && use_mul_mat_vec_q";
     // DL: non-split follows the ggml_cuda_op_mul_mat_cublas branch
     //} else if (!split && use_mul_mat_q) {
     //    ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
@@ -2053,18 +2712,111 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
         // general KQ + KQV multi-batch without FlashAttention
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
+        which_branch = "!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32) && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1";
     } else if (use_mul_mat_vec) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
+        which_branch = "use_mul_mat_vec";
     } else if (use_mul_mat_vec_q) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_q, quantize_row_q8_1_cuda);
+        which_branch = "use_mul_mat_vec_q";
     } else if (use_mul_mat_q) {
 #if defined(GGML_USE_DLCU)
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, quantize_mmq_q8_1_cuda);
 #else
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
 #endif
+        which_branch = "use_mul_mat_q";
     } else {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
+        which_branch = "ggml_cuda_op_mul_mat";
+    }
+    if (need_compare) {
+        const bool can_compare = (dst->type == GGML_TYPE_F32) && (src1->type == GGML_TYPE_F32);
+        const bool has_gptq = ggml_cuda_gptq_get_weight(src0) != nullptr;
+        const bool can_mmv = can_compare && use_mul_mat_vec;
+
+        if (has_gptq) {
+            ggml_cuda_mul_mat_dlblas(ctx, src0, src1, &dst_dlblas);
+        }
+        if (can_mmv) {
+            ggml_cuda_mul_mat_vec(ctx, src0, src1, nullptr, &dst_mmv);
+        }
+        bool did_cublas_mmq = false;
+        if (can_compare) {
+            const char *env = getenv("GGML_CMP_MMQ");
+            const bool want_mmq = (env && env[0] == '1');
+            if (want_mmq && use_mul_mat_q) {
+                ggml_cuda_op_mul_mat(ctx, src0, src1, &dst_cublas_mmq, ggml_cuda_op_mul_mat_cublas, quantize_mmq_q8_1_cuda);
+                did_cublas_mmq = true;
+            } else {
+                ggml_cuda_op_mul_mat(ctx, src0, src1, &dst_cublas_mmq, ggml_cuda_op_mul_mat_cublas, nullptr);
+            }
+        }
+
+        printf("dst-name: %s, dst-type: %s\n", dst->name, ggml_type_name(dst->type));
+        printf("src-name: %s, src-type: %s, src-ne: %lld, %lld, %lld, %lld, src1-nb: %zu, %zu, %zu, %zu, which_branch: %s\n",
+               src0->name, ggml_type_name(src0->type),
+               (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
+               (size_t)src1->nb[0], (size_t)src1->nb[1], (size_t)src1->nb[2], (size_t)src1->nb[3], which_branch);
+        const int num_elements = dst->ne[0] * dst->ne[1];
+
+        std::vector<float> h_dst(num_elements);
+        std::vector<float> h_dlblas(num_elements);
+        std::vector<float> h_mmv(num_elements);
+        std::vector<float> h_cublas_mmq(num_elements);
+
+        CUDA_CHECK(cudaMemcpy(h_dst.data(), (float*)dst->data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+        if (has_gptq) CUDA_CHECK(cudaMemcpy(h_dlblas.data(), (float*)dst_dlblas.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+        if (can_mmv)  CUDA_CHECK(cudaMemcpy(h_mmv.data(), (float*)dst_mmv.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+        if (can_compare) CUDA_CHECK(cudaMemcpy(h_cublas_mmq.data(), (float*)dst_cublas_mmq.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        const float *ref = nullptr; const char *ref_name = "";
+        const char *cublas_name = did_cublas_mmq ? "cublas_mmq" : "cublas";
+        if (has_gptq) { ref = h_dlblas.data(); ref_name = "dlblas"; }
+        else if (can_compare) { ref = h_cublas_mmq.data(); ref_name = cublas_name; }
+        else if (can_mmv) { ref = h_mmv.data(); ref_name = "mmv"; }
+        else { ref = h_dst.data(); ref_name = "dst(current)"; }
+
+        auto print_diff = [&](const char *name, const float *a){
+            if (a == nullptr) return;
+            double mean_abs = 0.0; float max_abs = 0.0f; int max_idx = 0; float v_ref=0.0f, v_a=0.0f;
+            for (int i = 0; i < num_elements; ++i) {
+                float d = fabsf(a[i] - ref[i]);
+                mean_abs += d;
+                if (d > max_abs) { max_abs = d; max_idx = i; v_ref = ref[i]; v_a = a[i]; }
+            }
+            mean_abs /= std::max(1, num_elements);
+            int row = max_idx / (int)dst->ne[0];
+            int col = max_idx % (int)dst->ne[0];
+            printf("[matmul-cmp] against ref=%s, target=%s: max_abs=%.6g at (%d,%d), ref=%.6g, tgt=%.6g, mean_abs=%.6g\n",
+                   ref_name, name, max_abs, row, col, v_ref, v_a, (float)mean_abs);
+        };
+
+        for (int i = 0; i < std::min(10, num_elements); ++i) {
+            if (i == 0) printf("[matmul-cmp] ref(%s) head10: ", ref_name);
+            printf("%f ", ref[i]);
+            if (i == std::min(10, num_elements)-1) printf("\n");
+        }
+
+        print_diff("dst(current)", h_dst.data());
+        if (has_gptq)    print_diff("dlblas", h_dlblas.data());
+        if (can_mmv)     print_diff("mmv", h_mmv.data());
+        if (can_compare) print_diff(cublas_name, h_cublas_mmq.data());
+
+        if (can_mmv && can_compare) {
+            double mean_abs = 0.0; float max_abs = 0.0f; int max_idx = 0; float v_a=0.0f, v_b=0.0f;
+            for (int i = 0; i < num_elements; ++i) {
+                float d = fabsf(h_mmv[i] - h_cublas_mmq[i]);
+                mean_abs += d;
+                if (d > max_abs) { max_abs = d; max_idx = i; v_a = h_mmv[i]; v_b = h_cublas_mmq[i]; }
+            }
+            mean_abs /= std::max(1, num_elements);
+            int row = max_idx / (int)dst->ne[0];
+            int col = max_idx % (int)dst->ne[0];
+            printf("[matmul-cmp] pair mmv vs %s: max_abs=%.6g at (%d,%d), mmv=%.6g, %s=%.6g, mean_abs=%.6g\n",
+                   cublas_name, max_abs, row, col, v_a, cublas_name, v_b, (float)mean_abs);
+        }
     }
 }
 
@@ -3606,6 +4358,11 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
     }
+#ifdef GGML_USE_DLTU
+    if (strcmp(name, "ggml_backend_cuda_gptq_quantize_and_store_from_cpu") == 0) {
+        return (void *)ggml_backend_cuda_gptq_quantize_and_store_from_cpu;
+    }
+#endif
     return nullptr;
 }
 

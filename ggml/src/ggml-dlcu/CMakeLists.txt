@@ -56,6 +56,7 @@ ggml_add_backend_library(ggml-dlcu
                     )
 
 add_compile_definitions(GGML_USE_DLCU)
+add_compile_definitions(GGML_USE_DLTU)
 
 add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 

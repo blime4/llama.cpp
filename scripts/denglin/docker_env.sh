@@ -75,5 +75,7 @@ fi
 
 export REPO_PATH="/workspace"
 
+export PATH=$(echo "$PATH" | tr ':' '\n' | awk '/ccache/{ccache=$0; next} {print} END{if(ccache) print ccache}' | paste -sd:)
+
 echo ""
 echo "Environment setup complete! You can now use llama.cpp commands."

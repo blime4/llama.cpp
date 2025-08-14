@@ -1603,6 +1603,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
     LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s)\n", __func__, ml.use_mmap ? "true" : "false");
 
+    // DL: used to record all MUL_MAT types of tensors, and then perform GPTQ quantization uniformly
+    std::vector<ggml_tensor*> mul_mat_tensors;
+
     // build a list of buffer types for the CPU and GPU devices
     pimpl->cpu_buft_list = make_cpu_buft_list(devices);
     for (auto * dev : devices) {
@@ -1854,7 +1857,14 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     return t;
                 }
             }
-            return ml.create_tensor(ctx, tn, ne, flags);
+            ggml_tensor* tensor = ml.create_tensor(ctx, tn, ne, flags);
+
+            // DL: used to record all MUL_MAT types of tensors, and then perform GPTQ quantization uniformly
+            if (tensor && op == GGML_OP_MUL_MAT) {
+                mul_mat_tensors.push_back(tensor);
+            }
+
+            return tensor;
         };
 
         layers.resize(n_layer);
@@ -4702,6 +4712,59 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         for (auto & mapping : ml.mappings) {
             pimpl->mappings.emplace_back(std::move(mapping));
         }
+    }
+
+    // DL: used to perform GPTQ quantization uniformly for all MUL_MAT types of tensors
+    if (!mul_mat_tensors.empty()) {
+        LLAMA_LOG_INFO("%s: [DL] quantizing %zu MUL_MAT tensors to GPTQ format...\n", __func__, mul_mat_tensors.size());
+
+        for (ggml_tensor* tensor : mul_mat_tensors) {
+            // DL: only quantize GPU weights tensors - check buffer type
+            if (tensor->buffer) {
+                ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(tensor->buffer);
+                // DL: simple check: if buffer type name contains "CUDA", then it is a CUDA buffer
+                const char* buft_name = ggml_backend_buft_name(buft);
+                if (buft_name && strstr(buft_name, "CUDA")) {
+                    // DL: skip view tensors - they don't have their own data
+                    if (tensor->view_src || strstr(tensor->name, "view")) {
+                        LLAMA_LOG_INFO("%s: skipping view tensor %s (has view_src or name contains 'view')\n", __func__, tensor->name);
+                        continue;
+                    }
+
+                    ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+                    if (dev) {
+                        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+                        auto *ggml_backend_cuda_gptq_quantize_and_store_from_cpu_fn = ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_gptq_quantize_and_store_from_cpu");
+                        if (ggml_backend_cuda_gptq_quantize_and_store_from_cpu_fn) {
+                            try {
+                                size_t dev_index = [&]() {
+                                    auto *reg = ggml_backend_dev_backend_reg(dev);
+                                    for (size_t i = 0; i < ggml_backend_reg_dev_count(reg); ++i) {
+                                        if (ggml_backend_reg_dev_get(reg, i) == dev) {
+                                            return i;
+                                        }
+                                    }
+                                    throw std::runtime_error(format("device %s not found in its backend reg", ggml_backend_dev_name(dev)));
+                                }();
+                                using quantize_and_store_fn_t = void (*)(int, const ggml_tensor*);
+                                auto fn = reinterpret_cast<quantize_and_store_fn_t>(ggml_backend_cuda_gptq_quantize_and_store_from_cpu_fn);
+                                fn(static_cast<int>(dev_index), tensor);
+                                // LLAMA_LOG_DEBUG("%s: quantized tensor %s on device %s\n",
+                                //             __func__, tensor->name, ggml_backend_dev_name(dev));
+                            } catch (const std::exception& e) {
+                                LLAMA_LOG_WARN("%s: failed to quantize tensor %s: %s\n", __func__, tensor->name, e.what());
+                            }
+                        } else {
+                            LLAMA_LOG_ERROR("DL: no function ggml_backend_cuda_gptq_quantize_and_store_from_cpu found\n");
+                        }
+                    } else {
+                        LLAMA_LOG_WARN("DL: no device found for tensor %s\n", tensor->name);
+                    }
+                }
+            }
+        }
+
+        LLAMA_LOG_INFO("%s: [DL] GPTQ quantization completed\n", __func__);
     }
 
     return true;
