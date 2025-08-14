@@ -1036,6 +1036,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "CROSS_ENTROPY_LOSS",
     "CROSS_ENTROPY_LOSS_BACK",
     "OPT_STEP_ADAMW",
+    "OPT_STEP_SGD",
 
     "GLU",
 #ifdef GGML_USE_DLCU
@@ -1044,9 +1045,9 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
 };
 
 #ifdef GGML_USE_DLCU
-static_assert(GGML_OP_COUNT == 88, "GGML_OP_COUNT != 88");
+static_assert(GGML_OP_COUNT == 89, "GGML_OP_COUNT != 89");
 #else
-static_assert(GGML_OP_COUNT == 87, "GGML_OP_COUNT != 87");
+static_assert(GGML_OP_COUNT == 88, "GGML_OP_COUNT != 88");
 #endif  // GGML_USE_DLCU
 
 
@@ -1145,6 +1146,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "cross_entropy_loss(x,y)",
     "cross_entropy_loss_back(x,y)",
     "adamw(x)",
+    "sgd(x)",
 
     "glu(x)",
 #ifdef GGML_USE_DLCU
@@ -1153,13 +1155,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 };
 
 #ifdef GGML_USE_DLCU
-static_assert(GGML_OP_COUNT == 88, "GGML_OP_COUNT != 88");
+static_assert(GGML_OP_COUNT == 89, "GGML_OP_COUNT != 89");
 #else
-static_assert(GGML_OP_COUNT == 87, "GGML_OP_COUNT != 87");
+static_assert(GGML_OP_COUNT == 88, "GGML_OP_COUNT != 88");
 #endif  // GGML_USE_DLCU
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
-
 
 static const char * GGML_UNARY_OP_NAME[GGML_UNARY_OP_COUNT] = {
     "ABS",
@@ -5753,6 +5754,28 @@ struct ggml_tensor * ggml_opt_step_adamw(
     return result;
 }
 
+// opt_step_sgd
+
+struct ggml_tensor * ggml_opt_step_sgd(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * grad,
+        struct ggml_tensor  * params) {
+    GGML_ASSERT(a->flags & GGML_TENSOR_FLAG_PARAM);
+    GGML_ASSERT(ggml_are_same_shape(a, grad));
+    GGML_ASSERT(params->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_nelements(params) == 2);
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, a);
+
+    result->op     = GGML_OP_OPT_STEP_SGD;
+    result->src[0] = a;
+    result->src[1] = grad;
+    result->src[2] = params;
+
+    return result;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 struct ggml_hash_set ggml_hash_set_new(size_t size) {
@@ -6647,7 +6670,7 @@ struct ggml_cgraph ggml_graph_view(struct ggml_cgraph * cgraph0, int i0, int i1)
         /*.size             =*/ 0,
         /*.n_nodes          =*/ i1 - i0,
         /*.n_leafs          =*/ 0,
-        
+
         /*.nodes            =*/ cgraph0->nodes + i0,
         /*.grads            =*/ NULL, // gradients would need visited_hash_set
         /*.grad_accs        =*/ NULL,

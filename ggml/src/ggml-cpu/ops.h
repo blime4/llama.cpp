@@ -110,7 +110,7 @@ void ggml_compute_forward_mul_mat(const struct ggml_compute_params * params, str
 #ifdef GGML_USE_DLCU
 void ggml_compute_forward_moe_sum(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 #endif  // GGML_USE_DLCU
-
+void ggml_compute_forward_opt_step_sgd(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 #ifdef __cplusplus
 }
 #endif
