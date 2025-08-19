@@ -3,6 +3,7 @@
 set -e
 
 echo "[INFO] Starting release_llama_cpp_x86_64 script"
+build_dir="${REPO_PATH}/../build"
 
 if [ -z "$REPO_PATH" ]; then
     echo "[ERROR] REPO_PATH environment variable is not set"
@@ -15,9 +16,9 @@ fi
 
 mkdir -p release
 
-if [ -d "${REPO_PATH}/build/bin" ]; then
+if [ -d "${build_dir}/bin" ]; then
     echo "[INFO] Copying release files from build/bin"
-    find "${REPO_PATH}/build/bin" -type f ! -name "test*" -exec cp {} release/ \;
+    find "${build_dir}/bin" -type f ! -name "test*" -exec cp {} release/ \;
 
     echo "[INFO] Files to be released:"
     ls -la release/
@@ -39,6 +40,6 @@ if [ -d "${REPO_PATH}/build/bin" ]; then
     package_name=$(basename $(ls "${RELEASE_NAME}" | head -n1))
     echo "【Artifact Download Link】http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp/$package_name"
 else
-    echo "[ERROR] build/bin directory not found at ${REPO_PATH}/build/bin"
+    echo "[ERROR] build/bin directory not found at ${build_dir}/bin"
     exit 1
 fi

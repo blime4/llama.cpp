@@ -16,7 +16,7 @@ ccache --zero-stats
 echo "[INFO] REPO_PATH: ${REPO_PATH}"
 echo "[INFO] LOCAL_MODEL_PATH: ${LOCAL_MODEL_PATH}"
 cd "${REPO_PATH}"
-build_dir="$(pwd)/build"
+build_dir="$(pwd)/../build"
 
 # Check if build directory exists
 if [ ! -d "${build_dir}" ]; then

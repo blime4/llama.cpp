@@ -79,7 +79,7 @@ sdk=${SDK_WORKSPACE}/sdk
 echo "[INFO] REPO_PATH: ${REPO_PATH}"
 cd ${REPO_PATH}
 
-cmake -G Ninja -B build \
+cmake -G Ninja -B ../build \
     -DGGML_DLCU=ON \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
     -DCMAKE_BUILD_TYPE=Release \
@@ -95,7 +95,7 @@ cmake -G Ninja -B build \
 ccache --show-stats
 
 #cmake --build ../build --config Release -j 12
-cd build
+cd ../build
 
 ninja -j 12
 
