@@ -732,8 +732,7 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
 
 namespace ggml_dl {
 
-bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    GGML_UNUSED(ctx);
+bool flash_attn_dldnn_available(const ggml_tensor * dst) {
 
     const char *env_force_no_dlfa = getenv("GGML_FORCE_NO_DLFA");
     if (env_force_no_dlfa != nullptr && strcmp(env_force_no_dlfa, "1") == 0) {

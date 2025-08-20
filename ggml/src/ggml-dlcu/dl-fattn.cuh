@@ -33,13 +33,10 @@ namespace ggml_dl {
 
 /**
  * @brief Check if DLDNN Flash Attention is available for this operation
- * @param ctx CUDA context
  * @param dst Output tensor
  * @return true if DLDNN can handle this flash attention operation
  */
-bool flash_attn_dldnn_available(
-    ggml_backend_cuda_context& ctx,
-    ggml_tensor* dst);
+bool flash_attn_dldnn_available(const ggml_tensor* dst);
 
 /**
  * @brief Execute Flash Attention using DLDNN (cuDNN)
