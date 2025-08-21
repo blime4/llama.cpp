@@ -64,8 +64,6 @@ extern "C" {
 
     typedef struct llama_memory_i * llama_memory_t;
 
-    struct llama_kv_cache; // DEPRECATED (use llama_memory instead)
-
     typedef int32_t llama_pos;
     typedef int32_t llama_token;
     typedef int32_t llama_seq_id;
@@ -469,12 +467,10 @@ extern "C" {
     LLAMA_API           llama_memory_t   llama_get_memory  (const struct llama_context * ctx);
     LLAMA_API  enum llama_pooling_type   llama_pooling_type(const struct llama_context * ctx); // TODO: rename to llama_get_pooling_type
 
-    #ifdef GGML_USE_DLFA
+#ifdef GGML_USE_DLFA
     LLAMA_API void llama_set_cuda_graph_capture_sizes(struct llama_context * ctx, uint32_t* sizes, size_t n_size);
     LLAMA_API void llama_set_u_nbatch(struct llama_context * ctx, uint32_t n_ubatch);
-    #endif
-
-    DEPRECATED(LLAMA_API struct llama_kv_cache * llama_get_kv_self(struct llama_context * ctx), "use llama_get_memory instead");
+#endif
 
     LLAMA_API const struct llama_vocab * llama_model_get_vocab(const struct llama_model * model);
     LLAMA_API enum llama_rope_type       llama_model_rope_type(const struct llama_model * model);
