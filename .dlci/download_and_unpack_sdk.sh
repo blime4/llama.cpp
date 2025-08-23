@@ -14,7 +14,7 @@ mkdir -p "$SDK_WORKSPACE"
 cd "$SDK_WORKSPACE"
 
 # Detect architecture
-ARCH=$(uname -m)
+ARCH=${DOCKER_PLATFORM}
 
 # Step 1: Download SDK archive
 if [[ "$ARCH" == "x86_64" ]]; then
@@ -25,13 +25,13 @@ if [[ "$ARCH" == "x86_64" ]]; then
     echo "[INFO] SDK archive already exists, skipping download"
   fi
 elif [[ "$ARCH" == "aarch64" ]]; then
-  if [[ ! -f *-kylin-arm64.tar.bz2 ]]; then
+  if [[ ! -f *-aarch64.tar.bz2 ]]; then
     echo "[INFO] Downloading SDK archive for aarch64: $SDK_TAG"
-    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-kylin-arm64.tar.bz2 -flat=true
+    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-aarch64.tar.bz2 -flat=true
   else
     echo "[INFO] SDK archive already exists, skipping download"
   fi
-elif [[ "$ARCH" == "risv64" ]]; then
+elif [[ "$ARCH" == "riscv64" ]]; then
   if [[ ! -f *-riscv-riscv64.tar.bz2 ]]; then
     echo "[INFO] Downloading SDK archive for risv64: $SDK_TAG"
     jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-riscv-riscv64.tar.bz2 -flat=true
@@ -43,16 +43,20 @@ else
   exit 1
 fi
 
+if [[ -d sdk ]]; then
+  rm -rf sdk
+fi
+
 # Step 2: Extract SDK
 if [[ "$ARCH" == "x86_64" && ! -d sdk ]]; then
   echo "[INFO] Extracting SDK archive for x86_64..."
   tar xf sdk.tar.bz2
 elif [[ "$ARCH" == "aarch64" && ! -d sdk ]]; then
   echo "[INFO] Extracting SDK archive for aarch64..."
-  tar xf *-kylin-arm64.tar.bz2
+  tar xf *-aarch64.tar.bz2
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
-elif [[ "$ARCH" == "risv64" && ! -d sdk ]]; then
-  echo "[INFO] Extracting SDK archive for risv64..."
+elif [[ "$ARCH" == "riscv64" && ! -d sdk ]]; then
+  echo "[INFO] Extracting SDK archive for riscv64..."
   tar xf *-riscv-riscv64.tar.bz2
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
 else
@@ -63,21 +67,23 @@ fi
 # cd sdk
 # echo "[INFO] Downloading PyTorch .whl packages to $(pwd)"
 # jf rt dl daily-pytorch-v2-pt2.5/${SDK_TAG}/cp312-cp312_manylinux/ -flat=true
-
+if [ -d "$DOCKER_REPO_PATH" ]; then
+  rm -rf "$DOCKER_REPO_PATH"
+fi
 # Step 4: Clone docker repo and check branch
 if [ ! -d "$DOCKER_REPO_PATH" ]; then
-    echo "[INFO] docker directory does not exist, cloning..."
-    git clone ssh://git@ext-gitlab.denglin.com:23/software/ci/docker.git "$DOCKER_REPO_PATH"
+  echo "[INFO] docker directory does not exist, cloning..."
+  git clone ssh://git@ext-gitlab.denglin.com:23/software/ci/docker.git "$DOCKER_REPO_PATH"
 else
-    echo "[INFO] docker directory already exists, checking branch..."
-    cd "$DOCKER_REPO_PATH"
-    current_branch=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$current_branch" != "main" ]; then
-        echo "[INFO] Current branch is $current_branch, switching to main..."
-        git fetch origin main
-        git checkout main
-    else
-        echo "[INFO] Already on main branch."
-    fi
-    cd -
+  echo "[INFO] docker directory already exists, checking branch..."
+  cd "$DOCKER_REPO_PATH"
+  current_branch=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$current_branch" != "main" ]; then
+    echo "[INFO] Current branch is $current_branch, switching to main..."
+    git fetch origin main
+    git checkout main
+  else
+    echo "[INFO] Already on main branch."
+  fi
+  cd -
 fi

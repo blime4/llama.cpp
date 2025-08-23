@@ -23,13 +23,14 @@ if [ -d "${build_dir}/bin" ]; then
     echo "[INFO] Files to be released:"
     ls -la release/
 
+    ARCH=${DOCKER_PLATFORM}
+
     echo "Release Version: ${CI_COMMIT_TAG}" > release/version.txt
     echo "Build Date: $(date)" >> release/version.txt
     echo "Commit SHA: ${CI_COMMIT_SHA}" >> release/version.txt
-    echo "Build Platform: x86" >> release/version.txt
+    echo "Build Platform: ${ARCH}" >> release/version.txt
     echo "Architecture: $(uname -m)" >> release/version.txt
 
-    ARCH=$(uname -m)
     RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-${ARCH}.zip"
     zip -r "${RELEASE_NAME}" release/*
 

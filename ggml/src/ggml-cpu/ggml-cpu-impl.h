@@ -338,7 +338,7 @@ inline static int32x4_t ggml_vdotq_s32(int32x4_t acc, int8x16_t a, int8x16_t b) 
 #include <immintrin.h>
 #endif
 
-#ifdef __riscv_v_intrinsic
+#if defined(__riscv_v_intrinsic) || (defined(__riscv_v) && __riscv_v > 0)
 #include <riscv_vector.h>
 #endif
 

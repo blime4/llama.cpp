@@ -30,7 +30,7 @@ void quantize_row_q8_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
 
     block_q8_0 * GGML_RESTRICT y = vy;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && (__riscv_v > 0)
 
     size_t vl = QK8_0;
 
@@ -70,7 +70,7 @@ void quantize_row_q8_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
 
     block_q8_1 * GGML_RESTRICT y = vy;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && (__riscv_v > 0)
 
     size_t vl = QK8_1;
 
@@ -132,7 +132,7 @@ void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     int ib = 0;
     float sumf = 0;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && (__riscv_v > 0)
     size_t vl = qk / 2;
 
     for (; ib < nb; ++ib) {
@@ -201,7 +201,7 @@ void ggml_vec_dot_q4_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
     int ib = 0;
     float sumf = 0;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && __riscv_v > 0
     size_t vl = qk / 2;
 
     for (; ib < nb; ++ib) {
@@ -267,7 +267,7 @@ void ggml_vec_dot_q5_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     const block_q5_0 * GGML_RESTRICT x = vx;
     const block_q8_0 * GGML_RESTRICT y = vy;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && __riscv_v > 0
     size_t vl;
     size_t vlenb = __riscv_vlenb();
 
@@ -341,7 +341,7 @@ void ggml_vec_dot_q5_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
     const block_q5_1 * GGML_RESTRICT x = vx;
     const block_q8_1 * GGML_RESTRICT y = vy;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && __riscv_v > 0
     size_t vl;
     size_t vlenb = __riscv_vlenb();
 
@@ -413,7 +413,7 @@ void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     int ib = 0;
     float sumf = 0;
 
-#if defined(__riscv_v)
+#if defined(__riscv_v) && (__riscv_v > 0)
     size_t vl = qk;
 
     for (; ib < nb; ++ib) {
@@ -554,7 +554,7 @@ void ggml_vec_dot_q2_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     *s = sumf;
 
-#elif defined __riscv_v
+#elif defined __riscv_v && __riscv_v > 0
 
     float sumf = 0;
     uint8_t atmp[16];
@@ -923,7 +923,7 @@ void ggml_vec_dot_q3_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     *s = sumf;
 
-#elif defined __riscv_v
+#elif defined __riscv_v && __riscv_v > 0
 
     uint32_t utmp[4];
     float sumf = 0;
@@ -1348,7 +1348,7 @@ void ggml_vec_dot_q4_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     *s = sumf;
 
-#elif defined __riscv_v
+#elif defined __riscv_v && __riscv_v > 0
 
     const uint8_t * scales = (const uint8_t*)&utmp[0];
     const uint8_t * mins   = (const uint8_t*)&utmp[2];
@@ -1610,7 +1610,7 @@ void ggml_vec_dot_q5_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     uint32_t utmp[4];
 
-#if defined __riscv_v
+#if defined __riscv_v && __riscv_v > 0
 
     const uint8_t * scales = (const uint8_t*)&utmp[0];
     const uint8_t * mins   = (const uint8_t*)&utmp[2];
@@ -1854,7 +1854,7 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
 
     *s = sumf;
 
-#elif defined __riscv_v
+#elif defined __riscv_v && __riscv_v > 0
 
     float sumf = 0;
     const int vector_length = __riscv_vlenb() * 8;

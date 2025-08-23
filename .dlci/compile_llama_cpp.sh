@@ -1,3 +1,5 @@
+#!/bin/bash
+
 set -e
 env
 source ${SDK_WORKSPACE}/sdk/env.sh
@@ -78,8 +80,13 @@ echo "[INFO] Custom bin directory '$CUSTOM_BIN_DIR' added to PATH."
 sdk=${SDK_WORKSPACE}/sdk
 echo "[INFO] REPO_PATH: ${REPO_PATH}"
 cd ${REPO_PATH}
+build_dir=${REPO_PATH}/../build
 
-cmake -G Ninja -B ../build \
+if [ -d ${build_dir} ]; then
+    rm -rf ${build_dir}
+fi
+
+cmake -G Ninja -B ${build_dir} \
     -DGGML_DLCU=ON \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
     -DCMAKE_BUILD_TYPE=Release \
@@ -94,8 +101,8 @@ cmake -G Ninja -B ../build \
 
 ccache --show-stats
 
-#cmake --build ../build --config Release -j 12
-cd ../build
+#cmake --build ${build_dir} --config Release -j 12
+cd ${build_dir}
 
 ninja -j 12
 

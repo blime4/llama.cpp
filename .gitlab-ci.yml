@@ -1,12 +1,12 @@
 variables:
-  SDK_TAG: V2_SOFTWARE_master_202507212139
+  SDK_TAG: V2_SOFTWARE_master_202508201444
   REPO_PATH: "${CI_PROJECT_DIR}"
   LOCAL_MODEL_PATH: "/mars/aebox/LLM/model"
   SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
   DOCKER_IMAGE_X86: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
   DOCKER_IMAGE_AARCH64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702"
-  DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv_20250707"
+  DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822"
 
 .docker_envs: &docker_envs |
   DOCKER_ENVS=()
@@ -17,22 +17,24 @@ variables:
 stages:
   - compile_and_test_llama_cpp_x86_64
   - compile_and_test_llama_cpp_aarch64
-  #- compile_and_test_llama_cpp_riscv64
+  - compile_and_test_llama_cpp_riscv64
   - release_llama_cpp_x86_64
   - release_llama_cpp_aarch64
-  #- release_llama_cpp_riscv64
+  - release_llama_cpp_riscv64
 
 compile_and_test_llama_cpp_x86_64:
   stage: compile_and_test_llama_cpp_x86_64
+  variables:
+    DOCKER_PLATFORM: x86_64
   tags:
-    - pytorch
+    - build-x86_64
   script:
     - git submodule sync && git submodule update --init --recursive
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
   artifacts:
     paths:
       - build/bin
@@ -40,68 +42,78 @@ compile_and_test_llama_cpp_x86_64:
 
 compile_and_test_llama_cpp_aarch64:
   stage: compile_and_test_llama_cpp_aarch64
+  variables:
+    DOCKER_PLATFORM: aarch64
   tags:
-    - pytorch-aarch64
+    - build-arm64
   script:
     - git submodule sync && git submodule update --init --recursive
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
   artifacts:
     paths:
       - build/bin
     expire_in: 1 day
 
-# compile_and_test_llama_cpp_riscv64:
-#   stage: compile_and_test_llama_cpp_riscv64
-#   tags:
-#     - pytorch-riscv64
-#   script:
-#     - git submodule sync && git submodule update --init --recursive
-#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-#     - export sdk_path="${SDK_WORKSPACE}/sdk"
-#     - *docker_envs
-#     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/compile_llama_cpp.sh
-#     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/test_llama_cpp.sh
-#   artifacts:
-#     paths:
-#       - build/bin
-#     expire_in: 1 day
+compile_and_test_llama_cpp_riscv64:
+  stage: compile_and_test_llama_cpp_riscv64
+  variables:
+    DOCKER_PLATFORM: riscv64
+  tags:
+    - build-x86_64
+  script:
+    - git submodule sync && git submodule update --init --recursive
+    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
+    #- ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/test_llama_cpp.sh
+  artifacts:
+    paths:
+      - build/bin
+    expire_in: 1 day
 
 release_llama_cpp_x86_64:
   stage: release_llama_cpp_x86_64
+  variables:
+    DOCKER_PLATFORM: x86_64
   tags:
-    - pytorch
+    - build-x86_64
   dependencies:
     - compile_and_test_llama_cpp_x86_64
   only:
     - /^dl-release-.*$/
   script:
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
 
 release_llama_cpp_aarch64:
   stage: release_llama_cpp_aarch64
+  variables:
+    DOCKER_PLATFORM: aarch64
   tags:
-    - pytorch-aarch64
+    - build-arm64
   dependencies:
     - compile_and_test_llama_cpp_aarch64
   only:
     - /^dl-release-.*$/
   script:
     - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
 
-# release_llama_cpp_riscv64:
-#   stage: release_llama_cpp_riscv64
-#   tags:
-#     - pytorch-riscv64
-#   dependencies:
-#     - compile_and_test_llama_cpp_riscv64
-#   only:
-#     - /^dl-release-.*$/
-#   script:
-#     - *docker_envs
-#     - ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/release_llama_cpp.sh
+release_llama_cpp_riscv64:
+  stage: release_llama_cpp_riscv64
+  variables:
+    DOCKER_PLATFORM: riscv64
+  tags:
+    - build-x86_64
+  dependencies:
+    - compile_and_test_llama_cpp_riscv64
+  only:
+    - /^dl-release-.*$/
+  script:
+    - *docker_envs
+    - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/release_llama_cpp.sh
