@@ -146,9 +146,6 @@ public:
 
     uint32_t get_n_kv(const slot_info & sinfo) const;
 
-    // TODO: temporary
-    bool get_supports_set_rows() const;
-
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
@@ -325,9 +322,6 @@ public:
     //
 
     uint32_t get_n_kv() const;
-
-    // TODO: temporary
-    bool get_supports_set_rows() const;
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
