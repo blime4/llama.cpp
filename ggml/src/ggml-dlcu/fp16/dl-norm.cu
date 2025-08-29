@@ -1,11 +1,30 @@
+#include "cuda_fp16.h"
 #include "dl-fp16.cuh"
 
-template <int block_size, bool do_multiply = false>
-static __global__ void rms_norm_f16(
-        const half * x, half * dst, const int ncols, const int64_t stride_row, const int64_t stride_channel,
-        const int64_t stride_sample, const float eps, const float * mul = nullptr, const int64_t mul_stride_row = 0,
-        const int64_t mul_stride_channel = 0, const int64_t mul_stride_sample = 0, const int mul_ncols = 0,
-        const int mul_nrows = 0, const int mul_nchannels = 0, const int mul_nsamples = 0) {
+
+template <int block_size, bool do_multiply = false, bool do_add = false>
+static __global__ void rms_norm_f16(const half * x, half *       dst,
+                                            const int     ncols,
+                                            const int64_t stride_row,
+                                            const int64_t stride_channel,
+                                            const int64_t stride_sample,
+                                            const float   eps,
+                                            const float * mul                = nullptr,
+                                            const int64_t mul_stride_row     = 0,
+                                            const int64_t mul_stride_channel = 0,
+                                            const int64_t mul_stride_sample  = 0,
+                                            const int     mul_ncols          = 0,
+                                            const int     mul_nrows          = 0,
+                                            const int     mul_nchannels      = 0,
+                                            const int     mul_nsamples       = 0,
+                                            const float * add                = nullptr,
+                                            const int64_t add_stride_row     = 0,
+                                            const int64_t add_stride_channel = 0,
+                                            const int64_t add_stride_sample  = 0,
+                                            const int     add_ncols          = 0,
+                                            const int     add_nrows          = 0,
+                                            const int     add_nchannels      = 0,
+                                            const int     add_nsamples       = 0) {
     const int nrows     = gridDim.x;
     const int nchannels = gridDim.y;
 
@@ -24,10 +43,17 @@ static __global__ void rms_norm_f16(
         mul += mul_sample*mul_stride_sample + mul_channel*mul_stride_channel + mul_row*mul_stride_row;
     }
 
+    if constexpr (do_add) {
+        const int add_row     = row % add_nrows;
+        const int add_channel = channel % add_nchannels;
+        const int add_sample  = sample % add_nsamples;
+        add += add_sample * add_stride_sample + add_channel * add_stride_channel + add_row * add_stride_row;
+    }
+
     float tmp = 0.0f; // partial sum for thread in warp
 
     for (int col = tid; col < ncols; col += block_size) {
-        const float xi = __half2float(x[col]);
+        const float xi = static_cast<float>(x[col]);
         tmp += xi * xi;
     }
 
@@ -51,10 +77,16 @@ static __global__ void rms_norm_f16(
 
     for (int col = tid; col < ncols; col += block_size) {
         const float xf = static_cast<float>(x[col]);
-        if constexpr (do_multiply) {
+        if constexpr (do_multiply && do_add) {
             const int mul_col = col % mul_ncols;
-            const float mf = mul[mul_col];
-            dst[col] = static_cast<half>(scale * xf * mf);
+            const int add_col = col % add_ncols;
+            dst[col] = static_cast<half>(scale * xf * mul[mul_col] + add[add_col]);
+        } else if constexpr (do_multiply) {
+            const int mul_col = col % mul_ncols;
+            dst[col] = static_cast<half>(scale * xf * mul[mul_col]);
+        } else if constexpr (do_add) {
+            const int add_col = col % add_ncols;
+            dst[col] += static_cast<half>(add[add_col]);
         } else {
             dst[col] = static_cast<half>(scale * xf);
         }
@@ -74,22 +106,69 @@ void rms_norm_f16_cuda(
     }
 }
 
-void rms_norm_mul_f16_cuda(
-        const half * x, const float * mul, half * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
-        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample,
-        const int64_t mul_stride_row, const int64_t mul_stride_channel, const int64_t mul_stride_sample,
-        const int mul_ncols, const int mul_nrows, const int mul_nchannels, const int mul_nsamples,
-        const float eps, cudaStream_t stream) {
+void rms_norm_mul_f16_cuda(const half * x,
+                           const float * mul,
+                           const float * add,
+                           half * dst,
+                           const int     ncols,
+                           const int     nrows,
+                           const int     nchannels,
+                           const int     nsamples,
+                           const int64_t stride_row,
+                           const int64_t stride_channel,
+                           const int64_t stride_sample,
+                           const int64_t mul_stride_row,
+                           const int64_t mul_stride_channel,
+                           const int64_t mul_stride_sample,
+                           const int     mul_ncols,
+                           const int     mul_nrows,
+                           const int     mul_nchannels,
+                           const int     mul_nsamples,
+                           const int64_t add_stride_row,
+                           const int64_t add_stride_channel,
+                           const int64_t add_stride_sample,
+                           const int     add_ncols,
+                           const int     add_nrows,
+                           const int     add_nchannels,
+                           const int     add_nsamples,
+                           const float   eps,
+                           cudaStream_t  stream) {
     const dim3 blocks_num(nrows, nchannels, nsamples);
     if (mul == nullptr) {
         rms_norm_f16_cuda(x, dst, ncols, nrows, nchannels, nsamples, stride_row, stride_channel, stride_sample, eps, stream);
         return;
     }
-    if (ncols < 1024) {
-        const dim3 block_dims(WARP_SIZE, 1, 1);
-        rms_norm_f16<WARP_SIZE, true><<<blocks_num, block_dims, 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps, mul, mul_stride_row, mul_stride_channel, mul_stride_sample, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples);
+    if (add == nullptr) {
+        if (ncols < 1024) {
+            const dim3 block_dims(WARP_SIZE, 1, 1);
+            rms_norm_f16<WARP_SIZE, true><<<blocks_num, block_dims, 0, stream>>>(x, dst,
+                ncols, stride_row, stride_channel, stride_sample, eps,
+                mul, mul_stride_row, mul_stride_channel, mul_stride_sample,
+                mul_ncols, mul_nrows, mul_nchannels, mul_nsamples);
+        } else {
+            const dim3 block_dims(1024, 1, 1);
+            rms_norm_f16<1024, true><<<blocks_num, block_dims, 0, stream>>>(x, dst,
+                ncols, stride_row, stride_channel, stride_sample, eps,
+                mul, mul_stride_row, mul_stride_channel, mul_stride_sample,
+                mul_ncols, mul_nrows, mul_nchannels, mul_nsamples);
+        }
     } else {
-        const dim3 block_dims(1024, 1, 1);
-        rms_norm_f16<1024, true><<<blocks_num, block_dims, 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps, mul, mul_stride_row, mul_stride_channel, mul_stride_sample, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples);
+        if (ncols < 1024) {
+            const dim3 block_dims(WARP_SIZE, 1, 1);
+            rms_norm_f16<WARP_SIZE, true, true><<<blocks_num, block_dims, 0, stream>>>(x, dst,
+                ncols, stride_row, stride_channel, stride_sample, eps,
+                mul, mul_stride_row, mul_stride_channel, mul_stride_sample,
+                mul_ncols, mul_nrows, mul_nchannels, mul_nsamples,
+                add, add_stride_row, add_stride_channel, add_stride_sample,
+                add_ncols, add_nrows, add_nchannels, add_nsamples);
+        } else {
+            const dim3 block_dims(1024, 1, 1);
+            rms_norm_f16<1024, true, true><<<blocks_num, block_dims, 0, stream>>>(x, dst,
+                ncols, stride_row, stride_channel, stride_sample, eps,
+                mul, mul_stride_row, mul_stride_channel, mul_stride_sample,
+                mul_ncols, mul_nrows, mul_nchannels, mul_nsamples,
+                add, add_stride_row, add_stride_channel, add_stride_sample,
+                add_ncols, add_nrows, add_nchannels, add_nsamples);
+        }
     }
 }
