@@ -32,6 +32,7 @@
 // backend buffer type
 
 const char * ggml_backend_buft_name(ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(buft);
     return buft->iface.get_name(buft);
 }
 
@@ -41,14 +42,17 @@ ggml_backend_buffer_t ggml_backend_buft_alloc_buffer(ggml_backend_buffer_type_t 
         return ggml_backend_buffer_init(buft, {}, NULL, 0);
     }
 
+    GGML_ASSERT(buft);
     return buft->iface.alloc_buffer(buft, size);
 }
 
 size_t ggml_backend_buft_get_alignment(ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(buft);
     return buft->iface.get_alignment(buft);
 }
 
 size_t ggml_backend_buft_get_max_size(ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(buft);
     // get_max_size is optional, defaults to SIZE_MAX
     if (buft->iface.get_max_size) {
         return buft->iface.get_max_size(buft);
@@ -57,6 +61,7 @@ size_t ggml_backend_buft_get_max_size(ggml_backend_buffer_type_t buft) {
 }
 
 size_t ggml_backend_buft_get_alloc_size(ggml_backend_buffer_type_t buft, const struct ggml_tensor * tensor) {
+    GGML_ASSERT(buft);
     // get_alloc_size is optional, defaults to ggml_nbytes
     if (buft->iface.get_alloc_size) {
         size_t size = buft->iface.get_alloc_size(buft, tensor);
@@ -67,6 +72,7 @@ size_t ggml_backend_buft_get_alloc_size(ggml_backend_buffer_type_t buft, const s
 }
 
 bool ggml_backend_buft_is_host(ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(buft);
     if (buft->iface.is_host) {
         return buft->iface.is_host(buft);
     }
@@ -74,6 +80,7 @@ bool ggml_backend_buft_is_host(ggml_backend_buffer_type_t buft) {
 }
 
 ggml_backend_dev_t ggml_backend_buft_get_device(ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(buft);
     return buft->device;
 }
 
@@ -111,10 +118,12 @@ void ggml_backend_buffer_free(ggml_backend_buffer_t buffer) {
 }
 
 size_t ggml_backend_buffer_get_size(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     return buffer->size;
 }
 
 void * ggml_backend_buffer_get_base(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     // get_base is optional if the buffer is zero-sized
     if (buffer->size == 0) {
         return NULL;
@@ -128,6 +137,7 @@ void * ggml_backend_buffer_get_base(ggml_backend_buffer_t buffer) {
 }
 
 enum ggml_status ggml_backend_buffer_init_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor) {
+    GGML_ASSERT(buffer);
     // init_tensor is optional
     if (buffer->iface.init_tensor) {
         return buffer->iface.init_tensor(buffer, tensor);
@@ -136,6 +146,7 @@ enum ggml_status ggml_backend_buffer_init_tensor(ggml_backend_buffer_t buffer, s
 }
 
 void ggml_backend_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+    GGML_ASSERT(buffer);
     // clear is optional if the buffer is zero-sized
     if (buffer->size == 0) {
         return;
@@ -161,6 +172,7 @@ bool ggml_backend_buffer_is_host(ggml_backend_buffer_t buffer) {
 }
 
 void ggml_backend_buffer_set_usage(ggml_backend_buffer_t buffer, enum ggml_backend_buffer_usage usage) {
+    GGML_ASSERT(buffer);
     buffer->usage = usage;
 
     // FIXME: add a generic callback to the buffer interface
@@ -170,14 +182,17 @@ void ggml_backend_buffer_set_usage(ggml_backend_buffer_t buffer, enum ggml_backe
 }
 
 enum ggml_backend_buffer_usage ggml_backend_buffer_get_usage(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     return buffer->usage;
 }
 
 ggml_backend_buffer_type_t ggml_backend_buffer_get_type(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     return buffer->buft;
 }
 
 void ggml_backend_buffer_reset(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     if (buffer->iface.reset) {
         buffer->iface.reset(buffer);
     }
@@ -216,6 +231,7 @@ void ggml_backend_free(ggml_backend_t backend) {
 }
 
 ggml_backend_buffer_type_t ggml_backend_get_default_buffer_type(ggml_backend_t backend) {
+    GGML_ASSERT(backend);
     return ggml_backend_dev_buffer_type(backend->device);
 }
 
@@ -232,6 +248,8 @@ size_t ggml_backend_get_max_size(ggml_backend_t backend) {
 }
 
 void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+    GGML_ASSERT(backend);
+    GGML_ASSERT(tensor);
     GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
     GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor write out of bounds");
 
@@ -243,6 +261,8 @@ void ggml_backend_tensor_set_async(ggml_backend_t backend, struct ggml_tensor * 
 }
 
 void ggml_backend_tensor_get_async(ggml_backend_t backend, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
+    GGML_ASSERT(backend);
+    GGML_ASSERT(tensor);
     GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
     GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor read out of bounds");
 
@@ -284,6 +304,7 @@ void ggml_backend_tensor_get(const struct ggml_tensor * tensor, void * data, siz
 }
 
 void ggml_backend_tensor_memset(struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
+    GGML_ASSERT(tensor);
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
     if (size == 0) {
@@ -299,6 +320,7 @@ void ggml_backend_tensor_memset(struct ggml_tensor * tensor, uint8_t value, size
 }
 
 void ggml_backend_synchronize(ggml_backend_t backend) {
+    GGML_ASSERT(backend);
     if (backend->iface.synchronize == NULL) {
         return;
     }
@@ -307,18 +329,21 @@ void ggml_backend_synchronize(ggml_backend_t backend) {
 }
 
 ggml_backend_graph_plan_t ggml_backend_graph_plan_create(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+    GGML_ASSERT(backend);
     GGML_ASSERT(backend->iface.graph_plan_create != NULL);
 
     return backend->iface.graph_plan_create(backend, cgraph);
 }
 
 void ggml_backend_graph_plan_free(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
+    GGML_ASSERT(backend);
     GGML_ASSERT(backend->iface.graph_plan_free != NULL);
 
     backend->iface.graph_plan_free(backend, plan);
 }
 
 enum ggml_status ggml_backend_graph_plan_compute(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
+    GGML_ASSERT(backend);
     GGML_ASSERT(backend->iface.graph_plan_compute != NULL);
 
     return backend->iface.graph_plan_compute(backend, plan);
@@ -331,23 +356,27 @@ enum ggml_status ggml_backend_graph_compute(ggml_backend_t backend, struct ggml_
 }
 
 enum ggml_status ggml_backend_graph_compute_async(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-    // printf("run cgraph %d, %d, %d\n", cgraph->n_tokens, cgraph->flash_attn, cgraph->n_nodes);
+    GGML_ASSERT(backend);
     return backend->iface.graph_compute(backend, cgraph);
 }
 
 bool ggml_backend_supports_op(ggml_backend_t backend, const struct ggml_tensor * op) {
+    GGML_ASSERT(backend);
     return ggml_backend_dev_supports_op(backend->device, op);
 }
 
 bool ggml_backend_supports_buft(ggml_backend_t backend, ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(backend);
     return ggml_backend_dev_supports_buft(backend->device, buft);
 }
 
 bool ggml_backend_offload_op(ggml_backend_t backend, const struct ggml_tensor * op) {
+    GGML_ASSERT(backend);
     return ggml_backend_dev_offload_op(backend->device, op);
 }
 
 ggml_backend_dev_t ggml_backend_get_device(ggml_backend_t backend) {
+    GGML_ASSERT(backend);
     return backend->device;
 }
 
@@ -383,6 +412,7 @@ void ggml_backend_tensor_copy_async(ggml_backend_t backend_src, ggml_backend_t b
         return;
     }
 
+    GGML_ASSERT(backend_dst);
     if (backend_dst->iface.cpy_tensor_async != NULL) {
         if (backend_dst->iface.cpy_tensor_async(backend_src, backend_dst, src, dst)) {
             return;
@@ -414,18 +444,21 @@ void ggml_backend_event_free(ggml_backend_event_t event) {
 }
 
 void ggml_backend_event_record(ggml_backend_event_t event, ggml_backend_t backend) {
+    GGML_ASSERT(backend);
     GGML_ASSERT(backend->iface.event_record != NULL);
 
     backend->iface.event_record(backend, event);
 }
 
 void ggml_backend_event_synchronize(ggml_backend_event_t event) {
+    GGML_ASSERT(event);
     GGML_ASSERT(event->device->iface.event_synchronize);
 
     event->device->iface.event_synchronize(event->device, event);
 }
 
 void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
+    GGML_ASSERT(backend);
     GGML_ASSERT(backend->iface.event_wait != NULL);
 
     backend->iface.event_wait(backend, event);
@@ -434,18 +467,22 @@ void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event)
 // Backend device
 
 const char * ggml_backend_dev_name(ggml_backend_dev_t device) {
+    GGML_ASSERT(device);
     return device->iface.get_name(device);
 }
 
 const char * ggml_backend_dev_description(ggml_backend_dev_t device) {
+    GGML_ASSERT(device);
     return device->iface.get_description(device);
 }
 
 void ggml_backend_dev_memory(ggml_backend_dev_t device, size_t * free, size_t * total) {
+    GGML_ASSERT(device);
     device->iface.get_memory(device, free, total);
 }
 
 enum ggml_backend_dev_type ggml_backend_dev_type(ggml_backend_dev_t device) {
+    GGML_ASSERT(device);
     return device->iface.get_type(device);
 }
 
@@ -455,18 +492,22 @@ void ggml_backend_dev_get_props(ggml_backend_dev_t device, struct ggml_backend_d
 }
 
 ggml_backend_reg_t ggml_backend_dev_backend_reg(ggml_backend_dev_t device) {
+    GGML_ASSERT(device);
     return device->reg;
 }
 
 ggml_backend_t ggml_backend_dev_init(ggml_backend_dev_t device, const char * params) {
+    GGML_ASSERT(device);
     return device->iface.init_backend(device, params);
 }
 
 ggml_backend_buffer_type_t ggml_backend_dev_buffer_type(ggml_backend_dev_t device) {
+    GGML_ASSERT(device);
     return device->iface.get_buffer_type(device);
 }
 
 ggml_backend_buffer_type_t ggml_backend_dev_host_buffer_type(ggml_backend_dev_t device) {
+    GGML_ASSERT(device);
     if (device->iface.get_host_buffer_type == NULL) {
         return NULL;
     }
@@ -475,18 +516,22 @@ ggml_backend_buffer_type_t ggml_backend_dev_host_buffer_type(ggml_backend_dev_t 
 }
 
 ggml_backend_buffer_t ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t device, void * ptr, size_t size, size_t max_tensor_size) {
+    GGML_ASSERT(device);
     return device->iface.buffer_from_host_ptr(device, ptr, size, max_tensor_size);
 }
 
 bool ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_tensor * op) {
+    GGML_ASSERT(device);
     return device->iface.supports_op(device, op);
 }
 
 bool ggml_backend_dev_supports_buft(ggml_backend_dev_t device, ggml_backend_buffer_type_t buft) {
+    GGML_ASSERT(device);
     return device->iface.supports_buft(device, buft);
 }
 
 bool ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_tensor * op) {
+    GGML_ASSERT(device);
     if (device->iface.offload_op != NULL) {
         return device->iface.offload_op(device, op);
     }
@@ -497,18 +542,22 @@ bool ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_te
 // Backend (reg)
 
 const char * ggml_backend_reg_name(ggml_backend_reg_t reg) {
+    GGML_ASSERT(reg);
     return reg->iface.get_name(reg);
 }
 
 size_t ggml_backend_reg_dev_count(ggml_backend_reg_t reg) {
+    GGML_ASSERT(reg);
     return reg->iface.get_device_count(reg);
 }
 
 ggml_backend_dev_t ggml_backend_reg_dev_get(ggml_backend_reg_t reg, size_t index) {
+    GGML_ASSERT(reg);
     return reg->iface.get_device(reg, index);
 }
 
 void * ggml_backend_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+    GGML_ASSERT(reg);
     if (!reg->iface.get_proc_address) {
         return NULL;
     }
@@ -523,6 +572,7 @@ struct ggml_backend_multi_buffer_context {
 };
 
 static void ggml_backend_multi_buffer_free_buffer(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     ggml_backend_multi_buffer_context * ctx = (ggml_backend_multi_buffer_context *) buffer->context;
     for (size_t i = 0; i < ctx->n_buffers; i++) {
         ggml_backend_buffer_free(ctx->buffers[i]);
@@ -533,6 +583,7 @@ static void ggml_backend_multi_buffer_free_buffer(ggml_backend_buffer_t buffer) 
 }
 
 static void ggml_backend_multi_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
+    GGML_ASSERT(buffer);
     ggml_backend_multi_buffer_context * ctx = (ggml_backend_multi_buffer_context *) buffer->context;
     for (size_t i = 0; i < ctx->n_buffers; i++) {
         ggml_backend_buffer_clear(ctx->buffers[i], value);
@@ -568,10 +619,12 @@ ggml_backend_buffer_t ggml_backend_multi_buffer_alloc_buffer(ggml_backend_buffer
 }
 
 bool ggml_backend_buffer_is_multi_buffer(ggml_backend_buffer_t buffer) {
+    GGML_ASSERT(buffer);
     return buffer->iface.free_buffer == ggml_backend_multi_buffer_free_buffer;
 }
 
 void ggml_backend_multi_buffer_set_usage(ggml_backend_buffer_t buffer, enum ggml_backend_buffer_usage usage) {
+    GGML_ASSERT(buffer);
     GGML_ASSERT(ggml_backend_buffer_is_multi_buffer(buffer));
     ggml_backend_multi_buffer_context * ctx = (ggml_backend_multi_buffer_context *) buffer->context;
     for (size_t i = 0; i < ctx->n_buffers; i++) {
@@ -1359,6 +1412,7 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 }
 
 static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
     struct ggml_backend_sched_split * splits = sched->splits;
 
     ggml_tensor * prev_ids_tensor = nullptr;
@@ -1627,6 +1681,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
 }
 
 void ggml_backend_sched_reset(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
     // reset state for the next run
     if (!sched->is_reset) {
         ggml_hash_set_reset(&sched->hash_set);
@@ -1638,6 +1693,7 @@ void ggml_backend_sched_reset(ggml_backend_sched_t sched) {
 }
 
 bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph) {
+    GGML_ASSERT(sched);
     GGML_ASSERT((int)sched->hash_set.size >= measure_graph->n_nodes + measure_graph->n_leafs);
 
     ggml_backend_sched_synchronize(sched);
@@ -1654,6 +1710,7 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
 }
 
 bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    GGML_ASSERT(sched);
     GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);
     GGML_ASSERT(!sched->is_alloc);
 
@@ -1678,6 +1735,7 @@ enum ggml_status ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, st
 }
 
 enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    GGML_ASSERT(sched);
     if (!sched->is_reset && !sched->is_alloc) {
         ggml_backend_sched_reset(sched);
     }
@@ -1692,6 +1750,7 @@ enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sch
 }
 
 void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
     for (int i = 0; i < sched->n_backends; i++) {
         ggml_backend_synchronize(sched->backends[i]);
     }
@@ -1704,28 +1763,34 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
 }
 
 void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data) {
+    GGML_ASSERT(sched);
     sched->callback_eval = callback;
     sched->callback_eval_user_data = user_data;
 }
 
 int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
     return sched->n_splits;
 }
 
 int ggml_backend_sched_get_n_copies(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
     return sched->n_copies;
 }
 
 int ggml_backend_sched_get_n_backends(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
     return sched->n_backends;
 }
 
 ggml_backend_t ggml_backend_sched_get_backend(ggml_backend_sched_t sched, int i) {
+    GGML_ASSERT(sched);
     GGML_ASSERT(i >= 0 && i < sched->n_backends);
     return sched->backends[i];
 }
 
 size_t ggml_backend_sched_get_buffer_size(ggml_backend_sched_t sched, ggml_backend_t backend) {
+    GGML_ASSERT(sched);
     int backend_index = ggml_backend_sched_backend_id(sched, backend);
     GGML_ASSERT(backend_index >= 0 && backend_index < sched->n_backends);
 
@@ -1733,6 +1798,7 @@ size_t ggml_backend_sched_get_buffer_size(ggml_backend_sched_t sched, ggml_backe
 }
 
 void ggml_backend_sched_set_tensor_backend(ggml_backend_sched_t sched, struct ggml_tensor * node, ggml_backend_t backend) {
+    GGML_ASSERT(sched);
     int backend_index = ggml_backend_sched_backend_id(sched, backend);
     GGML_ASSERT(backend_index >= 0 && backend_index < sched->n_backends);
     tensor_backend_id(node) = backend_index;
@@ -1741,6 +1807,7 @@ void ggml_backend_sched_set_tensor_backend(ggml_backend_sched_t sched, struct gg
 }
 
 ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched, struct ggml_tensor * node) {
+    GGML_ASSERT(sched);
     int backend_index = tensor_backend_id(node);
     if (backend_index == -1) {
         return NULL;
@@ -1751,6 +1818,7 @@ ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched,
 // utils
 
 enum ggml_status ggml_backend_view_init(struct ggml_tensor * tensor) {
+    GGML_ASSERT(tensor);
     GGML_ASSERT(tensor->buffer == NULL);
     GGML_ASSERT(tensor->view_src != NULL);
     GGML_ASSERT(tensor->view_src->buffer != NULL);
@@ -1762,6 +1830,7 @@ enum ggml_status ggml_backend_view_init(struct ggml_tensor * tensor) {
 }
 
 enum ggml_status ggml_backend_tensor_alloc(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, void * addr) {
+    GGML_ASSERT(tensor);
     GGML_ASSERT(tensor->buffer == NULL);
     GGML_ASSERT(tensor->data == NULL);
     GGML_ASSERT(tensor->view_src == NULL);
@@ -1835,6 +1904,7 @@ static void graph_copy_init_tensor(struct ggml_hash_set * hash_set, struct ggml_
 }
 
 struct ggml_backend_graph_copy ggml_backend_graph_copy(ggml_backend_t backend, struct ggml_cgraph * graph) {
+    GGML_ASSERT(graph);
     struct ggml_hash_set hash_set = ggml_hash_set_new(graph->visited_hash_set.size);
     struct ggml_tensor ** node_copies = (ggml_tensor **) calloc(hash_set.size, sizeof(node_copies[0])); // NOLINT
     bool * node_init = (bool *) calloc(hash_set.size, sizeof(node_init[0]));
@@ -1980,6 +2050,7 @@ bool ggml_backend_compare_graph_backend(ggml_backend_t backend1, ggml_backend_t 
 
 static void * ggml_backend_cpu_buffer_get_base(ggml_backend_buffer_t buffer) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_get_base");
+    GGML_ASSERT(buffer);
     uintptr_t data = (uintptr_t)buffer->context;
 
     // align the buffer
@@ -1992,11 +2063,13 @@ static void * ggml_backend_cpu_buffer_get_base(ggml_backend_buffer_t buffer) {
 
 static void ggml_backend_cpu_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_free_buffer");
+    GGML_ASSERT(buffer);
     ggml_aligned_free(buffer->context, buffer->size);
 }
 
 static void ggml_backend_cpu_buffer_memset_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_memset_tensor");
+    GGML_ASSERT(tensor);
     memset((char *)tensor->data + offset, value, size);
 
     GGML_UNUSED(buffer);
@@ -2004,6 +2077,7 @@ static void ggml_backend_cpu_buffer_memset_tensor(ggml_backend_buffer_t buffer, 
 
 static void ggml_backend_cpu_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_set_tensor");
+    GGML_ASSERT(tensor);
     memcpy((char *)tensor->data + offset, data, size);
 
     GGML_UNUSED(buffer);
@@ -2011,6 +2085,7 @@ static void ggml_backend_cpu_buffer_set_tensor(ggml_backend_buffer_t buffer, str
 
 static void ggml_backend_cpu_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_get_tensor");
+    GGML_ASSERT(tensor);
     memcpy(data, (const char *)tensor->data + offset, size);
 
     GGML_UNUSED(buffer);
@@ -2018,6 +2093,7 @@ static void ggml_backend_cpu_buffer_get_tensor(ggml_backend_buffer_t buffer, con
 
 static bool ggml_backend_cpu_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * src, struct ggml_tensor * dst) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_cpy_tensor");
+    GGML_ASSERT(src);
     if (ggml_backend_buffer_is_host(src->buffer)) {
         memcpy(dst->data, src->data, ggml_nbytes(src));
         return true;
@@ -2029,6 +2105,7 @@ static bool ggml_backend_cpu_buffer_cpy_tensor(ggml_backend_buffer_t buffer, con
 
 static void ggml_backend_cpu_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_clear");
+    GGML_ASSERT(buffer);
     memset(buffer->context, value, buffer->size);
 }
 
