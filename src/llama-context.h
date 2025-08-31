@@ -196,7 +196,7 @@ public:
     ggml_status graph_compute(ggml_cgraph * gf, bool batched);
 
     // reserve a graph with a dummy ubatch of the specified size
-    ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx);
+    ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only = false);
     #ifdef GGML_USE_DLFA
     void set_cuda_graph_capture_sizes(const std::vector<uint32_t>& sizes);
     void set_u_nbatch(uint32_t n_ubatch);
