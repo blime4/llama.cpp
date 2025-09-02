@@ -3,7 +3,8 @@
 set -e
 
 echo "[INFO] Starting release_llama_cpp_x86_64 script"
-build_dir="${REPO_PATH}/../build"
+ARCH=${DOCKER_PLATFORM}
+build_dir=${REPO_PATH}/../build_${ARCH}
 
 if [ -z "$REPO_PATH" ]; then
     echo "[ERROR] REPO_PATH environment variable is not set"
@@ -22,8 +23,6 @@ if [ -d "${build_dir}/bin" ]; then
 
     echo "[INFO] Files to be released:"
     ls -la release/
-
-    ARCH=${DOCKER_PLATFORM}
 
     echo "Release Version: ${CI_COMMIT_TAG}" > release/version.txt
     echo "Build Date: $(date)" >> release/version.txt

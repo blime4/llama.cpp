@@ -1,8 +1,15 @@
 #!/bin/bash
 
 set -e
+
+# Ensure sdk_path is set and valid
+if [ -z "$sdk_path" ] || [ ! -d "$sdk_path" ]; then
+  echo "[ERROR] sdk_path is not set or is not a valid directory. Current value: '$sdk_path'"
+  exit 1
+fi
+
 env
-source ${SDK_WORKSPACE}/sdk/env.sh
+source ${sdk_path}/env.sh
 env
 
 ccache --set-config cache_dir=/LocalRun/$(whoami)/cache/llama_cpp_ccache
@@ -38,14 +45,6 @@ else
     export LLAMA_CPP_BUILD_VERSION="${base_version}+${denglin_version}.sdk${sdk_num}"
 fi
 
-# --- Improved ccache setup for CUDA compilation ---
-
-# Ensure sdk_path is set and valid
-if [ -z "$sdk_path" ] || [ ! -d "$sdk_path" ]; then
-  echo "[ERROR] sdk_path is not set or is not a valid directory. Current value: '$sdk_path'"
-  exit 1
-fi
-
 # Define a custom bin directory within sdk_path for our tools like the ccache wrapper.
 # This avoids polluting the main PATH with the entire sdk_path.
 CUSTOM_BIN_DIR="$sdk_path/custom_bin"
@@ -77,17 +76,15 @@ echo "[INFO] Custom bin directory '$CUSTOM_BIN_DIR' added to PATH."
 # --- End of improved ccache setup ---
 
 # --- Compile llama.cpp ---
-sdk=${SDK_WORKSPACE}/sdk
+sdk=$sdk_path
 echo "[INFO] REPO_PATH: ${REPO_PATH}"
 cd ${REPO_PATH}
-build_dir=${REPO_PATH}/../build
 
-if [ -d ${build_dir} ]; then
-    rm -rf ${build_dir}
-fi
+ARCH=${DOCKER_PLATFORM}
+build_dir=${REPO_PATH}/../build_${ARCH}
 
 # Check if running on ARM platform
-if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
+if [ $ARCH = "aarch64" ] || [ $ARCH = "arm64" ]; then
     echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a"
     cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
@@ -120,8 +117,8 @@ fi
 
 ccache --show-stats
 
-#cmake --build ${build_dir} --config Release -j 12
-cd ${build_dir}
+#cmake --build $build_dir --config Release -j 12
+cd $build_dir
 
 ninja -j 12
 

@@ -2,7 +2,7 @@
 set -e
 # ---------- ci/cd ----------
 env
-source "${SDK_WORKSPACE}/sdk/env.sh"
+source ${sdk_path}/env.sh
 env
 
 # Configure ccache
@@ -16,7 +16,9 @@ ccache --zero-stats
 echo "[INFO] REPO_PATH: ${REPO_PATH}"
 echo "[INFO] LOCAL_MODEL_PATH: ${LOCAL_MODEL_PATH}"
 cd "${REPO_PATH}"
-build_dir="$(pwd)/../build"
+
+ARCH=${DOCKER_PLATFORM}
+build_dir=$(pwd)/../build_${ARCH}
 
 # Check if build directory exists
 if [ ! -d "${build_dir}" ]; then

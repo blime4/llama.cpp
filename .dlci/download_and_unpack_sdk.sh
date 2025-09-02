@@ -43,10 +43,6 @@ else
   exit 1
 fi
 
-if [[ -d sdk ]]; then
-  rm -rf sdk
-fi
-
 # Step 2: Extract SDK
 if [[ "$ARCH" == "x86_64" && ! -d sdk ]]; then
   echo "[INFO] Extracting SDK archive for x86_64..."
@@ -55,10 +51,11 @@ elif [[ "$ARCH" == "aarch64" && ! -d sdk ]]; then
   echo "[INFO] Extracting SDK archive for aarch64..."
   tar xf *-aarch64.tar.bz2
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
-elif [[ "$ARCH" == "riscv64" && ! -d sdk ]]; then
+elif [[ "$ARCH" == "riscv64" && ! -d sdk_${ARCH} ]]; then
   echo "[INFO] Extracting SDK archive for riscv64..."
   tar xf *-riscv-riscv64.tar.bz2
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
+  mv sdk sdk_${ARCH}
 else
   echo "[INFO] SDK already extracted, skipping"
 fi
@@ -67,9 +64,7 @@ fi
 # cd sdk
 # echo "[INFO] Downloading PyTorch .whl packages to $(pwd)"
 # jf rt dl daily-pytorch-v2-pt2.5/${SDK_TAG}/cp312-cp312_manylinux/ -flat=true
-if [ -d "$DOCKER_REPO_PATH" ]; then
-  rm -rf "$DOCKER_REPO_PATH"
-fi
+
 # Step 4: Clone docker repo and check branch
 if [ ! -d "$DOCKER_REPO_PATH" ]; then
   echo "[INFO] docker directory does not exist, cloning..."
