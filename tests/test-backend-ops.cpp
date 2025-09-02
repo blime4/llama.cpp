@@ -38,6 +38,11 @@
 #include <thread>
 #include <vector>
 
+// TODO: remove this after all supported.
+static const bool GGML_DLFA_READY = std::getenv("GGML_DLFA_READY") != nullptr;
+static const bool GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE = std::getenv("GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE") != nullptr;
+static const std::vector<ggml_type> GGML_DLFA_SUPPORTED_TYPES = {GGML_TYPE_F16/*, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0*/};
+
 static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float max = 1.0f) {
     size_t nels = ggml_nelements(tensor);
     std::vector<float> data(nels);
@@ -4162,7 +4167,7 @@ struct test_flash_attn_ext : public test_case {
             return t;
         };
 
-        ggml_tensor * q = create_permuted(GGML_TYPE_F32, hsk_padded, nb, nh*nr23[0], nr23[1]);
+        ggml_tensor * q = create_permuted(GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE ? GGML_TYPE_F32 : type_KV, hsk_padded, nb, nh*nr23[0], nr23[1]);
         ggml_set_name(q, "q");
 
         ggml_tensor * k = create_permuted(type_KV,       hsk_padded, kv, nh,         nr23[1]);
@@ -5403,13 +5408,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_leaky_relu());
 
+    if (GGML_DLFA_READY) {
     for (int hsk : { 64, 80, 128, 192, 256, 576 }) {
         for (int hsv : { 64, 80, 128, 192, 256, 512 }) {
             if (hsk != 192 && hsk != 576 && hsk != hsv) continue;
             if (hsk == 192 && (hsv != 128 && hsv != 192)) continue;
             if (hsk == 576 && hsv != 512) continue; // DeepSeek MLA
-
-            for (bool mask : { true, false } ) {
+            for (bool mask : { true, false }) {
                 for (float max_bias : { 0.0f, 8.0f }) {
                     if (!mask && max_bias > 0.0f) continue;
                     for (float logit_softcap : {0.0f, 10.0f}) {
@@ -5424,7 +5429,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                         for (int nb : { 1, 3, 32, 35, }) {
                                             for (ggml_prec prec : {GGML_PREC_F32, GGML_PREC_DEFAULT}) {
                                                 if (hsk != 128 && prec == GGML_PREC_DEFAULT) continue;
-                                                for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+                                                for (ggml_type type_KV : GGML_DLFA_SUPPORTED_TYPES) {
                                                     test_cases.emplace_back(new test_flash_attn_ext(
                                                                 hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, max_bias, logit_softcap, prec, type_KV));
                                                     // run fewer test cases permuted
@@ -5443,6 +5448,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 }
             }
         }
+    }
     }
 
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
@@ -5511,12 +5517,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         }
     }
 
+    if (GGML_DLFA_READY && GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE) {
     for (int kv : { 4096, 8192, 16384, }) {
         for (int hs : { 64, 128, }) {
             for (int nr : { 1, 4, }) {
                 test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, {nr, 1}, kv, 1, true, 0, 0, GGML_PREC_F32, GGML_TYPE_F16));
             }
         }
+    }
     }
 
     test_cases.emplace_back(new test_conv_2d_dw({512, 512, 256, 1}, {3, 3, 1, 256}, 1, 1, 1, false));

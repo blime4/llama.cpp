@@ -1,12 +1,14 @@
 // Old and deprecated WMMA FlashAttention implementation.
 // It is still needed for Volta since the memory layout of NVIDIA tensor cores changed with Turing.
 // Long-term the WMMA code should be replaced with a dedicated Volta implementation.
-        #if defined(GGML_USE_DLCU)
-        #include "common.cuh"
-        void ggml_cuda_flash_attn_ext_wmma_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-            return;
-        }
-        #else
+#if defined(GGML_USE_DLCU)
+#include "common.cuh"
+void ggml_cuda_flash_attn_ext_wmma_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(dst);
+    return;
+}
+#else
 #include "common.cuh"
 #include "fattn-common.cuh"
 #include "fattn-wmma-f16.cuh"

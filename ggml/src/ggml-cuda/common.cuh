@@ -242,15 +242,9 @@ typedef float2 dfloat2;
 #endif // !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && __MUSA_ARCH__ < 220)
 
 #if defined(GGML_USE_DLCU)
-
 #if defined(NEW_MMA_AVAILABLE)
 #undef NEW_MMA_AVAILABLE
 #endif
-
-#if defined(FLASH_ATTN_AVAILABLE)
-#undef FLASH_ATTN_AVAILABLE
-#endif
-
 #endif
 
 static bool fp16_available(const int cc) {

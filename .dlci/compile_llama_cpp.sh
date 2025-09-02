@@ -86,18 +86,37 @@ if [ -d ${build_dir} ]; then
     rm -rf ${build_dir}
 fi
 
-cmake -G Ninja -B ${build_dir} \
-    -DGGML_DLCU=ON \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DGGML_BACKEND_DL=ON \
-    -DGGML_CPU_ALL_VARIANTS=ON \
-    -DGGML_CUDA_GRAPHS=OFF \
-    -DLLAMA_CURL=OFF \
-    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-    -DGGML_CUDA_FA_ALL_QUANTS=OFF \
-    -DGGML_RVV=OFF \
-    -DSDK_DIR=${sdk}
+# Check if running on ARM platform
+if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
+    echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a"
+    cmake -G Ninja -B ${build_dir} \
+        -DGGML_DLCU=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_CUDA_GRAPHS=OFF \
+        -DLLAMA_CURL=OFF \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DGGML_CUDA_FA=ON \
+        -DGGML_CUDA_FA_ALL_QUANTS=ON \
+        -DGGML_RVV=OFF \
+        -DGGML_CPU_ARM_ARCH=armv8-a \
+        -DSDK_DIR=${sdk}
+else
+    cmake -G Ninja -B ${build_dir} \
+        -DGGML_DLCU=ON \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_CPU_ALL_VARIANTS=ON \
+        -DGGML_CUDA_GRAPHS=OFF \
+        -DLLAMA_CURL=OFF \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DGGML_CUDA_FA=ON \
+        -DGGML_CUDA_FA_ALL_QUANTS=ON \
+        -DGGML_RVV=OFF \
+        -DSDK_DIR=${sdk}
+fi
 
 ccache --show-stats
 

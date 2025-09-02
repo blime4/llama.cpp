@@ -57,6 +57,7 @@ ggml_add_backend_library(ggml-dlcu
 
 add_compile_definitions(GGML_USE_DLCU)
 add_compile_definitions(GGML_USE_DLTU)
+add_compile_definitions(GGML_USE_DLFA)
 
 add_compile_definitions(GGML_CUDA_PEER_MAX_BATCH_SIZE=${GGML_CUDA_PEER_MAX_BATCH_SIZE})
 
@@ -74,6 +75,10 @@ endif()
 
 if (GGML_CUDA_NO_VMM)
 add_compile_definitions(GGML_CUDA_NO_VMM)
+endif()
+
+if (NOT GGML_CUDA_FA)
+    add_compile_definitions(GGML_CUDA_NO_FA)
 endif()
 
 if (GGML_CUDA_F16 OR GGML_CUDA_DMMV_F16)
@@ -122,6 +127,7 @@ endif()
 
 
 target_compile_options(ggml-dlcu PRIVATE -I${SDK_DIR}/include  -fPIC --offload-arch=dlgput64 -x cuda)
-target_link_libraries(ggml-dlcu PRIVATE curt cublas)
+target_link_libraries(ggml-dlcu PRIVATE curt cublas cudnn)
+
 
 set_target_properties(ggml-dlcu PROPERTIES LINKER_LANGUAGE CXX)

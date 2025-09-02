@@ -692,8 +692,10 @@ void launch_fattn(
 
     ggml_tensor * KQV = dst;
 
-    GGML_ASSERT(Q->type == GGML_TYPE_F32);
-    GGML_ASSERT(KQV->type == GGML_TYPE_F32);
+    // DL: TODO: FIXME: This is a hack to allow for different types of Q and KQV.
+    // until GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE, we need to assert that Q and KQV are both F32 or both F16.
+    GGML_ASSERT(Q->type == GGML_TYPE_F32 || Q->type == GGML_TYPE_F16);
+    GGML_ASSERT(KQV->type == GGML_TYPE_F32 || KQV->type == GGML_TYPE_F16);
 
     GGML_ASSERT(      Q->nb[0] == ggml_element_size(Q));
     GGML_ASSERT(      K->nb[0] == ggml_element_size(K));
