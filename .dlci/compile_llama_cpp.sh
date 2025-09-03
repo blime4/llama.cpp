@@ -83,8 +83,10 @@ cd ${REPO_PATH}
 ARCH=${DOCKER_PLATFORM}
 build_dir=${REPO_PATH}/../build_${ARCH}
 
+echo "[INFO] ARCH value: '$ARCH'"
+
 # Check if running on ARM platform
-if [ $ARCH = "aarch64" ] || [ $ARCH = "arm64" ]; then
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a"
     cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \

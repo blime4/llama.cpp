@@ -24,6 +24,7 @@ show_help() {
 SDK_TAG="$DEFAULT_SDK_TAG"
 COMPILE_FIRST=false
 RE_COMPILE=false
+DOCKER_PLATFORM=x86_64
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -65,6 +66,7 @@ export LOCAL_MODEL_PATH="/models"
 export SDK_WORKSPACE="${LOCAL_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
 export DOCKER_REPO_PATH="${LOCAL_BUILDS_DIR}/sdk_llama_cpp/docker"
 export DOCKER_IMAGE_COMPILE="ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
+export DOCKER_PLATFORM="$DOCKER_PLATFORM"
 
 echo "SDK_WORKSPACE: $SDK_WORKSPACE"
 
@@ -108,7 +110,7 @@ if [ "$COMPILE_FIRST" = true ]; then
     echo "[Step 5] Compiling llama.cpp first..."
     if [ "$RE_COMPILE" = true ]; then
         echo "[Step 5] Cleaning local build cache..."
-        rm -rf "${REPO_PATH}/build"
+        rm -rf "${build_dir}"
         rm -rf /LocalRun/$(whoami)/cache/llama_cpp_ccache
     fi
 
