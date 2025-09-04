@@ -27,11 +27,10 @@ llama_kv_cache::llama_kv_cache(
                  uint32_t   n_seq_max,
                  uint32_t   n_pad,
                  uint32_t   n_swa,
-           llama_swa_type   swa_type,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse) :
     model(model), hparams(model.hparams), v_trans(v_trans),
-    n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type) {
+    n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa) {
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
@@ -1279,10 +1278,10 @@ void llama_kv_cache::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * u
         info.present          = true;
         info.is_causal        = causal_attn;
         info.window_right     = causal_attn ? 0 : -1;
-        info.window_left      = (swa_type == LLAMA_SWA_TYPE_STANDARD && n_swa > 0)
+        info.window_left      = (hparams.swa_type == LLAMA_SWA_TYPE_STANDARD && n_swa > 0)
                                     ? (int32_t) n_swa - 1
                                     : -1;
-        info.per_token_window = (swa_type == LLAMA_SWA_TYPE_CHUNKED);
+        info.per_token_window = (hparams.swa_type == LLAMA_SWA_TYPE_CHUNKED);
 
         bool multi_seq = (ubatch->n_seqs_unq > 1);
         for (uint32_t i = 0; i < n_tokens && !multi_seq; ++i) {
@@ -1466,29 +1465,7 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
 }
 
 bool llama_kv_cache::is_masked_swa(llama_pos p0, llama_pos p1) const {
-    assert(p0 >= 0 && p1 >= 0);
-
-    switch (swa_type) {
-        case LLAMA_SWA_TYPE_NONE:
-            {
-            } break;
-        case LLAMA_SWA_TYPE_STANDARD:
-            {
-                if (p1 - p0 >= (int32_t) n_swa) {
-                    return true;
-                }
-            } break;
-        case LLAMA_SWA_TYPE_CHUNKED:
-            {
-                const llama_pos pos_chunk_start = (p1 / n_swa) * n_swa;
-
-                if (p0 < pos_chunk_start) {
-                    return true;
-                }
-            } break;
-    }
-
-    return false;
+    return hparams.is_masked_swa(p0, p1);
 }
 
 void llama_kv_cache::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
