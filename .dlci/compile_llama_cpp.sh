@@ -90,7 +90,6 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a"
     cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CUDA_GRAPHS=OFF \
@@ -104,7 +103,6 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
 else
     cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=ON \
