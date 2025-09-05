@@ -15,15 +15,11 @@ variables:
   done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH)')
 
 stages:
-  - compile_and_test_llama_cpp_x86_64
-  - compile_and_test_llama_cpp_aarch64
-  - compile_and_test_llama_cpp_riscv64
-  - release_llama_cpp_x86_64
-  - release_llama_cpp_aarch64
-  - release_llama_cpp_riscv64
+  - compile_and_test_llama_cpp
+  - release_llama_cpp
 
 compile_and_test_llama_cpp_x86_64:
-  stage: compile_and_test_llama_cpp_x86_64
+  stage: compile_and_test_llama_cpp
   variables:
     DOCKER_PLATFORM: x86_64
   tags:
@@ -41,7 +37,7 @@ compile_and_test_llama_cpp_x86_64:
     expire_in: 1 day
 
 compile_and_test_llama_cpp_aarch64:
-  stage: compile_and_test_llama_cpp_aarch64
+  stage: compile_and_test_llama_cpp
   variables:
     DOCKER_PLATFORM: aarch64
   tags:
@@ -59,7 +55,7 @@ compile_and_test_llama_cpp_aarch64:
     expire_in: 1 day
 
 compile_and_test_llama_cpp_riscv64:
-  stage: compile_and_test_llama_cpp_riscv64
+  stage: compile_and_test_llama_cpp
   variables:
     DOCKER_PLATFORM: riscv64
   tags:
@@ -77,7 +73,7 @@ compile_and_test_llama_cpp_riscv64:
     expire_in: 1 day
 
 release_llama_cpp_x86_64:
-  stage: release_llama_cpp_x86_64
+  stage: release_llama_cpp
   variables:
     DOCKER_PLATFORM: x86_64
   tags:
@@ -91,7 +87,7 @@ release_llama_cpp_x86_64:
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
 
 release_llama_cpp_aarch64:
-  stage: release_llama_cpp_aarch64
+  stage: release_llama_cpp
   variables:
     DOCKER_PLATFORM: aarch64
   tags:
@@ -105,7 +101,7 @@ release_llama_cpp_aarch64:
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
 
 release_llama_cpp_riscv64:
-  stage: release_llama_cpp_riscv64
+  stage: release_llama_cpp
   variables:
     DOCKER_PLATFORM: riscv64
   tags:

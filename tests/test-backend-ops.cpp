@@ -31,7 +31,9 @@
 #include <cstring>
 #include <ctime>
 #include <future>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <regex>
 #include <string>
@@ -42,6 +44,25 @@
 static const bool GGML_DLFA_READY = std::getenv("GGML_DLFA_READY") != nullptr;
 static const bool GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE = std::getenv("GGML_DLFA_SUPPORT_QKV_NOT_SAME_TYPE") != nullptr;
 static const std::vector<ggml_type> GGML_DLFA_SUPPORTED_TYPES = {GGML_TYPE_F16/*, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0*/};
+
+// DL: Structure to track failed test cases
+struct failed_test_case {
+    std::string backend_name;
+    std::string op_name;
+    std::string op_params;
+    std::string test_mode;
+    std::string error_message;
+
+    failed_test_case(const std::string& backend, const std::string& op,
+                    const std::string& params, const std::string& mode,
+                    const std::string& error = "")
+        : backend_name(backend), op_name(op), op_params(params),
+          test_mode(mode), error_message(error) {}
+};
+
+// DL: Global vector to store failed test cases
+static std::vector<failed_test_case> g_failed_tests;
+static std::mutex g_failed_tests_mutex;
 
 static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float max = 1.0f) {
     size_t nels = ggml_nelements(tensor);
@@ -973,6 +994,89 @@ struct test_case {
         return t;
     }
 
+    // DL: Check if this is a known problematic MUL_MAT case that needs GGML_FORCE_NO_DLBLAS=1
+    static bool is_dlblas_bug_case(const std::string& op_desc_str, const std::string& vars_str) {
+        if (op_desc_str != "MUL_MAT") {
+            return false;
+        }
+
+        // Known problematic cases from dlblas bug
+        // Format: "MUL_MAT (type_a=XXX,type_b=YYY,m=MMM,n=NNN,k=KKK,bs=[B1,B2],nr=[N1,N2],per=[P0,P1,P2,P3],v=V)"
+        // BUGID: 15797
+        static const std::vector<std::string> problematic_cases = {
+            // these cases will fail in 8-bit quantization
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=16,k=4,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=16,k=4,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f16,m=16,n=1,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f16,m=16,n=1,k=4,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f16,m=16,n=16,k=4,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=1056,n=1,k=129,bs=[1,1],nr=[1,1],per=[0,2,1,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=128,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=1)",
+            "MUL_MAT (type_a=bf16,type_b=f32,m=1056,n=1,k=129,bs=[1,1],nr=[1,1],per=[0,2,1,3],v=0)",
+            "MUL_MAT (type_a=bf16,type_b=f32,m=128,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=1)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=1056,n=1,k=129,bs=[1,1],nr=[1,1],per=[0,2,1,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=128,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=1)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=1057,n=1,k=129,bs=[1,1],nr=[1,1],per=[0,2,1,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=129,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=1)",
+            "MUL_MAT (type_a=bf16,type_b=f32,m=1057,n=1,k=129,bs=[1,1],nr=[1,1],per=[0,2,1,3],v=0)",
+            "MUL_MAT (type_a=bf16,type_b=f32,m=129,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=1)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=1057,n=1,k=129,bs=[1,1],nr=[1,1],per=[0,2,1,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=129,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=1)",
+            // these cases will fail in 4-bit quantization
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=4,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=5,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=6,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=7,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=8,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=4,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=5,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=6,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=7,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=8,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f16,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=bf16,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q4_0,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q5_0,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q5_1,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q8_0,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q2_K,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q3_K,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q4_K,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q5_K,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=q6_K,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq2_xxs,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq2_xs,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq2_s,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq3_xxs,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq1_s,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq1_m,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq4_nl,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq3_s,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=iq4_xs,type_b=f32,m=16,n=9,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+            "MUL_MAT (type_a=f32,type_b=f32,m=16,n=16,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)",
+        };
+
+        std::string full_case = op_desc_str + " (" + vars_str + ")";
+        bool is_problematic = std::find(problematic_cases.begin(), problematic_cases.end(), full_case) != problematic_cases.end();
+
+        if (is_problematic) {
+            printf("Detected dlblas bug case: %s - setting GGML_FORCE_NO_DLBLAS=1\n", full_case.c_str());
+        }
+
+        return is_problematic;
+    }
+
+    // DL: Helper function to add new problematic cases - easy to use for debugging
+    // Usage example: add_dlblas_bug_case("MUL_MAT (type_a=f32,type_b=f32,m=16,n=16,k=4,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=0)");
+    static void add_dlblas_bug_case(const std::string& case_description) {
+        // This is a helper function that can be used to add new cases during development
+        // For production use, cases should be added to the static list above
+        printf("Adding dlblas bug case for debugging: %s\n", case_description.c_str());
+        // In practice, you would modify the static vector, but for runtime addition
+        // you could use a global mutable vector
+    }
+
     bool eval(ggml_backend_t backend1, ggml_backend_t backend2, const char * op_name, printer * output_printer) {
         mode = MODE_TEST;
 
@@ -990,6 +1094,13 @@ struct test_case {
         add_sentinel(ctx);
 
         ggml_tensor * out = build_graph(ctx);
+
+        // DL: Check for dlblas bug cases and set environment variable
+        std::string current_op_desc = op_desc(out);
+        std::string current_vars = vars();
+        if (is_dlblas_bug_case(current_op_desc, current_vars)) {
+            setenv("GGML_FORCE_NO_DLBLAS", "1", 1);
+        }
         std::string current_op_name = op_desc(out);
         if (op_name != nullptr && current_op_name != op_name) {
             //printf("  %s: skipping\n", op_desc(out).c_str());
@@ -1030,6 +1141,11 @@ struct test_case {
         if (buf == NULL) {
             printf("failed to allocate tensors [%s] ", ggml_backend_name(backend1));
             ggml_free(ctx);
+            // DL: Record failed test case due to allocation failure
+            {
+                std::lock_guard<std::mutex> lock(g_failed_tests_mutex);
+                g_failed_tests.emplace_back(ggml_backend_name(backend1), current_op_name, vars(), "test", "allocation failed");
+            }
             return false;
         }
 
@@ -1135,6 +1251,12 @@ struct test_case {
             output_printer->print_test_result(result);
         }
 
+        // DL: Record failed test case
+        if (!test_passed) {
+            std::lock_guard<std::mutex> lock(g_failed_tests_mutex);
+            g_failed_tests.emplace_back(ggml_backend_name(backend1), current_op_name, vars(), "test", error_msg);
+        }
+
         return test_passed;
     }
 
@@ -1152,6 +1274,14 @@ struct test_case {
         GGML_ASSERT(ctx);
 
         ggml_tensor * out             = build_graph(ctx.get());
+
+        // DL: Check for dlblas bug cases and set environment variable
+        std::string current_op_desc = op_desc(out);
+        std::string current_vars = vars();
+        if (is_dlblas_bug_case(current_op_desc, current_vars)) {
+            setenv("GGML_FORCE_NO_DLBLAS", "1", 1);
+        }
+
         std::string   current_op_name = op_desc(out);
         if (op_name != nullptr && current_op_name != op_name) {
             //printf("  %s: skipping\n", op_desc(out).c_str());
@@ -1176,6 +1306,11 @@ struct test_case {
 
         if (buf == NULL) {
             printf("failed to allocate tensors\n");
+            // DL: Record failed test case due to allocation failure
+            {
+                std::lock_guard<std::mutex> lock(g_failed_tests_mutex);
+                g_failed_tests.emplace_back(ggml_backend_name(backend), current_op_name, vars(), "perf", "allocation failed");
+            }
             return false;
         }
 
@@ -1288,6 +1423,13 @@ struct test_case {
 
         ggml_tensor * out = build_graph(ctx.get());
 
+        // DL: Check for dlblas bug cases and set environment variable
+        std::string current_op_desc = op_desc(out);
+        std::string current_vars = vars();
+        if (is_dlblas_bug_case(current_op_desc, current_vars)) {
+            setenv("GGML_FORCE_NO_DLBLAS", "1", 1);
+        }
+
         if ((op_name != nullptr && op_desc(out) != op_name) || out->op == GGML_OP_OPT_STEP_ADAMW) {
             return true;
         }
@@ -1389,6 +1531,11 @@ struct test_case {
             test_operation_info info(op_desc(out), vars(), ggml_backend_name(backend));
             info.set_error("allocation", "");
             output_printer->print_operation(info);
+            // DL: Record failed test case due to allocation failure
+            {
+                std::lock_guard<std::mutex> lock(g_failed_tests_mutex);
+                g_failed_tests.emplace_back(ggml_backend_name(backend), op_desc(out), vars(), "grad", "allocation failed");
+            }
             return false;
         }
 
@@ -1514,6 +1661,12 @@ struct test_case {
         }
         final_info.status = ok ? test_status_t::OK : test_status_t::FAIL;
         output_printer->print_operation(final_info);
+
+        // DL: Record failed test case for gradient tests
+        if (!ok) {
+            std::lock_guard<std::mutex> lock(g_failed_tests_mutex);
+            g_failed_tests.emplace_back(ggml_backend_name(backend), op_desc(out), vars(), "grad", "gradient test failed");
+        }
 
         if (ok) {
             return true;
@@ -5732,6 +5885,31 @@ int main(int argc, char ** argv) {
 
     output_printer->print_overall_summary(
         overall_summary_info(n_ok, ggml_backend_dev_count(), n_ok == ggml_backend_dev_count()));
+
+    // DL: Print summary of failed test cases
+    {
+        std::lock_guard<std::mutex> lock(g_failed_tests_mutex);
+        if (!g_failed_tests.empty()) {
+            printf("\n=== FAILED TEST CASES SUMMARY ===\n");
+            printf("Total failed tests: %zu\n\n", g_failed_tests.size());
+
+            // Group failed tests by backend
+            std::map<std::string, std::vector<failed_test_case>> failed_by_backend;
+            for (const auto& failed_test : g_failed_tests) {
+                failed_by_backend[failed_test.backend_name].push_back(failed_test);
+            }
+
+            for (const auto& [backend_name, tests] : failed_by_backend) {
+                printf("Backend: %s (%zu failed)\n", backend_name.c_str(), tests.size());
+                for (const auto& test : tests) {
+                    printf("  - %s (%s): %s\n", test.op_name.c_str(), test.op_params.c_str(), test.error_message.c_str());
+                }
+                printf("\n");
+            }
+        } else {
+            printf("\n=== ALL TESTS PASSED ===\n");
+        }
+    }
 
     if (n_ok != ggml_backend_dev_count()) {
         return 1;

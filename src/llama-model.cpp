@@ -4717,7 +4717,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     // DL: used to perform GPTQ quantization uniformly for all MUL_MAT types of tensors
     if (!mul_mat_tensors.empty()) {
         LLAMA_LOG_INFO("%s: [DL] quantizing %zu MUL_MAT tensors to GPTQ format...\n", __func__, mul_mat_tensors.size());
-
+        const int64_t t_quantize_start_us = llama_time_us();
         for (ggml_tensor* tensor : mul_mat_tensors) {
             // DL: only quantize GPU weights tensors - check buffer type
             if (tensor->buffer) {
@@ -4764,7 +4764,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             }
         }
 
-        LLAMA_LOG_INFO("%s: [DL] GPTQ quantization completed\n", __func__);
+        const int64_t t_quantize_end_us = llama_time_us();
+        const int64_t t_quantize_us = t_quantize_end_us - t_quantize_start_us;
+        LLAMA_LOG_INFO("%s: [DL] GPTQ quantization completed in %.2f ms\n", __func__, t_quantize_us/1000.0);
     }
 
     return true;

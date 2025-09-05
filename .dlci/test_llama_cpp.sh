@@ -19,6 +19,7 @@ cd "${REPO_PATH}"
 
 ARCH=${DOCKER_PLATFORM}
 build_dir=$(pwd)/../build_${ARCH}
+export GGML_TEST_MODE=1
 
 # Check if build directory exists
 if [ ! -d "${build_dir}" ]; then

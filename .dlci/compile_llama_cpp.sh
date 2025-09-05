@@ -99,6 +99,7 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
         -DGGML_CPU_ARM_ARCH=armv8-a \
+        -DGGML_NATIVE=OFF \
         -DSDK_DIR=${sdk}
 else
     cmake -G Ninja -B ${build_dir} \

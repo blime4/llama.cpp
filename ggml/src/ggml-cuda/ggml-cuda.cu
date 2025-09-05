@@ -5,6 +5,7 @@
 #include "ggml-backend-impl.h"
 
 #include "ggml-cuda/common.cuh"
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <mutex>
@@ -82,7 +83,7 @@
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
-static bool DEVIT_DEQ = getenv("DEVIT_DEQ") != nullptr;
+static bool DEVIT = getenv("DEVIT") != nullptr;
 static int GGML_CUDA_GPTQ_GROUP_SIZE = []() {
     const char* env = getenv("GGML_CUDA_GPTQ_GROUP_SIZE");
     if (env) {
@@ -233,8 +234,10 @@ static ggml_cuda_device_info ggml_cuda_init() {
         return info;
     }
 
-    GGML_ASSERT(info.device_count <= GGML_CUDA_MAX_DEVICES);
-
+    if (info.device_count > GGML_CUDA_MAX_DEVICES){
+        GGML_LOG_ERROR("%s: found %d " GGML_CUDA_NAME " devices, but only %d are supported\n", __func__, info.device_count, GGML_CUDA_MAX_DEVICES);
+        return info;
+    }
     int64_t total_vram = 0;
 #ifdef GGML_CUDA_FORCE_MMQ
     GGML_LOG_INFO("%s: GGML_CUDA_FORCE_MMQ:    yes\n", __func__);
@@ -1327,7 +1330,7 @@ static void ggml_cuda_op_mul_mat_cublas(
 
             const half alpha_f16 = 1.0f;
             const half beta_f16 = 0.0f;
-            if(DEVIT_DEQ) {
+            if(DEVIT) {
                 std::vector<half> src1_ptr_cpu(10);
                 CUDA_CHECK(cudaMemcpy(src1_ptr_cpu.data(), src1_ptr, 10*sizeof(half), cudaMemcpyDeviceToHost));
                 for ( int i =0 ; i < 10; i++) {
@@ -1343,7 +1346,7 @@ static void ggml_cuda_op_mul_mat_cublas(
                         CUBLAS_COMPUTE_16F,
                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
-            if(DEVIT_DEQ) {
+            if(DEVIT) {
                 std::vector<half> dst_fp16_cpu(10);
                 CUDA_CHECK(cudaMemcpy(dst_fp16_cpu.data(), dst_fp16.get(), 10*sizeof(half), cudaMemcpyDeviceToHost));
                 for (int i = 0; i < 10; i++) {
@@ -1353,7 +1356,7 @@ static void ggml_cuda_op_mul_mat_cublas(
 
             const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
             to_fp32_cuda(dst_fp16.get(), dst_dd_i, row_diff*src1_ncols, stream);
-            if(DEVIT_DEQ) {
+            if(DEVIT) {
                 CUDA_CHECK(cudaStreamSynchronize(stream));
                 std::vector<float> dst_fp32_cpu(10);
                 CUDA_CHECK(cudaMemcpy(dst_fp32_cpu.data(), dst_dd_i, 10*sizeof(float), cudaMemcpyDeviceToHost));
@@ -2107,6 +2110,92 @@ __global__ void ggml_cuda_gptq_quantize_8_bit_fp16(
     }
 }
 
+__global__ void ggml_cuda_gptq_quantize_4_bit_fp16(
+    const half* __restrict__ w,    // [M, K], half type
+    uint8_t* __restrict__ qweight,
+    half* __restrict__ qzeros,
+    half* __restrict__ scales,
+    int K, int M, int group_size
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int group = blockIdx.y * blockDim.y + threadIdx.y;
+    if (row >= M || group * group_size >= K) return;
+
+    float max_val = -FLT_MAX, min_val = FLT_MAX;
+    for (int k = 0; k < group_size && group * group_size + k < K; ++k) {
+        float v = __half2float(w[row * K + (group * group_size + k)]);
+        if (v > max_val) max_val = v;
+        if (v < min_val) min_val = v;
+    }
+
+    float scale, zero_point;
+    const float qmin = 0.0f;
+    const float qmax = 15.0f;  // 4-bit quantization range: 0-15
+
+    if (max_val == min_val) {
+        if (min_val == 0.0f) {
+            scale = 1.0f;
+            zero_point = 0.0f;
+        } else {
+            scale = std::abs(min_val) / 15.0f;
+            if (min_val > 0.0f) {
+                zero_point = qmin;
+            } else {
+                zero_point = qmax;
+            }
+        }
+    } else {
+        scale = (max_val - min_val) / (qmax - qmin);
+        zero_point = qmin - min_val / scale;
+
+        if (zero_point < qmin) zero_point = qmin;
+        if (zero_point > qmax) zero_point = qmax;
+
+        if (scale < 1e-8f) scale = 1e-8f;
+    }
+
+    const int num_groups_row = (K + group_size - 1) / group_size;
+    int scale_idx = row * num_groups_row + group;
+    scales[scale_idx] = __float2half(scale);
+    qzeros[scale_idx] = __float2half(zero_point);
+
+    // Process elements in pairs to avoid race conditions in packing
+    for (int k = 0; k < group_size && group * group_size + k < K; k += 2) {
+        // Process two consecutive elements at once
+        for (int i = 0; i < 2 && group * group_size + k + i < K; ++i) {
+            int col = group * group_size + k + i;
+            float v = __half2float(w[row * K + col]);
+
+            // q = round(v/scale + zero_point)
+            int q;
+            if (max_val == min_val) {
+                if (min_val == 0.0f) {
+                    q = 0;
+                } else {
+                    q = (int)roundf(v / scale + zero_point);
+                }
+            } else {
+                q = (int)roundf(v / scale + zero_point);
+            }
+
+            if (q < 0) q = 0;
+            if (q > 15) q = 15;  // Clamp to 4-bit range
+
+            // Pack two 4-bit values into one byte
+            // Similar to gguf_linear_quantize_weights: (w_q[:,1::2] << 4) | w_q[:, ::2]
+            int packed_col = col / 2;
+
+            if (i == 0) {
+                // First element: store in low 4 bits
+                qweight[row * (K / 2) + packed_col] = (uint8_t)q;
+            } else {
+                // Second element: store in high 4 bits
+                qweight[row * (K / 2) + packed_col] |= (uint8_t)(q << 4);
+            }
+        }
+    }
+}
+
 struct ggml_gptq_data {
     void * qweight;
     void * qzeros;
@@ -2144,9 +2233,6 @@ static inline const ggml_tensor * ggml_cuda_get_base_tensor(const ggml_tensor * 
     return t;
 }
 
-// exact mapping for special-case views that need their own quantized layout
-static std::unordered_map<const ggml_tensor*, ggml_gptq_data*> g_gptq_weights_map_exact;
-
 // DL: used to store the gptq-format weight tensor.
 static void ggml_cuda_gptq_store_weight(const ggml_tensor* tensor, ggml_gptq_data* gptq_data) {
     std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
@@ -2167,26 +2253,8 @@ static void ggml_cuda_gptq_store_weight(const ggml_tensor* tensor, ggml_gptq_dat
     g_gptq_weights_map[base] = gptq_data;
 }
 
-static void ggml_cuda_gptq_store_weight_exact(const ggml_tensor* tensor, ggml_gptq_data* gptq_data) {
-    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
-    auto it = g_gptq_weights_map_exact.find(tensor);
-    if (it != g_gptq_weights_map_exact.end()) {
-        ggml_gptq_data* old_data = it->second;
-        if (old_data->qweight) cudaFree(old_data->qweight);
-        if (old_data->qzeros) cudaFree(old_data->qzeros);
-        if (old_data->scales) cudaFree(old_data->scales);
-        delete old_data;
-    }
-    g_gptq_weights_map_exact[tensor] = gptq_data;
-}
-
 static ggml_gptq_data* ggml_cuda_gptq_get_weight(const ggml_tensor* tensor) {
     std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
-    // prefer exact mapping if present
-    auto ite = g_gptq_weights_map_exact.find(tensor);
-    if (ite != g_gptq_weights_map_exact.end()) {
-        return ite->second;
-    }
     const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
     auto it = g_gptq_weights_map.find(base);
     return (it != g_gptq_weights_map.end()) ? it->second : nullptr;
@@ -2195,19 +2263,7 @@ static ggml_gptq_data* ggml_cuda_gptq_get_weight(const ggml_tensor* tensor) {
 static bool ggml_cuda_gptq_has_weight(const ggml_tensor* tensor) {
     std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
     const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
-    if (g_gptq_weights_map_exact.find(tensor) != g_gptq_weights_map_exact.end()) return true;
     return g_gptq_weights_map.find(base) != g_gptq_weights_map.end();
-}
-
-static ggml_gptq_data* ggml_cuda_gptq_get_weight_exact(const ggml_tensor* tensor) {
-    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
-    auto it = g_gptq_weights_map_exact.find(tensor);
-    return (it != g_gptq_weights_map_exact.end()) ? it->second : nullptr;
-}
-
-static bool ggml_cuda_gptq_has_weight_exact(const ggml_tensor* tensor) {
-    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
-    return g_gptq_weights_map_exact.find(tensor) != g_gptq_weights_map_exact.end();
 }
 
 static void ggml_cuda_gptq_clear_weights() {
@@ -2220,14 +2276,6 @@ static void ggml_cuda_gptq_clear_weights() {
         delete data;
     }
     g_gptq_weights_map.clear();
-    for (auto& pair : g_gptq_weights_map_exact) {
-        ggml_gptq_data* data = pair.second;
-        if (data->qweight) cudaFree(data->qweight);
-        if (data->qzeros) cudaFree(data->qzeros);
-        if (data->scales) cudaFree(data->scales);
-        delete data;
-    }
-    g_gptq_weights_map_exact.clear();
 }
 
 // decide if view can reuse base GPTQ via row offset
@@ -2242,12 +2290,12 @@ static inline bool ggml_cuda_can_offset_view(const ggml_tensor * base, const ggm
     return (ptr_diff % nb_row) == 0;
 }
 
-static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, const void * src0_ptr, const ggml_tensor * src0) {
-    //update the weight tensor to gptq-format in src0->extra.
+static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, const void * src0_ptr, const ggml_tensor * src0, int bits = 8) {
     // 1. get the weight tensor
     // 2. quantize the weight tensor to gptq-format
 
     // 1. get the weight tensor
+    GGML_LOG("DL: [%s] quantizing weight tensor %s to %d-bit\n", __FUNCTION__, src0->name, bits);
     void* data = src0->data;
     int64_t ne00 = src0->ne[0]; // ne [row, col, batch, shard]
     int64_t ne01 = src0->ne[1];
@@ -2262,8 +2310,11 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     // 2. quantize the weight tensor to gptq-format
     int K = src0->ne[0];
     int M = src0->ne[1];
-    int group_size = GGML_CUDA_GPTQ_GROUP_SIZE;
-    int bits = 8; // TODO: support 4 bits later.
+    int group_size = std::min(GGML_CUDA_GPTQ_GROUP_SIZE, K); // Ensure group_size <= K to avoid issues with small K
+
+    // Support both 4-bit and 8-bit quantization
+    GGML_ASSERT((bits == 4 || bits == 8) && "Only 4-bit and 8-bit quantization supported");
+
     int num_groups = (K + group_size - 1) / group_size;
 
     int id = ggml_cuda_get_device();
@@ -2272,7 +2323,9 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     ggml_gptq_data* gptq_data = new ggml_gptq_data;
 
     // 4. allocate persistent GPU memory directly (avoiding temporary allocations)
-    CUDA_CHECK(cudaMalloc(&gptq_data->qweight, M * K * sizeof(uint8_t)));
+    // For 4-bit: each byte stores 2 values, so we need M * (K/2) bytes for qweight
+    size_t qweight_size = (bits == 4) ? (size_t)M * (size_t)(K / 2) : (size_t)M * (size_t)K;
+    CUDA_CHECK(cudaMalloc(&gptq_data->qweight, qweight_size * sizeof(uint8_t)));
     CUDA_CHECK(cudaMalloc(&gptq_data->qzeros, M * num_groups * sizeof(half)));
     CUDA_CHECK(cudaMalloc(&gptq_data->scales, M * num_groups * sizeof(half)));
 
@@ -2306,27 +2359,35 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     }
     const half * src0_ptr_as_fp16 = src0->type == GGML_TYPE_F16 ? (const half *) src0_ptr : src0_as_f16.get();
 
-    if(DEVIT_DEQ){
+    if(DEVIT){
         CUDA_CHECK(cudaDeviceSynchronize());
         std::vector<half> src0_ptr_as_fp16_cpu(10);
         cudaMemcpy(src0_ptr_as_fp16_cpu.data(), src0_ptr_as_fp16, 10*sizeof(half), cudaMemcpyDeviceToHost);
         CUDA_CHECK(cudaDeviceSynchronize());
         for(int i = 0; i < 10; i++){
-            printf("[ggml_cuda_gptq_quantize] src0_ptr_as_fp16_cpu[%d]: %f\n", i, __half2float(src0_ptr_as_fp16_cpu[i]));
+            printf("[%s] src0_ptr_as_fp16_cpu[%d]: %f\n", __FUNCTION__, i, __half2float(src0_ptr_as_fp16_cpu[i]));
         }
     }
 
     // 5. kernel launch directly to persistent memory (eliminating one cudaMemcpyDeviceToDevice)
     // TODO : support bf16 later.
     CUDA_CHECK(cudaDeviceSynchronize());
-    ggml_cuda_gptq_quantize_8_bit_fp16<<<gridDim, blockDim, 0, stream>>>(
-        src0_ptr_as_fp16, (uint8_t*)gptq_data->qweight, (half*)gptq_data->qzeros, (half*)gptq_data->scales,
-        K, M, group_size);
+
+    if (bits == 8) {
+        ggml_cuda_gptq_quantize_8_bit_fp16<<<gridDim, blockDim, 0, stream>>>(
+            src0_ptr_as_fp16, (uint8_t*)gptq_data->qweight, (half*)gptq_data->qzeros, (half*)gptq_data->scales,
+            K, M, group_size);
+    } else if (bits == 4) {
+        ggml_cuda_gptq_quantize_4_bit_fp16<<<gridDim, blockDim, 0, stream>>>(
+            src0_ptr_as_fp16, (uint8_t*)gptq_data->qweight, (half*)gptq_data->qzeros, (half*)gptq_data->scales,
+            K, M, group_size);
+    }
+
     CUDA_CHECK(cudaDeviceSynchronize());
     // 6. check the CUDA error after kernel launch
     cudaError_t r = cudaGetLastError();
     if (r != cudaSuccess) {
-        printf("gptq_quantize_8_bit error: %s\n", cudaGetErrorString(r));
+        GGML_LOG("gptq_quantize_%d_bit error: %s\n", bits, cudaGetErrorString(r));
     }
 
     gptq_data->group_size = group_size;
@@ -2336,7 +2397,7 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     gptq_data->num_groups = num_groups;
     gptq_data->M = M;
     gptq_data->K = K;
-    gptq_data->qweight_size = M * K * sizeof(uint8_t);
+    gptq_data->qweight_size = (int)qweight_size * sizeof(uint8_t);
     gptq_data->qzeros_size = M * num_groups * sizeof(half);
     gptq_data->scales_size = M * num_groups * sizeof(half);
     // DL: store it to the mapping table
@@ -2349,7 +2410,9 @@ static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, con
     const int group_size = gptq_data.group_size;
     const int num_groups = gptq_data.num_groups;
 
-    std::vector<uint8_t> qweight_h((size_t)M * (size_t)K);
+    // For 4-bit quantization, each byte stores 2 values, so we need M * (K/2) bytes
+    size_t qweight_size = (gptq_data.bits == 4) ? (size_t)M * (size_t)(K / 2) : (size_t)M * (size_t)K;
+    std::vector<uint8_t> qweight_h(qweight_size);
     CUDA_CHECK(cudaMemcpy(qweight_h.data(), gptq_data.qweight, qweight_h.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost));
 
     std::vector<float> qzeros_f((size_t)M * (size_t)num_groups);
@@ -2361,7 +2424,7 @@ static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, con
     } else if (gptq_data.qzeros_type == CUDA_R_32F) {
         CUDA_CHECK(cudaMemcpy(qzeros_f.data(), gptq_data.qzeros, qzeros_f.size() * sizeof(float), cudaMemcpyDeviceToHost));
     } else {
-        printf("[dequant-verify] unsupported qzeros_type=%d\n", (int)gptq_data.qzeros_type);
+        GGML_LOG("[dequant-verify] unsupported qzeros_type=%d\n", (int)gptq_data.qzeros_type);
         return;
     }
 
@@ -2404,8 +2467,19 @@ static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, con
     printf("[dequant-verify] qzeros (first 5): ");
     for (int i = 0; i < 5 && i < (int)qzeros_f.size(); ++i) printf("%f ", qzeros_f[i]);
     printf("\n");
-    printf("[dequant-verify] qweight (first 5): ");
-    for (int i = 0; i < 5 && i < (int)qweight_h.size(); ++i) printf("%d ", (int)qweight_h[i]);
+    printf("[dequant-verify] bits=%d, qweight (first 5): ", gptq_data.bits);
+    if (gptq_data.bits == 4) {
+        // For 4-bit, show unpacked values
+        for (int i = 0; i < 5 && i < (int)qweight_size; ++i) {
+            uint8_t byte = qweight_h[i];
+            int val1 = byte & 0x0F;        // Low 4 bits
+            int val2 = (byte >> 4) & 0x0F; // High 4 bits
+            printf("[%d,%d] ", val1, val2);
+        }
+    } else {
+        // For 8-bit, show direct values
+        for (int i = 0; i < 5 && i < (int)qweight_size; ++i) printf("%d ", (int)qweight_h[i]);
+    }
     printf("\n");
 
     const size_t total = (size_t)M * (size_t)K;
@@ -2413,20 +2487,38 @@ static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, con
     double total_err = 0.0;
     double max_err = 0.0;
 
+    // Function to get quantized value for a given logical index
+    auto get_qweight_val = [&](size_t logical_idx) -> int {
+        if (gptq_data.bits == 4) {
+            size_t byte_idx = logical_idx / 2;
+            bool is_high_4bit = (logical_idx % 2) == 1;
+            uint8_t byte = qweight_h[byte_idx];
+            if (is_high_4bit) {
+                return (byte >> 4) & 0x0F;
+            } else {
+                return byte & 0x0F;
+            }
+        } else {
+            return qweight_h[logical_idx];
+        }
+    };
+
     for (int i = 0; i < 5 && i < (int)total; ++i) {
         int col = i % K;
         int row = i / K;
         int scale_idx = row * num_groups + (col / group_size);
-        float dq = (float(qweight_h[i]) - qzeros_f[scale_idx]) * scales_f[scale_idx];
+        int q_val = get_qweight_val(i);
+        float dq = (float(q_val) - qzeros_f[scale_idx]) * scales_f[scale_idx];
         float abs_err = fabsf(weight_ref[i] - dq);
-        printf("[dequant-verify] w[%d] ref=%f, q=%d, dq=%f, abs_err=%f\n", i, weight_ref[i], (int)qweight_h[i], dq, abs_err);
+        printf("[dequant-verify] w[%d] ref=%f, q=%d, dq=%f, abs_err=%f\n", i, weight_ref[i], q_val, dq, abs_err);
     }
 
     for (size_t i = 0; i < max_check; ++i) {
         int col = (int)(i % K);
         int row = (int)(i / K);
         int scale_idx = row * num_groups + (col / group_size);
-        float dq = (float(qweight_h[i]) - qzeros_f[scale_idx]) * scales_f[scale_idx];
+        int q_val = get_qweight_val(i);
+        float dq = (float(q_val) - qzeros_f[scale_idx]) * scales_f[scale_idx];
         float abs_err = fabsf(weight_ref[i] - dq);
         total_err += abs_err;
         if (abs_err > max_err) max_err = abs_err;
@@ -2435,81 +2527,22 @@ static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, con
     printf("[dequant-verify] samples=%zu, avg_abs_err=%e, max_abs_err=%e\n", max_check, avg_err, max_err);
 }
 
-// Quantize a contiguous FP16 weight matrix (M x K) into temporary GPTQ buffers (8-bit, per-group along K).
-// The lifetime of the allocated buffers is owned by the caller (must cudaFree after use).
-static void ggml_cuda_gptq_quantize_8bit_from_fp16_temp(
-    ggml_backend_cuda_context & ctx,
-    const half * src0_fp16,
-    int M,
-    int K,
-    int group_size,
-    ggml_gptq_data & out)
-{
-    const int num_groups = (K + group_size - 1) / group_size;
-    CUDA_CHECK(cudaMalloc(&out.qweight, (size_t)M * (size_t)K * sizeof(uint8_t)));
-    CUDA_CHECK(cudaMalloc(&out.qzeros,  (size_t)M * (size_t)num_groups * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&out.scales,  (size_t)M * (size_t)num_groups * sizeof(half)));
-
-    dim3 blockDim(32, 8);
-    dim3 gridDim((M + blockDim.x - 1) / blockDim.x, (num_groups + blockDim.y - 1) / blockDim.y);
-    cudaStream_t stream = ctx.stream();
-    ggml_cuda_gptq_quantize_8_bit_fp16<<<gridDim, blockDim, 0, stream>>>(
-        src0_fp16, (uint8_t*)out.qweight, (half*)out.qzeros, (half*)out.scales,
-        K, M, group_size);
-    CUDA_CHECK(cudaGetLastError());
-
-    out.group_size   = group_size;
-    out.bits         = 8;
-    out.scales_type  = ggml_ptr_elem_size_to_cuda_dtype(sizeof(half));
-    out.qzeros_type  = ggml_ptr_elem_size_to_cuda_dtype(sizeof(half));
-    out.num_groups   = num_groups;
-    out.M            = M;
-    out.K            = K;
-    out.qweight_size = (int)((size_t)M * (size_t)K * sizeof(uint8_t));
-    out.qzeros_size  = (int)((size_t)M * (size_t)num_groups * sizeof(half));
-    out.scales_size  = (int)((size_t)M * (size_t)num_groups * sizeof(half));
-}
-
 // DL: used to quantize the weight tensor from CPU, and then store it to the mapping table.
 static void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor) {
-    // device
     CUDA_CHECK(cudaSetDevice(device_id));
     ggml_backend_cuda_context ctx(device_id);
 
-    // if exact mapping already exists, nothing to do
-    if (ggml_cuda_gptq_has_weight_exact(tensor)) return;
-
     const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
+
+    const char * GGML_QUANT_BITS = getenv("GGML_QUANT_BITS");
+    int bits = GGML_QUANT_BITS ? atoi(GGML_QUANT_BITS) : 4; // default to 4-bit
 
     // ensure base mapping exists for reuse scenario
     if (!ggml_cuda_gptq_has_weight(base)) {
-        ggml_cuda_gptq_quantize_and_store(ctx, base->data, base);
+        ggml_cuda_gptq_quantize_and_store(ctx, base->data, base, bits);
     }
 
-    // if tensor == base or can reuse by offset -> no extra work needed
-    if (tensor == base || ggml_cuda_can_offset_view(base, tensor)) {
-        return;
-    }
-
-    // otherwise: precompute an exact GPTQ mapping for this complex view
-    // 1) convert arbitrary view to contiguous FP16 [M x K]
-    const int64_t K = tensor->ne[0];
-    const int64_t M = tensor->ne[1];
-    const ggml_type ttype = tensor->type;
-    const int64_t ts = ggml_type_size(ttype);
-    const int64_t s01 = tensor->nb[1] / ts;
-    const int64_t s02 = tensor->nb[2] / ts;
-    const int64_t s03 = tensor->nb[3] / ts;
-
-    ggml_cuda_pool_alloc<half> src_fp16_nc(ctx.pool(device_id), M * K);
-    const to_fp16_nc_cuda_t to_fp16_nc = ggml_get_to_fp16_nc_cuda(ttype);
-    GGML_ASSERT(to_fp16_nc != nullptr);
-    to_fp16_nc(tensor->data, src_fp16_nc.get(), K, M, tensor->ne[2], tensor->ne[3], s01, s02, s03, ctx.stream());
-
-    // 2) quantize to persistent GPU memory and store under exact key
-    ggml_gptq_data * gptq = new ggml_gptq_data;
-    ggml_cuda_gptq_quantize_8bit_from_fp16_temp(ctx, src_fp16_nc.get(), (int)M, (int)K, GGML_CUDA_GPTQ_GROUP_SIZE, *gptq);
-    ggml_cuda_gptq_store_weight_exact(tensor, gptq);
+    GGML_ASSERT(ggml_cuda_gptq_has_weight(base) && "ggml_cuda_gptq_quantize_and_store unified the base and view quantization, so we can just return here.");
 }
 
 static cudaDataType_t ggml_type_to_cuda_dtype(enum ggml_type type) {
@@ -2572,7 +2605,7 @@ static void ggml_cuda_dlblas_gemmex(
     int ldb = (int)src1->ne[0];
     int ldc = m; // dst->ne[0]
 
-    cudaDataType_t Atype = CUDA_R_8U;
+    cudaDataType_t Atype = (gptq_data.bits == 4) ? CUDA_R_4U : CUDA_R_8U;
     cudaDataType_t Btype = ggml_type_to_cuda_dtype(src1_type);
     cudaDataType_t Ctype = ggml_type_to_cuda_dtype(dst_type);
 
@@ -2583,6 +2616,8 @@ static void ggml_cuda_dlblas_gemmex(
     extParameters.a_zeropoints_type = gptq_data.qzeros_type;
     extParameters.a_scales = gptq_data.scales;
     extParameters.a_scales_type = gptq_data.scales_type;
+
+    // For 4-bit quantization, dlblas with CUDA_R_4U should handle unpacking internally
 
     const float alpha_f = 1.0f;
     const float beta_f  = 0.0f;
@@ -2606,28 +2641,26 @@ static void ggml_cuda_dlblas_gemmex(
 }
 
 static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    // DL: check if the weight tensor has been quantized (base or exact or can offset)
-    ggml_gptq_data* base_gptq = ggml_cuda_gptq_get_weight(src0);
-    ggml_gptq_data* exact_gptq = ggml_cuda_gptq_get_weight_exact(src0);
-
-    // If no GPTQ data found, try to ensure the base tensor has GPTQ data for view operations
-    if (!base_gptq && !exact_gptq) {
+    // In unit tests. TODO: Refactor : Others that do not go through llama_model::load_tensors are theoretically needed
+    static const bool is_test_mode = getenv("GGML_TEST_MODE") != nullptr;
+    if (is_test_mode) {
+        GGML_LOG("DL: [%s] GGML_TEST_MODE=1\n", __FUNCTION__);
         const ggml_tensor * base = ggml_cuda_get_base_tensor(src0);
-        if (base && base != src0) {
-            // Try to quantize and store the base tensor if it doesn't have GPTQ data
-            if (!ggml_cuda_gptq_has_weight(base)) {
-                int device_id = ggml_cuda_get_device();
-                ggml_backend_cuda_gptq_quantize_and_store_from_cpu(device_id, base);
-                // Try to get the GPTQ data again
-                base_gptq = ggml_cuda_gptq_get_weight(src0);
-                exact_gptq = ggml_cuda_gptq_get_weight_exact(src0);
-            }
-        }
+
+        const char * GGML_QUANT_BITS = getenv("GGML_QUANT_BITS");
+        int bits = GGML_QUANT_BITS ? atoi(GGML_QUANT_BITS) : 4; // default to 4-bit
+
+        // quantize the base tensor anyway.
+        ggml_cuda_gptq_quantize_and_store(ctx, base->data, base, bits);
+        GGML_ASSERT(ggml_cuda_gptq_has_weight(base) && "DL: [GGML_TEST_MODE] ggml_cuda_gptq_quantize_and_store failed");
     }
 
-    if (!base_gptq && !exact_gptq) {
+    // DL: check if the weight tensor has been quantized
+    ggml_gptq_data* gptq_weight = ggml_cuda_gptq_get_weight(src0);
+
+    if (!gptq_weight) {
         printf("src0->name: %s, src0->type: %s\n", src0->name, ggml_type_name(src0->type));
-        GGML_ABORT("DL: [ggml_cuda_mul_mat_dlblas] gptq_data is nullptr");
+        GGML_ABORT("DL: [%s] gptq_data is nullptr", __FUNCTION__);
     }
 
     // Prepare src1 pointer/type conversion (fp16 path preferred)
@@ -2660,68 +2693,24 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
         src1_type = GGML_TYPE_BF16;
     }
 
-    // P0 fast path for view: reuse base GPTQ buffers with row offset
-    const ggml_tensor * base = ggml_cuda_get_base_tensor(src0);
-    bool can_offset = ggml_cuda_can_offset_view(base, src0);
-
-    ggml_gptq_data gptq_view_local;
-    ggml_gptq_data * gptq_for_call = exact_gptq ? exact_gptq : base_gptq;
-
-    if (!exact_gptq && can_offset && base != src0) {
-        const size_t nb_row = (size_t) base->nb[1];
-        const size_t ptr_diff = (size_t)((const char*)src0->data - (const char*)base->data);
-        if (ptr_diff % nb_row == 0) {
-            const int64_t row_offset = (int64_t)(ptr_diff / nb_row);
-
-            const int K = base_gptq->K;
-            const int num_groups = base_gptq->num_groups;
-
-            gptq_view_local = *base_gptq; // shallow copy then adjust pointers and sizes
-
-            // qweight: uint8 per weight
-            gptq_view_local.qweight = (void *)((uint8_t*)base_gptq->qweight + (size_t)row_offset * (size_t)K);
-
-            // qzeros/scales: type-dependent element size
-            const size_t z_elem = (base_gptq->qzeros_type == CUDA_R_16F) ? sizeof(half) : sizeof(float);
-            const size_t s_elem = (base_gptq->scales_type == CUDA_R_16F) ? sizeof(half) : sizeof(float);
-            gptq_view_local.qzeros = (void *)((uint8_t*)base_gptq->qzeros + (size_t)row_offset * (size_t)num_groups * z_elem);
-            gptq_view_local.scales = (void *)((uint8_t*)base_gptq->scales + (size_t)row_offset * (size_t)num_groups * s_elem);
-
-            // adjust logical sizes
-            gptq_view_local.M = (int)src0->ne[1];
-            gptq_view_local.K = K;
-            gptq_view_local.num_groups = num_groups;
-            gptq_view_local.qweight_size = gptq_view_local.M * K * (int)sizeof(uint8_t);
-            gptq_view_local.qzeros_size  = gptq_view_local.M * num_groups * (int)z_elem;
-            gptq_view_local.scales_size  = gptq_view_local.M * num_groups * (int)s_elem;
-
-            gptq_for_call = &gptq_view_local;
-        } else {
-            can_offset = false;
-        }
+    if (DEVIT) {
+        ggml_cuda_debug_verify_dequant(*gptq_weight, src0);
     }
-
-    if (gptq_for_call != nullptr) {
-        // use gptq_for_call directly (P0 or base)
-        if (DEVIT_DEQ) {
-            ggml_cuda_debug_verify_dequant(*gptq_for_call, src0);
-        }
-        if (dst->type == GGML_TYPE_F32) {
-            ggml_cuda_dlblas_gemmex(ctx, *gptq_for_call, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F32);
-        } else if (dst->type == GGML_TYPE_F16) {
-            ggml_cuda_dlblas_gemmex(ctx, *gptq_for_call, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F16);
-        } else {
-            ggml_type dst_type = GGML_TYPE_F16;
-            ggml_cuda_pool_alloc<half> dst_fp16(ctx.pool(id), dst->ne[0]*dst->ne[1]);
-            ggml_cuda_dlblas_gemmex(ctx, *gptq_for_call, src1_ptr, src1_type, src0, src1, dst_fp16.get(), dst_type);
-            const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
-            to_fp32_cuda(dst_fp16.get(), (float*)dst->data, dst->ne[0]*dst->ne[1], stream);
-        }
-        return;
+    if (dst->type == GGML_TYPE_F32) {
+        ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F32);
+    } else if (dst->type == GGML_TYPE_F16) {
+        ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F16);
+    } else {
+        ggml_type dst_type = GGML_TYPE_F16;
+        ggml_cuda_pool_alloc<half> dst_fp16(ctx.pool(id), dst->ne[0]*dst->ne[1]);
+        ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst_fp16.get(), dst_type);
+        const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
+        to_fp32_cuda(dst_fp16.get(), (float*)dst->data, dst->ne[0]*dst->ne[1], stream);
     }
+    return;
 
     // should not reach here
-    GGML_ABORT("DL: [ggml_cuda_mul_mat_dlblas] no valid GPTQ mapping found");
+    GGML_ABORT("DL: [%s] no valid GPTQ mapping found", __FUNCTION__);
 }
 
 static void ggml_cuda_op_mul_mat_dlblas(
@@ -2830,31 +2819,62 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     dst_cublas_mmq.data = dst_cublas_mmq_data.get();
     dst_cublas_mmq.buffer = dst->buffer;
 
-    bool need_compare = DEVIT_DEQ ? true : false;
+    bool need_compare = DEVIT ? true : false;
     const char *env_force_no_dlblas = getenv("GGML_FORCE_NO_DLBLAS");
     const char *env_dlblas_consistent = getenv("GGML_DLBLAS_CONSISTENT");
+    const char *env_debug_path_selection = getenv("GGML_DEBUG_PATH_SELECTION");
     const char* which_branch = "";
 
-    bool dlblas_available = !split && !(env_force_no_dlblas && env_force_no_dlblas[0] == '1');
+    bool dlblas_available = !split &&
+                            !(env_force_no_dlblas && env_force_no_dlblas[0] == '1');
+
+    bool single_batch = src0->ne[2] * src0->ne[3] == 1 && src1->ne[2] * src1->ne[3] == 1;
+    if (!single_batch && env_debug_path_selection) {
+        if (src0->ne[2] * src0->ne[3] != 1){
+            printf("[DLBLAS_PATH_OVERRIDE] src0's shape %ldx%ldx%ldx%ld is not single batch, use original path.\n",
+                src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3]);
+        }
+        if (src1->ne[2] * src1->ne[3] != 1){
+            printf("[DLBLAS_PATH_OVERRIDE] src1's shape %ldx%ldx%ldx%ld is not single batch, use original path.\n",
+                src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
+        }
+    }
+
+    // only support single batch,  TODO: support batch broadcast
+    // use a quantitative version cublasGemmBatchedEx api. dlblasGemmBatchedEx ?
+    dlblas_available = dlblas_available && single_batch;
 
     // Default is false, can be enabled by setting GGML_DLBLAS_CONSISTENT=1 | bugid : 15564
     bool use_consistent_path = (env_dlblas_consistent != nullptr && env_dlblas_consistent[0] == '1');
 
     // If dlblas is available and no comparison is required, use dlblas to ensure consistency
     // Even if vec conditions are met, use dlblas to avoid mismatch (unless the matrix is too small for dlblas)
-    if (DEVIT_DEQ && !dlblas_available) {
+    if (DEVIT && !dlblas_available) {
         printf("[DLBLAS_PATH_OVERRIDE] dlblas is not available, use original path\n");
     }
-    if (!need_compare && dlblas_available && use_consistent_path) {
-        if (use_mul_mat_vec || use_mul_mat_vec_q) {
-            if (getenv("GGML_DEBUG_PATH_SELECTION")) {
+    if (!need_compare && dlblas_available) {
+        if (use_consistent_path) {
+            if ((use_mul_mat_vec || use_mul_mat_vec_q) && env_debug_path_selection) {
                 printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld satisfies vec conditions but uses dlblas to maintain consistency\n",
                        src0->ne[0], src0->ne[1]);
             }
+            // printf("[DLBLAS_PATH_OVERRIDE] use dlblas to maintain consistency\n");
+            ggml_cuda_mul_mat_dlblas(ctx, src0, src1, dst);
+            return;
         }
-        ggml_cuda_mul_mat_dlblas(ctx, src0, src1, dst);
-        return;
+        if (!(use_mul_mat_vec || use_mul_mat_vec_q)) { // bugid : 15564
+            // printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld does not satisfy vec conditions, use dlblas path\n",
+            //            src0->ne[0], src0->ne[1]);
+            ggml_cuda_mul_mat_dlblas(ctx, src0, src1, dst);
+            return;
+        } else {
+            if (env_debug_path_selection) {
+                printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld satisfies vec conditions, use original path cause bugid : 15564.\n",
+                       src0->ne[0], src0->ne[1]);
+            }
+        }
     }
+    // printf("[DLBLAS_PATH_OVERRIDE] use original path\n");
     // else if (!split && ggml_is_transposed(src0)) {
     //     // TODO: implement this.
     //     ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_dlblas, quantize_mmq_q8_1_cuda);
@@ -2896,10 +2916,9 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     }
     if (need_compare) {
         const bool can_compare = (dst->type == GGML_TYPE_F32) && (src1->type == GGML_TYPE_F32);
-        const bool has_gptq = ggml_cuda_gptq_get_weight(src0) != nullptr;
         const bool can_mmv = can_compare && use_mul_mat_vec;
 
-        if (has_gptq) {
+        if (dlblas_available) {
             ggml_cuda_mul_mat_dlblas(ctx, src0, src1, &dst_dlblas);
         }
         if (can_mmv) {
@@ -2930,14 +2949,14 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         std::vector<float> h_cublas_mmq(num_elements);
 
         CUDA_CHECK(cudaMemcpy(h_dst.data(), (float*)dst->data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
-        if (has_gptq) CUDA_CHECK(cudaMemcpy(h_dlblas.data(), (float*)dst_dlblas.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
+        if (dlblas_available) CUDA_CHECK(cudaMemcpy(h_dlblas.data(), (float*)dst_dlblas.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
         if (can_mmv)  CUDA_CHECK(cudaMemcpy(h_mmv.data(), (float*)dst_mmv.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
         if (can_compare) CUDA_CHECK(cudaMemcpy(h_cublas_mmq.data(), (float*)dst_cublas_mmq.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaDeviceSynchronize());
 
         const float *ref = nullptr; const char *ref_name = "";
         const char *cublas_name = did_cublas_mmq ? "cublas_mmq" : "cublas";
-        if (has_gptq) { ref = h_dlblas.data(); ref_name = "dlblas"; }
+        if (dlblas_available) { ref = h_dlblas.data(); ref_name = "dlblas"; }
         else if (can_compare) { ref = h_cublas_mmq.data(); ref_name = cublas_name; }
         else if (can_mmv) { ref = h_mmv.data(); ref_name = "mmv"; }
         else { ref = h_dst.data(); ref_name = "dst(current)"; }
@@ -2964,7 +2983,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         }
 
         print_diff("dst(current)", h_dst.data());
-        if (has_gptq)    print_diff("dlblas", h_dlblas.data());
+        if (dlblas_available)    print_diff("dlblas", h_dlblas.data());
         if (can_mmv)     print_diff("mmv", h_mmv.data());
         if (can_compare) print_diff(cublas_name, h_cublas_mmq.data());
 
@@ -3416,6 +3435,9 @@ static const char * ggml_backend_cuda_get_name(ggml_backend_t backend) {
 
 static void ggml_backend_cuda_free(ggml_backend_t backend) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
+
+    // DL: Clean up GPTQ cache when backend is freed to prevent dangling pointers
+    ggml_cuda_gptq_clear_weights();
 
     delete cuda_ctx;
     delete backend;
