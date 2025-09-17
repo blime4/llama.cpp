@@ -905,7 +905,51 @@ static enum ggml_status ggml_backend_cuda_split_buffer_init_tensor(ggml_backend_
     return GGML_STATUS_SUCCESS;
 }
 
+// DL : remove this when bugid : 15967 fixed.
+// Enable peer access for all CUDA devices
+static void dl_enable_all_cuda_peer_access() {
+    static bool peer_access_initialized = false;
+
+    if (peer_access_initialized) {
+        return;
+    }
+
+    int device_count = ggml_backend_cuda_get_device_count();
+    int can_access_peer_count = 0;
+
+    for (int id = 0; id < device_count; ++id) {
+        ggml_cuda_set_device(id);
+
+        for (int id_other = 0; id_other < device_count; ++id_other) {
+            if (id == id_other) {
+                continue;
+            }
+
+            int can_access_peer;
+            CUDA_CHECK(cudaDeviceCanAccessPeer(&can_access_peer, id, id_other));
+            can_access_peer_count++;
+            if (can_access_peer) {
+                cudaError_t err = cudaDeviceEnablePeerAccess(id_other, 0);
+                if (err != cudaErrorPeerAccessAlreadyEnabled) {
+                    CUDA_CHECK(err);
+                } else {
+                    // reset the error
+                    (void)cudaGetLastError();
+                }
+            }
+        }
+    }
+    fprintf(stderr, "[%s], total %d times cudaDeviceCanAccessPeer\n", __func__, can_access_peer_count);
+    peer_access_initialized = true;
+}
+
 static void ggml_backend_cuda_split_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+#ifdef GGML_USE_DLCU
+    // DL: remove this when bugid : 15967 fixed.
+    // Enable peer access for all devices before setting tensor data
+    dl_enable_all_cuda_peer_access();
+#endif
+
     // split tensors must always be set in their entirety at once
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(size == ggml_nbytes(tensor));
