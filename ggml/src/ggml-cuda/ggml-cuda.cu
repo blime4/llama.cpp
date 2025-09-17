@@ -1464,7 +1464,7 @@ static void ggml_cuda_set_peer_access(const int n_tokens, int main_device) {
 static cudaError_t ggml_cuda_Memcpy2DPeerAsync(
     void * dst, int dstDevice, size_t dpitch, void * src, int srcDevice, size_t spitch, size_t width, size_t height, cudaStream_t stream) {
 
-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(GGML_USE_DLCU)
     // cudaMemcpy2DAsync may fail with copies between vmm pools of different devices
     cudaMemcpy3DPeerParms p = {};
     p.dstDevice = dstDevice;
@@ -1475,6 +1475,7 @@ static cudaError_t ggml_cuda_Memcpy2DPeerAsync(
     return cudaMemcpy3DPeerAsync(&p, stream);
 #else
     // HIP does not support cudaMemcpy3DPeerAsync or vmm pools
+    // DL does not support cudaMemcpy3DPeerAsync
     GGML_UNUSED(dstDevice);
     GGML_UNUSED(srcDevice);
     return cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, height, cudaMemcpyDeviceToDevice, stream);
