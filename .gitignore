@@ -161,3 +161,7 @@ poetry.toml
 third_party
 third
 .ccache/
+
+# Code Workspace
+*.code-workspace
+
