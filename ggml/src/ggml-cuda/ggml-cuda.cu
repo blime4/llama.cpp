@@ -939,7 +939,7 @@ static void dl_enable_all_cuda_peer_access() {
             }
         }
     }
-    fprintf(stderr, "[%s], total %d times cudaDeviceCanAccessPeer\n", __func__, can_access_peer_count);
+    fprintf(stderr, "[%s], total %d times cudaDeviceEnablePeerAccess.\n", __func__, can_access_peer_count);
     peer_access_initialized = true;
 }
 
@@ -1450,7 +1450,12 @@ static void ggml_cuda_op_mul_mat_cublas(
 static void ggml_cuda_set_peer_access(const int n_tokens, int main_device) {
     static bool peer_access_enabled = false;
 
+// DL : remove this when bugid : 15967 fixed.
+#ifndef GGML_USE_DLCU
     const bool enable_peer_access = n_tokens <= GGML_CUDA_PEER_MAX_BATCH_SIZE;
+#else
+    const bool enable_peer_access = true;
+#endif
 
     if (peer_access_enabled == enable_peer_access) {
         return;
