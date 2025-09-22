@@ -3726,7 +3726,7 @@ struct ggml_tensor * ggml_set_rows(
 #else
     GGML_ASSERT(b->type == GGML_TYPE_F32);
 #endif
-    GGML_ASSERT(c->type == GGML_TYPE_I64);
+    GGML_ASSERT(c->type == GGML_TYPE_I64 || c->type == GGML_TYPE_I32);
 
     GGML_ASSERT(ggml_is_contiguous_rows(a));
     GGML_ASSERT(ggml_is_contiguous_rows(b));
