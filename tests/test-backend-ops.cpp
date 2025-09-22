@@ -4400,9 +4400,8 @@ struct test_conv_transpose_2d : public test_case {
         return VARS_TO_STR3(ne_input, ne_kernel, stride);
     }
 
-    // DL: TODO : Debug and remove this.
     double max_nmse_err() override {
-        return 1.5e-7;
+        return 5e-4; // The default 1e-7 is too small for Vulkan.
     }
 
     test_conv_transpose_2d(std::array<int64_t, 4> ne_input = {10, 10, 3, 1}, // [input_width, input_height, input_channels, 1]

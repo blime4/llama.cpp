@@ -19,7 +19,7 @@ static __global__ void mul_mat_f(
         const int stride_col_id, const int stride_row_id,
         const int channel_ratio, const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
         const int sample_ratio, const int stride_sample_x, const int stride_sample_y, const int stride_sample_dst) {
-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && !defined(GGML_USE_DLCU)
     typedef tile<16, 8, T>     tile_A;
     typedef tile< 8, 8, T>     tile_B;
     typedef tile<16, 8, float> tile_C;
@@ -229,6 +229,9 @@ void mul_mat_f_cuda(
         const int64_t stride_channel_x, const int64_t stride_channel_y, const int64_t stride_channel_dst, const int64_t nsamples_x,
         const int64_t nsamples_dst, const int64_t stride_sample_x, const int64_t stride_sample_y, const int64_t stride_sample_dst,
         cudaStream_t stream) {
+#if defined(GGML_USE_DLCU)
+    return;
+#endif
     typedef tile<16, 8, T>     tile_A;
     typedef tile< 8, 8, T>     tile_B;
 

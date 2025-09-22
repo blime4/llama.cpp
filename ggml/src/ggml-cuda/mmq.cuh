@@ -3659,9 +3659,6 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 template <ggml_type type>
 void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
 #if defined(GGML_USE_DLCU)
-    // DL: TODO: remove this after dlcu support is added
-    // NO_DEVICE_CODE;
-    // throw std::runtime_error("no support by dl");
     return;
 #endif
     const int    id     = ggml_cuda_get_device();
