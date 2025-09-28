@@ -3178,6 +3178,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                 static bool disable_fusion = (getenv("GGML_CUDA_DISABLE_FUSION") != nullptr);
                 if (!disable_fusion) {
 
+#ifndef GGML_USE_DLCU // DL-TODO: support ggml_cuda_op_topk_moe fp16 impl.
                     if (ggml_cuda_can_fuse(cgraph, i, ggml_cuda_topk_moe_ops(/*with norm*/ true), {})) {
                         ggml_tensor * weights = cgraph->nodes[i+8];
                         ggml_tensor * selected_experts = cgraph->nodes[i+3];
@@ -3193,6 +3194,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                         i += 4;
                         continue;
                     }
+#endif
 
                     if (node->op == GGML_OP_ADD) {
                         int n_fuse = 0;

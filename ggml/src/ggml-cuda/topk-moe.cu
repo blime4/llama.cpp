@@ -191,8 +191,14 @@ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context & ctx,
                            ggml_tensor *               weights,
                            ggml_tensor *               ids,
                            const bool                  with_norm) {
+#ifndef GGML_USE_DLCU
     GGML_ASSERT(logits->type == GGML_TYPE_F32);
     GGML_ASSERT(weights->type == GGML_TYPE_F32);
+#else
+    GGML_ASSERT(logits->type == GGML_TYPE_F32 || logits->type == GGML_TYPE_F16);
+    GGML_ASSERT(weights->type == GGML_TYPE_F32 || weights->type == GGML_TYPE_F16);
+    GGML_ASSERT(logits->type == weights->type);
+#endif
     GGML_ASSERT(ids->type == GGML_TYPE_I32);
 
     const int n_experts = logits->ne[0];
