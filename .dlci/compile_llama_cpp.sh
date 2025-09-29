@@ -37,15 +37,16 @@ if [ -n "$CI_PROJECT_DIR" ] && [ -n "$project_logs_dir" ]; then
     echo "[INFO] Will also save logs to project directory for artifacts"
 fi
 
-# Function to execute command with dual logging
+# Function to execute command with file-only logging (no console output)
 exec_with_dual_log() {
     local cmd="$1"
 
     if [ -n "$project_compile_log" ]; then
         # Dual logging: write to both persistent and project logs
-        # Use PIPESTATUS to capture the original command's exit code
-        eval "$cmd" 2>&1 | tee -a "$compile_log" "$project_compile_log"
-        return ${PIPESTATUS[0]}
+        eval "$cmd" >> "$compile_log" 2>&1
+        # Copy the output to project log as well
+        tail -n 100 "$compile_log" >> "$project_compile_log"
+        return $?
     else
         # Single logging: write to persistent log only
         eval "$cmd" >> "$compile_log" 2>&1
