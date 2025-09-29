@@ -117,9 +117,9 @@ if command -v dlsmi >/dev/null 2>&1; then
     # Get GPU status and count
     echo "[INFO] GPU status:" | tee -a "$summary_log"
     if dlsmi --list-gpus >> "$test_log" 2>&1; then
-        local gpu_count=$(dlsmi --list-gpus 2>/dev/null | wc -l)
+        gpu_count=$(dlsmi --list-gpus 2>/dev/null | wc -l)
         echo "[INFO] Detected $gpu_count GPU(s)" | tee -a "$summary_log"
-
+        
         # Recommend GPU limiting for large GPU counts
         if [ "$gpu_count" -gt 2 ]; then
             echo "[INFO] Note: $gpu_count GPUs detected. Consider limiting to first 2 devices for testing" | tee -a "$summary_log"
