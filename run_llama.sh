@@ -395,14 +395,14 @@ get_version_info() {
 # This function now delegates to the standalone device check script for consistency
 check_device_status() {
     local device_check_script="${REPO_PATH}/.dlci/check_device_status.sh"
-    
+
     # Check if the standalone device check script exists
     if [ -f "$device_check_script" ] && [ -x "$device_check_script" ]; then
         log_info "Running device status check using standalone script..."
-        
+
         # Set DOCKER_PLATFORM for the script
         export DOCKER_PLATFORM="${platform:-$(uname -m)}"
-        
+
         # Run the standalone device check script
         if bash "$device_check_script"; then
             log_success "Device status check completed successfully"
@@ -411,32 +411,6 @@ check_device_status() {
             log_error "Device status check failed"
             return 1
         fi
-    else
-        # Fallback to basic check if standalone script is not available
-        log_warn "Standalone device check script not found at: $device_check_script"
-        log_info "Performing basic device status check..."
-        
-        if ! command -v lspci >/dev/null 2>&1; then
-            log_warn "lspci command not found, skipping device card status check"
-            return 0
-        fi
-
-        local device_status
-        device_status=$(lspci -d 1e27: -v 2>/dev/null || echo "")
-
-        if [ -z "$device_status" ]; then
-            log_info "No devices with vendor ID 1e27 found, skipping device status check"
-            return 0
-        fi
-
-        if echo "$device_status" | grep -q "Unknown header"; then
-            log_error "Device card has dropped (Unknown header detected)"
-            log_error "Please run the full device check: $device_check_script"
-            return 1
-        else
-            log_success "Basic device card status check passed"
-            return 0
-        fi
     fi
 }
 
@@ -444,18 +418,7 @@ check_device_status() {
 prepare_loongarch64_test() {
     log_info "Preparing LoongArch64 test environment..."
 
-    # Check for denglin driver issues
-    if dmesg | tail -n 50 | grep -q "denglin.*err="; then
-        log_warn "Detected denglin driver errors in dmesg, may affect CUDA tests"
-    fi
-
-    # Check GPU status
-    if command -v dlsmi >/dev/null 2>&1; then
-        log_info "GPU status:"
-        dlsmi --list-gpus || log_warn "Failed to query GPU status"
-    fi
-
-    # Set conservative memory limits
+    # Set conservative memory limits for LoongArch64
     export GGML_CUDA_MALLOC_SOFT_LIMIT=1073741824  # 1GB
     export GGML_CUDA_HOST_MALLOC_LIMIT=2147483648  # 2GB
 
@@ -579,16 +542,7 @@ run_tests() {
         log_info "Enabled debug mode"
     fi
 
-    # Limit GPU count
-    if command -v dlsmi >/dev/null 2>&1; then
-        local gpu_count=$(dlsmi --list-gpus 2>/dev/null | wc -l)
-        if [ "$gpu_count" -gt 2 ]; then
-            log_info "Detected $gpu_count GPUs, limiting to first 2 devices"
-            export CUDA_VISIBLE_DEVICES=0,1
-        fi
-    else
-        export CUDA_VISIBLE_DEVICES=0,1
-    fi
+    export CUDA_VISIBLE_DEVICES=0
 
     # Set up environment variables for the comprehensive test script
     export DOCKER_PLATFORM="$platform"

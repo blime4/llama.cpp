@@ -30,6 +30,7 @@ compile_and_test_llama_cpp_x86_64:
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
+    - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
   artifacts:
@@ -48,6 +49,7 @@ compile_and_test_llama_cpp_aarch64:
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
+    - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
   artifacts:
@@ -86,6 +88,7 @@ compile_and_test_llama_cpp_loongarch64:
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
+    - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/test_llama_cpp.sh
   artifacts:
