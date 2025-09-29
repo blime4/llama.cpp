@@ -1,5 +1,67 @@
 #!/bin/bash
+#
+# Llama.cpp Test Suite
+#
+# Usage:
+#   Normal mode: ./test_llama_cpp.sh
+#   CI mode:     ./test_llama_cpp.sh --ci-test --binary-path /path/to/release
+#
+# CI mode uses binaries from a release package (e.g., downloaded from release_llama_cpp.sh)
+# instead of the local build directory.
+#
+
 set -e
+
+# Parse command line arguments
+CI_TEST_MODE=false
+BINARY_PATH=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ci-test)
+            CI_TEST_MODE=true
+            shift
+            ;;
+        --binary-path)
+            BINARY_PATH="$2"
+            shift 2
+            ;;
+        *)
+            echo "[ERROR] Unknown parameter: $1"
+            echo "Usage: $0 [--ci-test] [--binary-path <path>]"
+            echo "  --ci-test: Enable CI test mode using external binaries"
+            echo "  --binary-path: Path to the release directory containing binaries"
+            exit 1
+            ;;
+    esac
+done
+
+# Validate CI test mode parameters
+if [ "$CI_TEST_MODE" = true ]; then
+    if [ -z "$BINARY_PATH" ]; then
+        echo "[ERROR] --binary-path is required when using --ci-test mode"
+        echo "Usage: $0 --ci-test --binary-path <path>"
+        exit 1
+    fi
+
+    if [ ! -d "$BINARY_PATH" ]; then
+        echo "[ERROR] Binary path does not exist: $BINARY_PATH"
+        exit 1
+    fi
+
+    echo "[INFO] CI Test Mode enabled"
+    echo "[INFO] Using binaries from: $BINARY_PATH"
+
+    # Verify essential binaries exist in the provided path
+    essential_binaries=("llama-cli" "test-c")
+    for binary in "${essential_binaries[@]}"; do
+        if [ ! -x "$BINARY_PATH/$binary" ]; then
+            echo "[ERROR] Essential binary not found or not executable: $BINARY_PATH/$binary"
+            exit 1
+        fi
+    done
+    echo "[INFO] Essential binaries validated successfully"
+fi
 
 # Record start time for overall test timing
 test_start_time=$(date +%s)
@@ -37,15 +99,33 @@ cd "${REPO_PATH}"
 
 ARCH=${DOCKER_PLATFORM}
 echo "[INFO] Platform: $ARCH" | tee -a "$summary_log"
-build_dir=$(pwd)/build_${ARCH}
-export GGML_TEST_MODE=1
 
-# Check if build directory exists
-if [ ! -d "${build_dir}" ]; then
-    echo "[ERROR] ${build_dir} does not exist ..." | tee -a "$summary_log"
-    exit 1
+# Set build directory based on test mode
+if [ "$CI_TEST_MODE" = true ]; then
+    # In CI test mode, use the provided binary path
+    build_dir_bin="$BINARY_PATH"
+    echo "[INFO] CI Mode: Using binaries from: $build_dir_bin" | tee -a "$summary_log"
+
+    # Set LD_LIBRARY_PATH to include the binary directory for shared libraries
+    if [ -d "$build_dir_bin" ]; then
+        export LD_LIBRARY_PATH="$build_dir_bin:${LD_LIBRARY_PATH:-}"
+        echo "[INFO] CI Mode: Set LD_LIBRARY_PATH to include: $build_dir_bin" | tee -a "$summary_log"
+        echo "[INFO] CI Mode: Current LD_LIBRARY_PATH: $LD_LIBRARY_PATH" | tee -a "$summary_log"
+    fi
+else
+    # In normal mode, use the standard build directory
+    build_dir=$(pwd)/build_${ARCH}
+    build_dir_bin="${build_dir}/bin"
+
+    # Check if build directory exists
+    if [ ! -d "${build_dir}" ]; then
+        echo "[ERROR] ${build_dir} does not exist ..." | tee -a "$summary_log"
+        exit 1
+    fi
+    echo "[INFO] Build directory: $build_dir" | tee -a "$summary_log"
 fi
-echo "[INFO] Build directory: $build_dir" | tee -a "$summary_log"
+
+export GGML_TEST_MODE=1
 
 # Set environment variables
 export GGML_DEBUG=1
@@ -155,35 +235,35 @@ echo "[INFO] Running full test suite for all platforms" | tee -a "$summary_log"
 echo "[INFO] Note: All platforms now use the complete test set for comprehensive coverage" | tee -a "$summary_log"
 
 test_cases_part1=(
-    "${build_dir}/bin/test-arg-parser"
-    "${build_dir}/bin/test-autorelease"
-    "${build_dir}/bin/test-backend-ops"
-    "${build_dir}/bin/test-c"
-    "${build_dir}/bin/test-chat"
-    "${build_dir}/bin/test-chat-parser"
-    "${build_dir}/bin/test-chat-template"
-    "${build_dir}/bin/test-gbnf-validator grammars/json.gbnf -c '{\"name\": \"Alice\", \"age\": 25}'"        # Test valid JSON
-    "${build_dir}/bin/test-gbnf-validator grammars/json.gbnf -c '{\"name\": \"Bob\", \"age\": thirty}'"      # Test invalid JSON (should fail)
-    "${build_dir}/bin/test-gbnf-validator grammars/arithmetic.gbnf -c 'x = 5'"                               # Test valid arithmetic
-    "${build_dir}/bin/test-gbnf-validator grammars/arithmetic.gbnf -c 'x = 5 +'"                             # Test invalid arithmetic (should fail)
-    "${build_dir}/bin/test-gbnf-validator grammars/list.gbnf -c '- First item\n- Second item\n'"
-    "${build_dir}/bin/test-gguf"
-    "${build_dir}/bin/test-grammar-integration"
-    "${build_dir}/bin/test-grammar-parser"
-    "${build_dir}/bin/test-json-partial"
-    "${build_dir}/bin/test-llama-grammar"
-    "${build_dir}/bin/test-log"
-    "${build_dir}/bin/test-model-load-cancel"
-    "${build_dir}/bin/test-mtmd-c-api"
-    "${build_dir}/bin/test-regex-partial"
-    "${build_dir}/bin/test-sampling"
-    "${build_dir}/bin/test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+    "${build_dir_bin}/test-arg-parser"
+    "${build_dir_bin}/test-autorelease"
+    "${build_dir_bin}/test-backend-ops"
+    "${build_dir_bin}/test-c"
+    "${build_dir_bin}/test-chat"
+    "${build_dir_bin}/test-chat-parser"
+    "${build_dir_bin}/test-chat-template"
+    "${build_dir_bin}/test-gbnf-validator grammars/json.gbnf -c '{\"name\": \"Alice\", \"age\": 25}'"        # Test valid JSON
+    "${build_dir_bin}/test-gbnf-validator grammars/json.gbnf -c '{\"name\": \"Bob\", \"age\": thirty}'"      # Test invalid JSON (should fail)
+    "${build_dir_bin}/test-gbnf-validator grammars/arithmetic.gbnf -c 'x = 5'"                               # Test valid arithmetic
+    "${build_dir_bin}/test-gbnf-validator grammars/arithmetic.gbnf -c 'x = 5 +'"                             # Test invalid arithmetic (should fail)
+    "${build_dir_bin}/test-gbnf-validator grammars/list.gbnf -c '- First item\n- Second item\n'"
+    "${build_dir_bin}/test-gguf"
+    "${build_dir_bin}/test-grammar-integration"
+    "${build_dir_bin}/test-grammar-parser"
+    "${build_dir_bin}/test-json-partial"
+    "${build_dir_bin}/test-llama-grammar"
+    "${build_dir_bin}/test-log"
+    "${build_dir_bin}/test-model-load-cancel"
+    "${build_dir_bin}/test-mtmd-c-api"
+    "${build_dir_bin}/test-regex-partial"
+    "${build_dir_bin}/test-sampling"
+    "${build_dir_bin}/test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
 )
 
 # Add platform-specific tests
 if [ "${ARCH}" != "loongarch64" ]; then
     echo "[INFO] Adding test-json-schema-to-grammar (not LoongArch64 platform)" | tee -a "$summary_log"
-    test_cases_part1+=("${build_dir}/bin/test-json-schema-to-grammar")
+    test_cases_part1+=("${build_dir_bin}/test-json-schema-to-grammar")
 else
     echo "[INFO] Skipping test-json-schema-to-grammar on LoongArch64 platform (because the ggml-ci node lacks Python 3.8)" | tee -a "$summary_log"
 fi
@@ -408,7 +488,7 @@ validate_qwen_output() {
     local output_file=$(mktemp)
 
     # Run inference with fixed parameters for deterministic output
-    ${build_dir}/bin/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -p "$prompt" > "$output_file" 2>&1
+    ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -p "$prompt" > "$output_file" 2>&1
     local cmd_result=$?
 
     if [ $cmd_result -ne 0 ]; then
@@ -443,8 +523,8 @@ add_qwen_model_tests
 
 # Full tokenizer tests for all platforms
 test_cases_part2=(
-    "${build_dir}/bin/test-tokenizer-1-bpe models/ggml-vocab-llama-bpe.gguf"
-    "${build_dir}/bin/test-tokenizer-1-spm models/ggml-vocab-llama-spm.gguf"
+    "${build_dir_bin}/test-tokenizer-1-bpe models/ggml-vocab-llama-bpe.gguf"
+    "${build_dir_bin}/test-tokenizer-1-spm models/ggml-vocab-llama-spm.gguf"
 )
 
 # Function to auto-discover vocab test cases
@@ -455,7 +535,7 @@ add_tokenizer_vocab_tests() {
         inp="${vocab}.inp"
         out="${vocab}.out"
         if [[ -f "$inp" && -f "$out" ]]; then
-            test_cases_part2+=("${build_dir}/bin/test-tokenizer-0 $vocab")
+            test_cases_part2+=("${build_dir_bin}/test-tokenizer-0 $vocab")
         fi
     done
 }
