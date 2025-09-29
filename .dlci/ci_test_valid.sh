@@ -114,23 +114,47 @@ setup_sdk_path() {
     echo "$default_sdk_path"
 }
 
+# Function to get platform suffix based on architecture
+get_platform_suffix() {
+    local platform="$1"
+
+    case "${platform}" in
+        x86_64)
+            echo "manylinux_2_28-x86_64"
+            ;;
+        aarch64)
+            echo "manylinux_2_28-aarch64"
+            ;;
+        riscv64)
+            echo "ubuntu22.04-riscv64"
+            ;;
+        loongarch64)
+            echo "manylinux_2_38-loongarch64"
+            ;;
+        *)
+            log_warning "Unknown platform: ${platform}, using generic naming"
+            echo "linux-${platform}"
+            ;;
+    esac
+}
+
 # Function to get latest release tag from artifactory
 get_latest_release_tag() {
     local platform="$1"
+    local platform_suffix=$(get_platform_suffix "$platform")
 
     # Try to get the latest release tag using jf CLI if available
     if command -v jf >/dev/null 2>&1; then
-        local latest_release=$(jf rt s "dl-pypi/llamacpp/llama-*-bin-manylinux_2_28-${platform}.zip" --sort-by=modified --sort-order=desc --limit=1 2>/dev/null | jq -r '.[] | .path' | head -1 2>/dev/null || echo "")
+        local latest_release=$(jf rt s "dl-pypi/llamacpp/llama-*-bin-${platform_suffix}.zip" --sort-by=modified --sort-order=desc --limit=1 2>/dev/null | jq -r '.[] | .path' | head -1 2>/dev/null || echo "")
 
         if [ -n "$latest_release" ]; then
-            # Extract version from path like: dl-pypi/llamacpp/llama-dl-release-b5849-7-bin-manylinux_2_28-x86_64.zip
-            local version=$(echo "$latest_release" | sed -n 's/.*llama-\(.*\)-bin-manylinux_2_28-.*/\1/p')
+            local version=$(echo "$latest_release" | sed -n "s/.*llama-\(.*\)-bin-${platform_suffix//\//\\\/}\.zip.*/\1/p")
             if [ -n "$version" ]; then
                 echo "$version"
                 return 0
             else
                 # Try a simpler extraction method
-                version=$(basename "$latest_release" .zip | sed 's/llama-//' | sed 's/-bin-manylinux_2_28-.*//')
+                version=$(basename "$latest_release" .zip | sed 's/llama-//' | sed "s/-bin-${platform_suffix//\//\\\/}.*//")
                 if [ -n "$version" ]; then
                     echo "$version"
                     return 0
@@ -144,7 +168,7 @@ get_latest_release_tag() {
     local fallback_versions=("v1.0.0" "v0.9.0" "v0.8.0" "latest")
 
     for version in "${fallback_versions[@]}"; do
-        local test_url="${RELEASE_ARTIFACTORY_BASE}/llama-${version}-bin-manylinux_2_28-${platform}.zip"
+        local test_url="${RELEASE_ARTIFACTORY_BASE}/llama-${version}-bin-${platform_suffix}.zip"
         log_info "Testing availability of version: $version"
 
         if curl --head --silent --fail "$test_url" >/dev/null 2>&1; then
@@ -164,7 +188,8 @@ download_and_extract_release() {
     local version="$2"
     local work_dir="$3"
 
-    local release_filename="llama-${version}-bin-manylinux_2_28-${platform}.zip"
+    local platform_suffix=$(get_platform_suffix "$platform")
+    local release_filename="llama-${version}-bin-${platform_suffix}.zip"
     local download_path="${work_dir}/${release_filename}"
     local extract_path="${work_dir}/extracted_release"
 
@@ -396,7 +421,8 @@ main() {
     trap - ERR
 
     # Inline download and extract logic
-    local release_filename="llama-${RELEASE_VERSION}-bin-manylinux_2_28-${DOCKER_PLATFORM}.zip"
+    local platform_suffix=$(get_platform_suffix "$DOCKER_PLATFORM")
+    local release_filename="llama-${RELEASE_VERSION}-bin-${platform_suffix}.zip"
     local download_path="${WORK_DIR}/${release_filename}"
     local extract_path="${WORK_DIR}/extracted_release"
 

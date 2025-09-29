@@ -30,7 +30,28 @@ if [ -d "${build_dir}/bin" ]; then
     echo "Build Platform: ${ARCH}" >> release/version.txt
     echo "Architecture: $(uname -m)" >> release/version.txt
 
-    RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-manylinux_2_28-${ARCH}.zip"
+    # Determine the correct platform suffix based on architecture
+    case "${ARCH}" in
+        x86_64)
+            PLATFORM_SUFFIX="manylinux_2_28-x86_64"
+            ;;
+        aarch64)
+            PLATFORM_SUFFIX="manylinux_2_28-aarch64"
+            ;;
+        riscv64)
+            PLATFORM_SUFFIX="ubuntu22.04-riscv64"
+            ;;
+        loongarch64)
+            PLATFORM_SUFFIX="manylinux_2_38-loongarch64"
+            ;;
+        *)
+            echo "[WARNING] Unknown architecture: ${ARCH}, using generic naming"
+            PLATFORM_SUFFIX="linux-${ARCH}"
+            ;;
+    esac
+
+    RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-${PLATFORM_SUFFIX}.zip"
+    echo "[INFO] Creating release package: ${RELEASE_NAME}"
     zip -r "${RELEASE_NAME}" release/*
 
     echo "[INFO] Release package created: ${RELEASE_NAME}"
