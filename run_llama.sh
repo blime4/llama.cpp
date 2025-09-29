@@ -67,6 +67,8 @@ Options:
   --debug-mode            Enable debug mode with verbose output
   --simple-test           Run simplified CPU-only tests for troubleshooting
   --skip-device-check     Skip device card status check (use with caution)
+                          Note: Device check is also available as standalone script:
+                          .dlci/check_device_status.sh
   --help, -h              Show help information
 
 Action descriptions:
@@ -391,6 +393,8 @@ get_version_info() {
 }
 
 # Check device card status and handle failures
+# Note: This function is also available as a standalone script at .dlci/check_device_status.sh
+# The GitLab CI pipeline runs the standalone version before compilation/testing
 check_device_status() {
     log_info "Checking device card status with lspci..."
 
