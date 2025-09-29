@@ -19,7 +19,7 @@ mkdir -p release
 
 if [ -d "${build_dir}/bin" ]; then
     echo "[INFO] Copying release files from build/bin"
-    find "${build_dir}/bin" -type f ! -name "test*" -exec cp {} release/ \;
+    cp "${build_dir}/bin"/* release/
 
     echo "[INFO] Files to be released:"
     ls -la release/
