@@ -6,7 +6,7 @@ variables:
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
   DOCKER_IMAGE_X86: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
   DOCKER_IMAGE_AARCH64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702"
-  DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-40:manylinux_2_39-riscv64-20250911"
+  DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822"
   DOCKER_IMAGE_LOONGAARCH64 : "ext-artifactory.denglin.com:8082/ci-docker-images/c-41:manylinux_2_38-loongarch64-20250910"
 
 .docker_envs: &docker_envs |
@@ -36,7 +36,9 @@ compile_and_test_llama_cpp_x86_64:
   artifacts:
     paths:
       - build_x86_64/bin
+      - logs/compile/
     expire_in: 1 day
+    when: always
 
 compile_and_test_llama_cpp_aarch64:
   stage: compile_and_test_llama_cpp
@@ -55,7 +57,9 @@ compile_and_test_llama_cpp_aarch64:
   artifacts:
     paths:
       - build_aarch64/bin
+      - logs/compile/
     expire_in: 1 day
+    when: always
 
 compile_and_test_llama_cpp_riscv64:
   stage: compile_and_test_llama_cpp
@@ -68,6 +72,7 @@ compile_and_test_llama_cpp_riscv64:
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk_riscv64"
     - *docker_envs
+    - echo "[INFO] Skipping device check for RISC-V platform (no hardware acceleration expected)"
     - echo "${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} \"\${DOCKER_ENVS[@]}\" \"${DOCKER_IMAGE_RISCV64}\" ${REPO_PATH}/.dlci/compile_llama_cpp.sh"
     - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
     # TODO : need hardware support.
@@ -75,7 +80,9 @@ compile_and_test_llama_cpp_riscv64:
   artifacts:
     paths:
       - build_riscv64/bin
+      - logs/compile/
     expire_in: 1 day
+    when: always
 
 compile_and_test_llama_cpp_loongarch64:
   stage: compile_and_test_llama_cpp
@@ -94,7 +101,9 @@ compile_and_test_llama_cpp_loongarch64:
   artifacts:
     paths:
       - build_loongarch64/bin
+      - logs/compile/
     expire_in: 1 day
+    when: always
 
 release_llama_cpp_x86_64:
   stage: release_llama_cpp

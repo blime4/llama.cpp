@@ -144,7 +144,7 @@ get_docker_image() {
             echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702"
             ;;
         riscv64)
-            echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-40:manylinux_2_39-riscv64-20250911"
+            echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822"
             ;;
         loongarch64)
             echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-41:manylinux_2_38-loongarch64-20250910"

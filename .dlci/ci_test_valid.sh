@@ -126,7 +126,7 @@ get_platform_suffix() {
             echo "manylinux_2_28-aarch64"
             ;;
         riscv64)
-            echo "manylinux_2_39-riscv64"
+            echo "linux-riscv64"
             ;;
         loongarch64)
             echo "manylinux_2_38-loongarch64"

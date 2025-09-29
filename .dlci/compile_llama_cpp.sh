@@ -6,16 +6,67 @@ set -e
 compile_start_time=$(date +%s)
 
 # Create logs directory
-logs_dir="/LocalRun/$(whoami)/logs/llama_cpp_compile"
-mkdir -p "$logs_dir"
+# Use persistent path that survives CI job completion
+if [ -n "$CI_PROJECT_DIR" ]; then
+    # GitLab CI environment - save logs in persistent GitLab Runner directory
+    # Use CI_JOB_ID to make logs unique per job
+    logs_dir="/LocalRun/gitlab-runner/logs/llama_cpp_compile"
+    mkdir -p "$logs_dir"
+    echo "[INFO] CI environment detected, logs will be saved in persistent directory: $logs_dir"
+
+    # Also create a copy in project directory for artifacts (if it works)
+    project_logs_dir="${CI_PROJECT_DIR}/logs/compile"
+    mkdir -p "$project_logs_dir"
+else
+    # Local environment - use user-specific path
+    logs_dir="/LocalRun/$(whoami)/logs/llama_cpp_compile"
+    mkdir -p "$logs_dir"
+fi
 
 # Log files
-compile_log="${logs_dir}/compile_$(date +%Y%m%d_%H%M%S).log"
-summary_log="${logs_dir}/compile_summary_$(date +%Y%m%d_%H%M%S).log"
+timestamp=$(date +%Y%m%d_%H%M%S)
+compile_log="${logs_dir}/compile_${timestamp}.log"
+summary_log="${logs_dir}/compile_summary_${timestamp}.log"
+
+# In CI environment, also create project log files for artifacts
+if [ -n "$CI_PROJECT_DIR" ] && [ -n "$project_logs_dir" ]; then
+    project_compile_log="${project_logs_dir}/compile_${timestamp}.log"
+    project_summary_log="${project_logs_dir}/compile_summary_${timestamp}.log"
+
+    # Create symlinks or use tee to duplicate logs
+    echo "[INFO] Will also save logs to project directory for artifacts"
+fi
+
+# Function to execute command with dual logging
+exec_with_dual_log() {
+    local cmd="$1"
+
+    if [ -n "$project_compile_log" ]; then
+        # Dual logging: write to both persistent and project logs
+        # Use PIPESTATUS to capture the original command's exit code
+        eval "$cmd" 2>&1 | tee -a "$compile_log" "$project_compile_log"
+        return ${PIPESTATUS[0]}
+    else
+        # Single logging: write to persistent log only
+        eval "$cmd" >> "$compile_log" 2>&1
+        return $?
+    fi
+}
 
 echo "[INFO] Compilation started at: $(date)" | tee -a "$compile_log"
 echo "[INFO] Detailed logs will be saved to: $compile_log" | tee -a "$summary_log"
 echo "[INFO] Summary will be saved to: $summary_log" | tee -a "$summary_log"
+
+# In CI, also log project paths
+if [ -n "$project_compile_log" ]; then
+    echo "[INFO] Project artifacts logs: $project_compile_log" | tee -a "$summary_log"
+    echo "[INFO] Project artifacts summary: $project_summary_log" | tee -a "$summary_log"
+
+    # Initialize project log files
+    echo "[INFO] Compilation started at: $(date)" >> "$project_compile_log"
+    echo "[INFO] Detailed logs will be saved to: $project_compile_log" >> "$project_summary_log"
+    echo "[INFO] Summary will be saved to: $project_summary_log" >> "$project_summary_log"
+fi
 
 # Ensure sdk_path is set and valid
 if [ -z "$sdk_path" ] || [ ! -d "$sdk_path" ]; then
@@ -89,6 +140,11 @@ ln -sf /usr/bin/ccache "$CUSTOM_BIN_DIR/dlcc" || {
 # though CUDA_NVCC_EXECUTABLE uses an absolute path.
 export PATH="$CUSTOM_BIN_DIR:$PATH"
 
+# correct ccache path in PATH.
+export PATH=$(echo "$PATH" | tr ':' '\n' | awk '/ccache/{ccache=$0; next} {print} END{if(ccache) print ccache}' | paste -sd:)
+echo "[INFO] which ccache: $(which ccache)" | tee -a "$summary_log"
+echo "[INFO] PATH: $PATH" | tee -a "$summary_log"
+
 # Set CUDA_NVCC_EXECUTABLE to use the ccache symlink (absolute path).
 # This tells nvcc (NVIDIA CUDA Compiler) to use our ccache-enabled wrapper.
 export CUDA_NVCC_EXECUTABLE="$CUSTOM_BIN_DIR/dlcc"
@@ -112,7 +168,9 @@ echo "[INFO] Build directory: $build_dir" | tee -a "$summary_log"
 echo "[INFO] Configuring cmake for $ARCH platform..." | tee -a "$summary_log"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a" | tee -a "$summary_log"
-    cmake -G Ninja -B ${build_dir} \
+
+    # Execute CMake with dual logging
+    cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
@@ -124,10 +182,14 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         -DGGML_RVV=OFF \
         -DGGML_CPU_ARM_ARCH=armv8-a \
         -DGGML_NATIVE=OFF \
-        -DSDK_DIR=${sdk} >> "$compile_log" 2>&1
+        -DSDK_DIR=${sdk}"
+
+    exec_with_dual_log "$cmake_cmd"
 elif [ "$ARCH" = "loongarch64" ]; then
     echo "[INFO] Detected LoongArch64 platform" | tee -a "$summary_log"
-    cmake -G Ninja -B ${build_dir} \
+
+    # Execute CMake with dual logging
+    cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
@@ -138,10 +200,40 @@ elif [ "$ARCH" = "loongarch64" ]; then
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
-        -DSDK_DIR=${sdk} >> "$compile_log" 2>&1
+        -DSDK_DIR=${sdk}"
+
+    exec_with_dual_log "$cmake_cmd"
+elif [ "$ARCH" = "riscv64" ]; then
+    echo "[INFO] Detected RISC-V 64-bit platform" | tee -a "$summary_log"
+
+    # Execute CMake with dual logging
+    cmake_cmd="cmake -G Ninja -B ${build_dir} \
+        -DGGML_DLCU=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_CPU_ALL_VARIANTS=OFF \
+        -DGGML_CUDA_GRAPHS=OFF \
+        -DLLAMA_CURL=OFF \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DGGML_CUDA_FA=ON \
+        -DGGML_CUDA_FA_ALL_QUANTS=ON \
+        -DGGML_RVV=ON \
+        -DGGML_NATIVE=OFF \
+        -DSDK_DIR=${sdk}"
+
+    exec_with_dual_log "$cmake_cmd"
+
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] CMake configuration failed for RISC-V 64-bit platform" | tee -a "$summary_log"
+        echo "[ERROR] Check cmake logs for details: $compile_log" | tee -a "$summary_log"
+        exit 1
+    fi
+    echo "[INFO] CMake configuration completed successfully for RISC-V 64-bit" | tee -a "$summary_log"
 else
     echo "[INFO] Detected x86_64 platform" | tee -a "$summary_log"
-    cmake -G Ninja -B ${build_dir} \
+
+    # Execute CMake with dual logging
+    cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
@@ -152,7 +244,9 @@ else
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
-        -DSDK_DIR=${sdk} >> "$compile_log" 2>&1
+        -DSDK_DIR=${sdk}"
+
+    exec_with_dual_log "$cmake_cmd"
 fi
 
 cmake_exit_code=$?
@@ -170,7 +264,7 @@ ccache --show-stats >> "$compile_log" 2>&1
 cd $build_dir
 
 echo "[INFO] Starting ninja build with 12 parallel jobs..." | tee -a "$summary_log"
-ninja -j 12 >> "$compile_log" 2>&1
+exec_with_dual_log "ninja -j 12"
 
 ninja_exit_code=$?
 if [ $ninja_exit_code -ne 0 ]; then

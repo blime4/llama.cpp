@@ -102,7 +102,7 @@ echo "build_dir: $build_dir"
 
 DOCKER_IMAGE_X86="ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703-dev"
 DOCKER_IMAGE_AARCH64="ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702-dev"
-DOCKER_IMAGE_RISCV64="ext-artifactory.denglin.com:8082/ci-docker-images/c-40:manylinux_2_39-riscv64-20250911-dev"
+DOCKER_IMAGE_RISCV64="ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822-dev"
 DOCKER_IMAGE_LOONGAARCH64="ext-artifactory.denglin.com:8082/ci-docker-images/c-41:manylinux_2_38-loongarch64-20250910"
 
 case "$DOCKER_PLATFORM" in

@@ -39,7 +39,7 @@ if [ -d "${build_dir}/bin" ]; then
             PLATFORM_SUFFIX="manylinux_2_28-aarch64"
             ;;
         riscv64)
-            PLATFORM_SUFFIX="manylinux_2_39-riscv64"
+            PLATFORM_SUFFIX="linux-riscv64"
             ;;
         loongarch64)
             PLATFORM_SUFFIX="manylinux_2_38-loongarch64"
