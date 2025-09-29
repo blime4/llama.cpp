@@ -67,8 +67,7 @@ Options:
   --debug-mode            Enable debug mode with verbose output
   --simple-test           Run simplified CPU-only tests for troubleshooting
   --skip-device-check     Skip device card status check (use with caution)
-                          Note: Device check is also available as standalone script:
-                          .dlci/check_device_status.sh
+                          Device check uses standalone script: .dlci/check_device_status.sh
   --help, -h              Show help information
 
 Action descriptions:
@@ -393,77 +392,51 @@ get_version_info() {
 }
 
 # Check device card status and handle failures
-# Note: This function is also available as a standalone script at .dlci/check_device_status.sh
-# The GitLab CI pipeline runs the standalone version before compilation/testing
+# This function now delegates to the standalone device check script for consistency
 check_device_status() {
-    log_info "Checking device card status with lspci..."
-
-    if ! command -v lspci >/dev/null 2>&1; then
-        log_warn "lspci command not found, skipping device card status check"
-        return 0
-    fi
-
-    local device_status
-    device_status=$(lspci -d 1e27: -v 2>/dev/null || echo "")
-
-    if [ -z "$device_status" ]; then
-        log_info "No devices with vendor ID 1e27 found, skipping device status check"
-        return 0
-    fi
-
-    log_info "Found devices with vendor ID 1e27, checking status..."
-    log_info "Device info preview:"
-    echo "$device_status" | head -10  # Show first 10 lines for reference
-
-    if echo "$device_status" | grep -q "Unknown header"; then
-        log_error "Device card has dropped (Unknown header detected in lspci output)"
-        log_error "Device status output:"
-        echo "$device_status"
-        log_error "=========================================="
-
-        # Platform-specific handling
-        local platform=$(uname -m)
-        if [ "$platform" = "loongarch64" ]; then
-            log_error "LoongArch64 platform: dlsmi -r is temporarily unavailable"
-            log_error "Please restart the system to recover the device"
-            log_error "Build/test execution aborted due to device card failure"
-            exit 1
+    local device_check_script="${REPO_PATH}/.dlci/check_device_status.sh"
+    
+    # Check if the standalone device check script exists
+    if [ -f "$device_check_script" ] && [ -x "$device_check_script" ]; then
+        log_info "Running device status check using standalone script..."
+        
+        # Set DOCKER_PLATFORM for the script
+        export DOCKER_PLATFORM="${platform:-$(uname -m)}"
+        
+        # Run the standalone device check script
+        if bash "$device_check_script"; then
+            log_success "Device status check completed successfully"
+            return 0
         else
-            log_info "Attempting to reset device using dlsmi -r..."
-            if command -v dlsmi >/dev/null 2>&1; then
-                log_info "Executing device reset command..."
-                if dlsmi -r 2>&1; then
-                    log_info "Device reset command executed successfully"
-                    log_info "Waiting for device to stabilize..."
-                    sleep 5
-
-                    # Verify device status after reset
-                    log_info "Verifying device status after reset..."
-                    local post_reset_status
-                    post_reset_status=$(lspci -d 1e27: -v 2>/dev/null || echo "")
-                    if echo "$post_reset_status" | grep -q "Unknown header"; then
-                        log_error "Device still shows Unknown header after reset"
-                        log_error "Please manually restart the system"
-                        exit 1
-                    else
-                        log_success "Device status verification passed after reset"
-                        log_info "Continuing with build/test execution"
-                    fi
-                else
-                    log_error "Device reset command failed"
-                    log_error "Please manually execute 'dlsmi -r' to reset the device"
-                    log_error "Build/test execution aborted due to device card failure"
-                    exit 1
-                fi
-            else
-                log_error "dlsmi command not available, cannot reset device"
-                log_error "Please manually execute 'dlsmi -r' to reset the device"
-                log_error "Build/test execution aborted due to device card failure"
-                exit 1
-            fi
+            log_error "Device status check failed"
+            return 1
         fi
     else
-        log_success "Device card status check passed - no issues detected"
+        # Fallback to basic check if standalone script is not available
+        log_warn "Standalone device check script not found at: $device_check_script"
+        log_info "Performing basic device status check..."
+        
+        if ! command -v lspci >/dev/null 2>&1; then
+            log_warn "lspci command not found, skipping device card status check"
+            return 0
+        fi
+
+        local device_status
+        device_status=$(lspci -d 1e27: -v 2>/dev/null || echo "")
+
+        if [ -z "$device_status" ]; then
+            log_info "No devices with vendor ID 1e27 found, skipping device status check"
+            return 0
+        fi
+
+        if echo "$device_status" | grep -q "Unknown header"; then
+            log_error "Device card has dropped (Unknown header detected)"
+            log_error "Please run the full device check: $device_check_script"
+            return 1
+        else
+            log_success "Basic device card status check passed"
+            return 0
+        fi
     fi
 }
 
