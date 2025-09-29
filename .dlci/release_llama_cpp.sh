@@ -39,7 +39,7 @@ if [ -d "${build_dir}/bin" ]; then
             PLATFORM_SUFFIX="manylinux_2_28-aarch64"
             ;;
         riscv64)
-            PLATFORM_SUFFIX="ubuntu22.04-riscv64"
+            PLATFORM_SUFFIX="manylinux_2_39-riscv64"
             ;;
         loongarch64)
             PLATFORM_SUFFIX="manylinux_2_38-loongarch64"
@@ -50,16 +50,16 @@ if [ -d "${build_dir}/bin" ]; then
             ;;
     esac
 
-    RELEASE_NAME="llama-${CI_COMMIT_TAG}-bin-${PLATFORM_SUFFIX}.zip"
+    RELEASE_NAME="llama-${CI_COMMIT_TAG}-${SDK_TAG}-bin-${PLATFORM_SUFFIX}.zip"
     echo "[INFO] Creating release package: ${RELEASE_NAME}"
     zip -r "${RELEASE_NAME}" release/*
 
     echo "[INFO] Release package created: ${RELEASE_NAME}"
     ls -la "${RELEASE_NAME}"
 
-    jf rt u "${RELEASE_NAME}" dl-pypi/llamacpp/  -flat=true
+    jf rt u "${RELEASE_NAME}" llama.cpp-release/  -flat=true
     package_name=$(basename $(ls "${RELEASE_NAME}" | head -n1))
-    echo "【Artifact Download Link】http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp/$package_name"
+    echo "【Artifact Download Link】http://ext-artifactory.denglin.com:8082/artifactory/llama.cpp-release/$package_name"
 else
     echo "[ERROR] build/bin directory not found at ${build_dir}/bin"
     exit 1

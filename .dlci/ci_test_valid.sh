@@ -18,7 +18,7 @@ set -e
 DEFAULT_SDK_TAG="V2_SOFTWARE_master_202509180241"
 DEFAULT_LOCAL_MODEL_PATH="/mars/aebox/LLM/model"
 WORK_DIR="/tmp/llama_cpp_ci_test_$$"  # Use PID for uniqueness
-RELEASE_ARTIFACTORY_BASE="http://ext-artifactory.denglin.com:8082/artifactory/dl-pypi/llamacpp"
+RELEASE_ARTIFACTORY_BASE="http://ext-artifactory.denglin.com:8082/artifactory/llama.cpp-release"
 
 # Colors for output
 RED='\033[0;31m'
@@ -145,7 +145,7 @@ get_latest_release_tag() {
 
     # Try to get the latest release tag using jf CLI if available
     if command -v jf >/dev/null 2>&1; then
-        local latest_release=$(jf rt s "dl-pypi/llamacpp/llama-*-bin-${platform_suffix}.zip" --sort-by=modified --sort-order=desc --limit=1 2>/dev/null | jq -r '.[] | .path' | head -1 2>/dev/null || echo "")
+        local latest_release=$(jf rt s "llama.cpp-release/llama-*-bin-${platform_suffix}.zip" --sort-by=modified --sort-order=desc --limit=1 2>/dev/null | jq -r '.[] | .path' | head -1 2>/dev/null || echo "")
 
         if [ -n "$latest_release" ]; then
             local version=$(echo "$latest_release" | sed -n "s/.*llama-\(.*\)-bin-${platform_suffix//\//\\\/}\.zip.*/\1/p")
@@ -207,10 +207,10 @@ download_and_extract_release() {
 
     # Download using JFrog CLI (we know this works from testing)
     log_info "Executing JFrog CLI download..."
-    log_info "Command: jf rt dl \"dl-pypi/llamacpp/${release_filename}\" --flat=true"
+    log_info "Command: jf rt dl \"llama.cpp-release/${release_filename}\" --flat=true"
 
     # Execute with explicit error handling
-    if jf rt dl "dl-pypi/llamacpp/${release_filename}" --flat=true; then
+    if jf rt dl "llama.cpp-release/${release_filename}" --flat=true; then
         log_success "JFrog CLI download completed"
     else
         log_error "JFrog CLI download failed"
@@ -439,9 +439,9 @@ main() {
 
     # Download using JFrog CLI
     log_info "Executing JFrog CLI download..."
-    log_info "Command: jf rt dl \"dl-pypi/llamacpp/${release_filename}\" --flat=true"
+    log_info "Command: jf rt dl \"llama.cpp-release/${release_filename}\" --flat=true"
 
-    if jf rt dl "dl-pypi/llamacpp/${release_filename}" --flat=true; then
+    if jf rt dl "llama.cpp-release/${release_filename}" --flat=true; then
         log_success "JFrog CLI download completed"
     else
         log_error "JFrog CLI download failed"
