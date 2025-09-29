@@ -185,8 +185,32 @@ struct clip_image_f32 {
 //
 
 static void clip_log_callback_default(enum ggml_log_level level, const char * text, void * user_data) {
-    (void) level;
+    // (void) level;
     (void) user_data;
+
+    // DL : Add level prefix
+    switch (level) {
+        case GGML_LOG_LEVEL_DEBUG:
+            fputs("[DEBUG] ", stderr);
+            break;
+        case GGML_LOG_LEVEL_INFO:
+            fputs("[INFO] ", stderr);
+            break;
+        case GGML_LOG_LEVEL_WARN:
+            fputs("[WARN] ", stderr);
+            break;
+        case GGML_LOG_LEVEL_ERROR:
+            fputs("[ERROR] ", stderr);
+            break;
+        case GGML_LOG_LEVEL_CONT:
+            // No prefix for continuation lines
+            break;
+        case GGML_LOG_LEVEL_NONE:
+        default:
+            // No prefix for NONE or unknown levels
+            break;
+    }
+
     fputs(text, stderr);
     fflush(stderr);
 }

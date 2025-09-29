@@ -1,0 +1,81 @@
+# Qwen Model Test References
+# This file contains expected outputs for Qwen model correctness tests
+# Format: model_name -> test_name -> expected_content
+
+models:
+  Qwen2-1.5Moe.Q4_K_M:
+    model_path: "Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf"
+    description: "Qwen2 MoE 1.5B model with Q4_K_M quantization"
+    tests:
+      math_calculation:
+        prompt: "请计算 2+3*4 的结果"
+        expected_content: "14"
+        description: "Basic arithmetic calculation test"
+      simple_math:
+        prompt: "1+1等于几？"
+        expected_content: "2"
+        description: "Simple addition in Chinese"
+      geography:
+        prompt: "请用一个词回答：北京是中国的什么？"
+        expected_content: "首都"
+        description: "Geography knowledge test"
+      english_math:
+        prompt: "What is 5+3? Answer with only the number."
+        expected_content: "8"
+        description: "English arithmetic test"
+
+  qwen2.5-1.5b-instruct-fp16:
+    model_path: "Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+    description: "Qwen2.5 1.5B Instruct model with FP16 precision"
+    tests:
+      math_calculation:
+        prompt: "请计算 2+3*4 的结果"
+        expected_content: "14"
+        description: "Basic arithmetic calculation test"
+      simple_math:
+        prompt: "1+1等于几？"
+        expected_content: "2"
+        description: "Simple addition in Chinese"
+      geography:
+        prompt: "请用一个词回答：北京是中国的什么？"
+        expected_content: "首都"
+        description: "Geography knowledge test"
+      english_math:
+        prompt: "What is 5+3? Answer with only the number."
+        expected_content: "8"
+        description: "English arithmetic test"
+
+  Qwen3-30B-A3B-Q4_K_M:
+    model_path: "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf"
+    description: "Qwen3 30B A3B model with Q4_K_M quantization (reduced test scope)"
+    tests:
+      math_calculation:
+        prompt: "请计算 2+3*4 的结果"
+        expected_content: "14"
+        description: "Basic arithmetic calculation test"
+      simple_math:
+        prompt: "1+1等于几？"
+        expected_content: "2"
+        description: "Simple addition in Chinese"
+      english_math:
+        prompt: "What is 5+3? Answer with only the number."
+        expected_content: "8"
+        description: "English arithmetic test"
+
+# Test configuration
+config:
+  llama_cli_params:
+    no_conversation: true
+    tokens: 50
+    temperature: 0.0
+    top_k: 1
+    top_p: 1.0
+    repeat_penalty: 1.0
+    seed: 42
+  validation:
+    content_check: true
+    reference_comparison: true
+    ignore_patterns:
+      - "^llama_"
+      - "^Log "
+      - "^system_info"

@@ -2,7 +2,7 @@
 set -e
 
 # Default SDK_TAG, can be passed as parameter
-DEFAULT_SDK_TAG="V2_SOFTWARE_master_202508201444"
+DEFAULT_SDK_TAG="V2_SOFTWARE_master_202509180241"
 
 # Show help information
 show_help() {
@@ -12,6 +12,7 @@ show_help() {
     echo "  -c, --compile        Compile llama.cpp before entering docker"
     echo "  -cc, --re-compile    Re-compile (clean and build) llama.cpp before entering docker"
     echo "  -h, --help           Show this help message"
+    echo "  -p, --platform       Set platform (supported: x86_64, aarch64, loongarch64, riscv64, default: auto-detect)"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Enter docker with default SDK_TAG"
@@ -24,7 +25,26 @@ show_help() {
 SDK_TAG="$DEFAULT_SDK_TAG"
 COMPILE_FIRST=false
 RE_COMPILE=false
-DOCKER_PLATFORM=x86_64
+# Auto-detect platform based on system architecture
+DOCKER_PLATFORM=$(uname -m)
+case "$DOCKER_PLATFORM" in
+    x86_64)
+        DOCKER_PLATFORM="x86_64"
+        ;;
+    aarch64|arm64)
+        DOCKER_PLATFORM="aarch64"
+        ;;
+    loongarch64)
+        DOCKER_PLATFORM="loongarch64"
+        ;;
+    riscv64)
+        DOCKER_PLATFORM="riscv64"
+        ;;
+    *)
+        echo "[WARNING] Unknown architecture: $DOCKER_PLATFORM, defaulting to x86_64"
+        DOCKER_PLATFORM="x86_64"
+        ;;
+esac
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -45,6 +65,16 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
+        -p|--platform)
+            if [[ "$2" =~ ^(x86_64|aarch64|loongarch64|riscv64)$ ]]; then
+                DOCKER_PLATFORM="$2"
+            else
+                echo "[ERROR] Unsupported platform: $2"
+                echo "Supported platforms: x86_64, aarch64, loongarch64, riscv64"
+                exit 1
+            fi
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             show_help
@@ -57,6 +87,7 @@ echo "=== Local Development Environment ==="
 echo "SDK_TAG: $SDK_TAG"
 echo "Compile first: $COMPILE_FIRST"
 echo "Re-compile: $RE_COMPILE"
+echo "DOCKER_PLATFORM: $DOCKER_PLATFORM"
 
 # Set environment variables
 export SDK_TAG="$SDK_TAG"
@@ -65,10 +96,36 @@ export REPO_PATH="$(cd "$(dirname "$0")/../.." && pwd)"
 export LOCAL_MODEL_PATH="/models"
 export SDK_WORKSPACE="${LOCAL_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
 export DOCKER_REPO_PATH="${LOCAL_BUILDS_DIR}/sdk_llama_cpp/docker"
-export DOCKER_IMAGE_COMPILE="ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
 export DOCKER_PLATFORM="$DOCKER_PLATFORM"
+build_dir=$(readlink -m ${REPO_PATH}/build_${DOCKER_PLATFORM})
+echo "build_dir: $build_dir"
+
+DOCKER_IMAGE_X86="ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703-dev"
+DOCKER_IMAGE_AARCH64="ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702-dev"
+DOCKER_IMAGE_RISCV64="ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822"
+DOCKER_IMAGE_LOONGAARCH64="ext-artifactory.denglin.com:8082/ci-docker-images/c-41:manylinux_2_38-loongarch64-20250910"
+
+case "$DOCKER_PLATFORM" in
+    x86_64)
+        DOCKER_IMAGE_COMPILE="$DOCKER_IMAGE_X86"
+        ;;
+    aarch64)
+        DOCKER_IMAGE_COMPILE="$DOCKER_IMAGE_AARCH64"
+        ;;
+    riscv64)
+        DOCKER_IMAGE_COMPILE="$DOCKER_IMAGE_RISCV64"
+        ;;
+    loongarch64)
+        DOCKER_IMAGE_COMPILE="$DOCKER_IMAGE_LOONGAARCH64"
+        ;;
+    *)
+        echo "[ERROR] unsupported DOCKER_PLATFORM: $DOCKER_PLATFORM"
+        exit 1
+        ;;
+esac
 
 echo "SDK_WORKSPACE: $SDK_WORKSPACE"
+echo "DOCKER_IMAGE_COMPILE: $DOCKER_IMAGE_COMPILE"
 
 # Check required script files
 if [ ! -f "../../.dlci/download_and_unpack_sdk.sh" ]; then
@@ -101,7 +158,7 @@ export git_name=`git config user.name || echo "example"`
 DOCKER_ENVS=()
 while IFS='=' read -r key value; do
     DOCKER_ENVS+=(--env "${key}=${value}")
-done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH|git_)')
+done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH|git_|DOCKER_PLATFORM)')
 
 echo "Number of Docker environment variables: ${#DOCKER_ENVS[@]}"
 
@@ -136,9 +193,9 @@ fi
 echo "[Step 6] Entering docker for development..."
 echo "You can now interactively develop with llama.cpp in the docker container."
 echo "You need to source $sdk_path/env.sh to use the SDK."
-echo "One-click command: source scripts/denglin/docker_env.sh"
-echo "One-click command: source scripts/denglin/docker_env.sh && CUDA_VISIBLE_DEVICES=0 GLOG_minloglevel=0 DLDNN_API_DUMP=1 GGML_DLFA_READY=1 test-backend-ops -o FLASH_ATTN_EXT"
-echo "One-click command: source scripts/denglin/docker_env.sh && CUDA_VISIBLE_DEVICES=0 GLOG_minloglevel=0 DLDNN_API_DUMP=1 GGML_DLFA_READY=1 test-backend-ops -o FLASH_ATTN_EXT -p \"(hsk=64.*hsv=64|hsk=128.*hsv=128|hsk=256.*hsv=256).*nb=1\""
+echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT"
+echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT -p \"(hsk=64.*hsv=64|hsk=128.*hsv=128|hsk=256.*hsv=256).*nb=1\""
+echo "One-click command: test-backend-ops -o GATED_LINEAR_ATTN"
 
 echo "Available commands:"
 echo "  - llama-cli --help"
@@ -161,10 +218,11 @@ exec docker run --rm -it                                   \
     -v "${sdk_path}:/sdk_path"                             \
     -v /mars/aebox/LLM/model:/models                       \
     -w /workspace                                          \
+    -v "${build_dir}:/workspace/build"                     \
     --network host                                         \
     "${DOCKER_ENVS[@]}"                                    \
     "${DOCKER_IMAGE_COMPILE}"                              \
-    /bin/bash
+    /bin/bash --rcfile scripts/denglin/docker_env.sh
 
 # This line will only be reached if docker command fails
 echo "=== Development session ended ==="

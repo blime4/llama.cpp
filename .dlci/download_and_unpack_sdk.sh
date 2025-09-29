@@ -18,23 +18,30 @@ ARCH=${DOCKER_PLATFORM}
 
 # Step 1: Download SDK archive
 if [[ "$ARCH" == "x86_64" ]]; then
-  if [[ ! -f sdk.tar.bz2 ]]; then
+  if ! ls sdk.tar.bz2 1> /dev/null 2>&1; then
     echo "[INFO] Downloading SDK archive for x86_64: $SDK_TAG"
     jf rt dl ai-sw-dailybuild-v2/${SDK_TAG}/sdk.tar.bz2 -flat=true
   else
     echo "[INFO] SDK archive already exists, skipping download"
   fi
 elif [[ "$ARCH" == "aarch64" ]]; then
-  if [[ ! -f *-aarch64.tar.bz2 ]]; then
+  if ! ls *-aarch64.tar.bz2 1> /dev/null 2>&1; then
     echo "[INFO] Downloading SDK archive for aarch64: $SDK_TAG"
     jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-aarch64.tar.bz2 -flat=true
   else
     echo "[INFO] SDK archive already exists, skipping download"
   fi
 elif [[ "$ARCH" == "riscv64" ]]; then
-  if [[ ! -f *-riscv-riscv64.tar.bz2 ]]; then
+  if ! ls *riscv64.tar.bz2 1> /dev/null 2>&1; then
     echo "[INFO] Downloading SDK archive for risv64: $SDK_TAG"
-    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-riscv-riscv64.tar.bz2 -flat=true
+    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*-riscv64.tar.bz2 -flat=true
+  else
+    echo "[INFO] SDK archive already exists, skipping download"
+  fi
+elif [[ "$ARCH" == "loongarch64" ]]; then
+  if ! ls *loongarch.tar.bz2 1> /dev/null 2>&1; then
+    echo "[INFO] Downloading SDK archive for loongarch64: $SDK_TAG"
+    jf rt dl ai-sw-sdk-v2-test/${SDK_TAG}/*loongarch.tar.bz2 -flat=true
   else
     echo "[INFO] SDK archive already exists, skipping download"
   fi
@@ -51,9 +58,13 @@ elif [[ "$ARCH" == "aarch64" && ! -d sdk ]]; then
   echo "[INFO] Extracting SDK archive for aarch64..."
   tar xf *-aarch64.tar.bz2
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
+elif [[ "$ARCH" == "loongarch64" && ! -d sdk ]]; then
+  echo "[INFO] Extracting SDK archive for loongarch64..."
+  tar xf *-loongarch.tar.bz2
+  sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
 elif [[ "$ARCH" == "riscv64" && ! -d sdk_${ARCH} ]]; then
   echo "[INFO] Extracting SDK archive for riscv64..."
-  tar xf *-riscv-riscv64.tar.bz2
+  tar xf *-riscv64.tar.bz2
   sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
   mv sdk sdk_${ARCH}
 else

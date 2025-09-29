@@ -2345,7 +2345,7 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     // 2. quantize the weight tensor to gptq-format
 
     // 1. get the weight tensor
-    GGML_LOG("DL: [%s] quantizing weight tensor %s to %d-bit\n", __FUNCTION__, src0->name, bits);
+    // GGML_LOG_DEBUG("DL: [%s] quantizing weight tensor %s to %d-bit\n", __FUNCTION__, src0->name, bits);
     void* data = src0->data;
     int64_t ne00 = src0->ne[0]; // ne [row, col, batch, shard]
     int64_t ne01 = src0->ne[1];
@@ -2694,7 +2694,7 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
     // In unit tests. TODO: Refactor : Others that do not go through llama_model::load_tensors are theoretically needed
     static const bool is_test_mode = getenv("GGML_TEST_MODE") != nullptr;
     if (is_test_mode) {
-        GGML_LOG("DL: [%s] GGML_TEST_MODE=1\n", __FUNCTION__);
+        // GGML_LOG_DEBUG("DL: [%s] GGML_TEST_MODE=1\n", __FUNCTION__);
         const ggml_tensor * base = ggml_cuda_get_base_tensor(src0);
 
         const char * GGML_QUANT_BITS = getenv("GGML_QUANT_BITS");

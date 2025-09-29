@@ -4,7 +4,7 @@ set -e
 
 echo "[INFO] Starting release_llama_cpp_x86_64 script"
 ARCH=${DOCKER_PLATFORM}
-build_dir=${REPO_PATH}/../build_${ARCH}
+build_dir=${REPO_PATH}/build_${ARCH}
 
 if [ -z "$REPO_PATH" ]; then
     echo "[ERROR] REPO_PATH environment variable is not set"
