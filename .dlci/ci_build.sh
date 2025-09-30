@@ -17,6 +17,10 @@
 
 set -e
 
+# Load utility functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/utils.sh"
+
 # Default values
 DEFAULT_REPO_PATH="$(pwd)"
 
@@ -70,16 +74,16 @@ set_defaults() {
         echo "[INFO] Using default REPO_PATH: $REPO_PATH"
     fi
 
-    # Auto-detect DOCKER_REPO_PATH if not set
+    # Auto-detect and setup DOCKER_REPO_PATH if not set
     if [ -z "$DOCKER_REPO_PATH" ]; then
-        # Try to find docker directory relative to SDK_PATH
-        local potential_docker_path="${SDK_PATH}/../docker"
-        if [ -d "$potential_docker_path" ] && [ -f "$potential_docker_path/bash.sh" ]; then
-            DOCKER_REPO_PATH="$(realpath "$potential_docker_path")"
-            echo "[INFO] Auto-detected DOCKER_REPO_PATH: $DOCKER_REPO_PATH"
-        else
-            echo "[ERROR] Cannot auto-detect DOCKER_REPO_PATH. Please set it manually."
-            echo "[INFO] Expected to find bash.sh in: $potential_docker_path"
+        if ! auto_setup_docker_repo "$SDK_PATH"; then
+            echo "[ERROR] Failed to setup Docker repository"
+            exit 1
+        fi
+    else
+        # DOCKER_REPO_PATH is manually set, just ensure it's setup correctly
+        if ! setup_docker_repo "$DOCKER_REPO_PATH"; then
+            echo "[ERROR] Failed to setup Docker repository: $DOCKER_REPO_PATH"
             exit 1
         fi
     fi
@@ -134,29 +138,6 @@ validate_paths() {
         echo "[ERROR] $error_count validation error(s) found. Aborting."
         exit 1
     fi
-}
-
-# Get Docker image based on platform
-get_docker_image() {
-    case "$DOCKER_PLATFORM" in
-        x86_64)
-            echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
-            ;;
-        aarch64)
-            echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702"
-            ;;
-        riscv64)
-            echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822"
-            ;;
-        loongarch64)
-            echo "ext-artifactory.denglin.com:8082/ci-docker-images/c-41:manylinux_2_38-loongarch64-20250910"
-            ;;
-        *)
-            echo "[ERROR] Unsupported DOCKER_PLATFORM: $DOCKER_PLATFORM"
-            echo "[INFO] Supported platforms: x86_64, aarch64, riscv64, loongarch64"
-            exit 1
-            ;;
-    esac
 }
 
 # Prepare Docker environment variables

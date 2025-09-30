@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Load utility functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/utils.sh"
+
 SDK_TAG="$1"
 SDK_WORKSPACE="$2"
 
@@ -76,20 +80,13 @@ fi
 # echo "[INFO] Downloading PyTorch .whl packages to $(pwd)"
 # jf rt dl daily-pytorch-v2-pt2.5/${SDK_TAG}/cp312-cp312_manylinux/ -flat=true
 
-# Step 4: Clone docker repo and check branch
-if [ ! -d "$DOCKER_REPO_PATH" ]; then
-  echo "[INFO] docker directory does not exist, cloning..."
-  git clone ssh://git@ext-gitlab.denglin.com:23/software/ci/docker.git "$DOCKER_REPO_PATH"
-else
-  echo "[INFO] docker directory already exists, checking branch..."
-  cd "$DOCKER_REPO_PATH"
-  current_branch=$(git rev-parse --abbrev-ref HEAD)
-  if [ "$current_branch" != "main" ]; then
-    echo "[INFO] Current branch is $current_branch, switching to main..."
-    git fetch origin main
-    git checkout main
-  else
-    echo "[INFO] Already on main branch."
+# Step 4: Setup Docker repository
+if [ -n "$DOCKER_REPO_PATH" ]; then
+  echo "[INFO] Setting up Docker repository..."
+  if ! setup_docker_repo "$DOCKER_REPO_PATH"; then
+    echo "[ERROR] Failed to setup Docker repository: $DOCKER_REPO_PATH"
+    exit 1
   fi
-  cd -
+else
+  echo "[INFO] DOCKER_REPO_PATH not set, skipping Docker repository setup"
 fi

@@ -77,8 +77,8 @@ Action descriptions:
 
 Environment variables:
   sdk_path                SDK path
-  REPO_PATH              Repository path
-  LOCAL_MODEL_PATH       Model path
+  REPO_PATH              Repository path (default: current directory)
+  LOCAL_MODEL_PATH       Model path (default: /mars/aebox/LLM/model)
 
 Examples:
   # Auto-detect platform, full process
@@ -762,6 +762,9 @@ main() {
 
     if [ -n "$model_path_arg" ]; then
         export LOCAL_MODEL_PATH="$model_path_arg"
+    elif [ -z "$LOCAL_MODEL_PATH" ]; then
+        export LOCAL_MODEL_PATH="/mars/aebox/LLM/model"
+        log_info "Using default LOCAL_MODEL_PATH: $LOCAL_MODEL_PATH"
     fi
 
     # Validate required parameters
@@ -777,9 +780,7 @@ main() {
     log_info "Action: $action"
     log_info "SDK path: $sdk_path"
     log_info "Repository path: $REPO_PATH"
-    if [ -n "$LOCAL_MODEL_PATH" ]; then
-        log_info "Model path: $LOCAL_MODEL_PATH"
-    fi
+    log_info "Model path: $LOCAL_MODEL_PATH"
     if [ "$debug_mode" = "true" ]; then
         log_info "Debug mode: enabled"
     fi

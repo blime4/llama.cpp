@@ -455,12 +455,19 @@ test_cases=(
 
 fail_count=0
 fail_list=()
+# Arrays to store detailed test results for final summary
+test_results_names=()
+test_results_status=()
 
 for test_case in "${test_cases[@]}"; do
+    # Initialize test name variable
+    test_name_for_summary=""
+
     # Check if this is a Qwen test (contains pipe separators)
     if [[ "$test_case" == *"|"* ]]; then
         # Parse Qwen test parameters
         IFS='|' read -r model_name test_name prompt expected_content model_path <<< "$test_case"
+        test_name_for_summary="qwen_test.${model_name}.${test_name}"
         echo "Running Qwen test: $model_name - $test_name" | tee -a "$summary_log"
         echo "Running Qwen test: $model_name - $test_name" >> "$test_log"
         start_time=$(date +%s)
@@ -474,40 +481,139 @@ for test_case in "${test_cases[@]}"; do
         # Regular test case
         # Get the executable name (first word)
         test_bin=$(echo "$test_case" | awk '{print $1}')
+        # Extract test name from binary path
+        test_name_for_summary=$(basename "$test_bin" 2>/dev/null || echo "$test_case")
+
+        # Check if there are arguments (more than one word in test_case)
+        word_count=$(echo "$test_case" | wc -w)
+        if [ "$word_count" -gt 1 ]; then
+            # Extract arguments (everything after the first word)
+            test_args=$(echo "$test_case" | awk '{$1=""; print $0}' | sed 's/^ //')
+            # Simplify arguments for summary (remove long paths)
+            test_args_short=$(echo "$test_args" | sed 's|/LocalRun/[^/]*/[^/]*/LLM/model/|...|g' | sed 's|models/|...|g' | cut -c1-80)
+            test_name_for_summary="${test_name_for_summary} ${test_args_short}"
+        fi
+
         if [ ! -x "$test_bin" ]; then
             echo "[LLAMA_CPP_FAIL] $test_bin does not exist or is not executable, skipping" | tee -a "$summary_log"
             fail_count=$((fail_count+1))
             fail_list+=("$test_case (not found or not executable)")
+            # Record result for summary
+            test_results_names+=("$test_name_for_summary")
+            test_results_status+=("FAILED (not executable)")
             continue
         fi
         echo "Running: $test_case" | tee -a "$summary_log"
         echo "Running: $test_case" >> "$test_log"
+        echo "-----------------------------" | tee -a "$test_log"
         start_time=$(date +%s)
 
-        # Normal execution for other platforms
-        eval $test_case >> "$test_log" 2>&1
+        # Create temporary file to capture output
+        temp_output=$(mktemp)
+
+        # Normal execution - output to both screen and temp file
+        set +e  # Disable exit on error temporarily
+        eval $test_case > "$temp_output" 2>&1
         ret=$?
+        set -e  # Re-enable exit on error
+
+        # Display output to screen and log
+        cat "$temp_output" | tee -a "$test_log"
+        echo "-----------------------------" | tee -a "$test_log"
+
+        # Parse sub-test results if this is test-backend-ops or similar tests
+        if [[ "$test_name_for_summary" == "test-backend-ops" ]] || [[ "$test_name_for_summary" =~ test-backend-ops ]]; then
+            # Remove ANSI codes once for the entire file (much faster than per-line)
+            temp_clean=$(mktemp)
+            sed $'s/\033\[[0-9;]*m//g' "$temp_output" > "$temp_clean"
+
+            # Define regex pattern as variable (required for bash regex with special chars)
+            regex_pattern='^[[:space:]]*([A-Z_]+)\(([^)]+)\):[[:space:]]*(.+)$'
+
+            # Parse using bash built-in regex (no external process calls per line)
+            while IFS= read -r line; do
+                # Match patterns like: "  CPY(...): OK" or "  CPY(...): not supported [CUDA1]"
+                if [[ "$line" =~ $regex_pattern ]]; then
+                    sub_test_name="${BASH_REMATCH[1]}"
+                    sub_test_params="${BASH_REMATCH[2]}"
+                    sub_test_result="${BASH_REMATCH[3]}"
+
+                    # Determine result status using bash pattern matching
+                    if [[ "$sub_test_result" =~ ^OK ]]; then
+                        sub_status="PASSED"
+                    elif [[ "$sub_test_result" == *"not supported"* ]]; then
+                        sub_status="skipped"
+                    else
+                        sub_status="FAILED"
+                    fi
+
+                    # Record sub-test result
+                    sub_case_name="${test_name_for_summary}-${sub_test_name}(${sub_test_params})"
+                    test_results_names+=("$sub_case_name")
+                    test_results_status+=("$sub_status")
+                fi
+            done < "$temp_clean"
+            rm -f "$temp_clean"
+        fi
+
+        # Clean up temp file
+        rm -f "$temp_output"
+
         end_time=$(date +%s)
         duration=$((end_time - start_time))
     fi
 
-    # Format duration for better readability
-    if [ $duration -ge 60 ]; then
-        duration_minutes=$((duration / 60))
-        duration_seconds=$((duration % 60))
-        duration_str="${duration_minutes}m ${duration_seconds}s"
-    else
-        duration_str="${duration}s"
+    # Output formatted test results summary for this test
+    echo "" | tee -a "$summary_log"
+    echo "================================================================================" | tee -a "$summary_log"
+    echo "FORMATTED TEST RESULTS SUMMARY:" | tee -a "$summary_log"
+    echo "================================================================================" | tee -a "$summary_log"
+
+    # Check if this test had sub-tests parsed
+    had_sub_tests=false
+    if [[ "$test_name_for_summary" == "test-backend-ops" ]] || [[ "$test_name_for_summary" =~ test-backend-ops ]]; then
+        # Check if we have sub-test results in the arrays (look for entries added in this iteration)
+        for i in "${!test_results_names[@]}"; do
+            if [[ "${test_results_names[$i]}" =~ ^${test_name_for_summary}- ]]; then
+                had_sub_tests=true
+                break
+            fi
+        done
     fi
 
-    if [ $ret -eq 0 ]; then
-        echo "[LLAMA_CPP_PASS] Test $test_case succeeded, duration: ${duration_str}" | tee -a "$summary_log"
+    if [ "$had_sub_tests" = true ]; then
+        # Output all sub-test results
+        for i in "${!test_results_names[@]}"; do
+            if [[ "${test_results_names[$i]}" =~ ^${test_name_for_summary}- ]]; then
+                case_name="${test_results_names[$i]}"
+                case_status="${test_results_status[$i]}"
+                case_result_lower=$(echo "$case_status" | tr '[:upper:]' '[:lower:]')
+                echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result_lower}" | tee -a "$summary_log"
+            fi
+        done
+
+        # Update fail count if test failed
+        if [ $ret -ne 0 ]; then
+            fail_count=$((fail_count+1))
+            fail_list+=("$test_case (exit code $ret)")
+        fi
     else
-        echo "[LLAMA_CPP_FAIL] Test $test_case failed, duration: ${duration_str}, exit code $ret" | tee -a "$summary_log"
-        fail_count=$((fail_count+1))
-        fail_list+=("$test_case (exit code $ret)")
+        # No sub-tests, output single result
+        if [ $ret -eq 0 ]; then
+            echo "CASE_NAME: ${test_name_for_summary}, CASE_RESULT: passed" | tee -a "$summary_log"
+            test_results_names+=("$test_name_for_summary")
+            test_results_status+=("PASSED")
+        else
+            echo "CASE_NAME: ${test_name_for_summary}, CASE_RESULT: failed" | tee -a "$summary_log"
+            fail_count=$((fail_count+1))
+            fail_list+=("$test_case (exit code $ret)")
+            test_results_names+=("$test_name_for_summary")
+            test_results_status+=("FAILED")
+        fi
     fi
-    echo "-----------------------------" >> "$test_log"
+
+    echo "================================================================================" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
 done
 
 # Record end time and calculate total test duration
@@ -531,6 +637,7 @@ total_tests=${#test_cases[@]}
 passed_tests=$((total_tests - fail_count))
 qwen_tests_count=${#qwen_model_tests[@]}
 
+echo "" | tee -a "$summary_log"
 echo "[INFO] Test Statistics:" | tee -a "$summary_log"
 echo "[INFO]   Total tests: ${total_tests}" | tee -a "$summary_log"
 echo "[INFO]   Passed: ${passed_tests}" | tee -a "$summary_log"
@@ -607,8 +714,12 @@ if [ $fail_count -ne 0 ]; then
         echo "  - $fail_item" | tee -a "$summary_log"
     done
     echo "[INFO] Detailed failure logs can be found in: $test_log" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+    echo "OVERALL RESULT: FAILED (${passed_tests}/${total_tests} tests passed)" | tee -a "$summary_log"
     exit 1
 else
     echo "=============================" | tee -a "$summary_log"
     echo "[LLAMA_CPP_PASS] All tests passed!" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+    echo "OVERALL RESULT: PASSED (${total_tests}/${total_tests} tests passed)" | tee -a "$summary_log"
 fi

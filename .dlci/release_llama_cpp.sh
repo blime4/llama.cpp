@@ -50,7 +50,16 @@ if [ -d "${build_dir}/bin" ]; then
             ;;
     esac
 
-    RELEASE_NAME="llama-${CI_COMMIT_TAG}-${SDK_TAG}-bin-${PLATFORM_SUFFIX}.zip"
+    # Transform SDK_TAG from V2_SOFTWARE_master_202509180241 to sdk202509180241
+    SDK_TAG_TRANSFORMED=""
+    if [[ "$SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
+        SDK_TAG_TRANSFORMED="sdk${BASH_REMATCH[1]}"
+    else
+        # Fallback: if pattern doesn't match, use original SDK_TAG
+        SDK_TAG_TRANSFORMED="$SDK_TAG"
+    fi
+
+    RELEASE_NAME="llama-${CI_COMMIT_TAG}-${SDK_TAG_TRANSFORMED}-bin-${PLATFORM_SUFFIX}.zip"
     echo "[INFO] Creating release package: ${RELEASE_NAME}"
     zip -r "${RELEASE_NAME}" release/*
 

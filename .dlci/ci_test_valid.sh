@@ -144,18 +144,27 @@ get_latest_release_tag() {
     local sdk_tag="$2"
     local platform_suffix=$(get_platform_suffix "$platform")
 
+    # Transform SDK_TAG from V2_SOFTWARE_master_202509180241 to sdk202509180241
+    local sdk_tag_transformed=""
+    if [[ "$sdk_tag" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
+        sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
+    else
+        # Fallback: if pattern doesn't match, use original SDK_TAG
+        sdk_tag_transformed="$sdk_tag"
+    fi
+
     # Try to get the latest release tag using jf CLI if available
     if command -v jf >/dev/null 2>&1; then
-        local latest_release=$(jf rt s "llama.cpp-release/llama-*-${sdk_tag}-bin-${platform_suffix}.zip" --sort-by=modified --sort-order=desc --limit=1 2>/dev/null | jq -r '.[] | .path' | head -1 2>/dev/null || echo "")
+        local latest_release=$(jf rt s "llama.cpp-release/llama-*-${sdk_tag_transformed}-bin-${platform_suffix}.zip" --sort-by=modified --sort-order=desc --limit=1 2>/dev/null | jq -r '.[] | .path' | head -1 2>/dev/null || echo "")
 
         if [ -n "$latest_release" ]; then
-            local version=$(echo "$latest_release" | sed -n "s/.*llama-\([^-]*\)-${sdk_tag//\//\\\/}-bin-${platform_suffix//\//\\\/}\.zip.*/\1/p")
+            local version=$(echo "$latest_release" | sed -n "s/.*llama-\([^-]*\)-${sdk_tag_transformed//\//\\\/}-bin-${platform_suffix//\//\\\/}\.zip.*/\1/p")
             if [ -n "$version" ]; then
                 echo "$version"
                 return 0
             else
                 # Try a simpler extraction method
-                version=$(basename "$latest_release" .zip | sed 's/llama-//' | sed "s/-${sdk_tag//\//\\\/}-bin-${platform_suffix//\//\\\/}.*//")
+                version=$(basename "$latest_release" .zip | sed 's/llama-//' | sed "s/-${sdk_tag_transformed//\//\\\/}-bin-${platform_suffix//\//\\\/}.*//")
                 if [ -n "$version" ]; then
                     echo "$version"
                     return 0
@@ -169,7 +178,7 @@ get_latest_release_tag() {
     local fallback_versions=("v1.0.0" "v0.9.0" "v0.8.0" "latest")
 
     for version in "${fallback_versions[@]}"; do
-        local test_url="${RELEASE_ARTIFACTORY_BASE}/llama-${version}-${sdk_tag}-bin-${platform_suffix}.zip"
+        local test_url="${RELEASE_ARTIFACTORY_BASE}/llama-${version}-${sdk_tag_transformed}-bin-${platform_suffix}.zip"
         log_info "Testing availability of version: $version"
 
         if curl --head --silent --fail "$test_url" >/dev/null 2>&1; then
@@ -424,7 +433,17 @@ main() {
 
     # Inline download and extract logic
     local platform_suffix=$(get_platform_suffix "$DOCKER_PLATFORM")
-    local release_filename="llama-${RELEASE_VERSION}-${DEFAULT_SDK_TAG}-bin-${platform_suffix}.zip"
+
+    # Transform SDK_TAG from V2_SOFTWARE_master_202509180241 to sdk202509180241
+    local sdk_tag_transformed=""
+    if [[ "$DEFAULT_SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
+        sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
+    else
+        # Fallback: if pattern doesn't match, use original SDK_TAG
+        sdk_tag_transformed="$DEFAULT_SDK_TAG"
+    fi
+
+    local release_filename="llama-${RELEASE_VERSION}-${sdk_tag_transformed}-bin-${platform_suffix}.zip"
     local download_path="${WORK_DIR}/${release_filename}"
     local extract_path="${WORK_DIR}/extracted_release"
 
