@@ -7883,6 +7883,8 @@ struct llm_build_bert : public llm_graph_context {
                 }
 
                 if (model.layers[il].attn_q_norm) {
+                    Qcur = ggml_reshape_2d(ctx0, Qcur, n_embd_head*n_head, n_tokens);
+
                     Qcur = build_norm(Qcur,
                             model.layers[il].attn_q_norm,
                             model.layers[il].attn_q_norm_b,
@@ -7892,6 +7894,8 @@ struct llm_build_bert : public llm_graph_context {
                 }
 
                 if (model.layers[il].attn_k_norm) {
+                    Kcur = ggml_reshape_2d(ctx0, Kcur, n_embd_head*n_head_kv, n_tokens);
+
                     Kcur = build_norm(Kcur,
                             model.layers[il].attn_k_norm,
                             model.layers[il].attn_k_norm_b,
@@ -8274,6 +8278,9 @@ struct llm_build_mpt : public llm_graph_context {
 
                 // Q/K Layernorm
                 if (model.layers[il].attn_q_norm) {
+                    Qcur = ggml_reshape_2d(ctx0, Qcur, n_embd_head*n_head,    n_tokens);
+                    Kcur = ggml_reshape_2d(ctx0, Kcur, n_embd_head*n_head_kv, n_tokens);
+
                     Qcur = build_norm(Qcur,
                             model.layers[il].attn_q_norm,
                             model.layers[il].attn_q_norm_b,
