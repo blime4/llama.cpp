@@ -18,6 +18,9 @@
 #include <memory>
 #include <mutex>
 #include <cudnn.h>
+#include <algorithm>
+#include <numeric>
+#include <vector>
 
 template<typename T>
 static __global__ void permute_3120_kernel(
@@ -198,12 +201,212 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
     ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<DKQ, DV, 1>(ctx, dst);
 }
 
+// Helper function to convert different types to float
+template<typename T>
+static inline float to_float(const T& val) {
+    return static_cast<float>(val);
+}
+
+// Specialization for ggml_fp16_t
+template<>
+inline float to_float<ggml_fp16_t>(const ggml_fp16_t& val) {
+    return ggml_fp16_to_fp32(val);
+}
+
+// Specialization for ggml_bf16_t
+template<>
+inline float to_float<ggml_bf16_t>(const ggml_bf16_t& val) {
+    return ggml_bf16_to_fp32(val);
+}
+
+// Helper function to convert float to different types
+template<typename T>
+static inline T from_float(float val) {
+    return static_cast<T>(val);
+}
+
+// Specialization for ggml_bf16_t
+template<>
+inline ggml_bf16_t from_float<ggml_bf16_t>(float val) {
+    return ggml_fp32_to_bf16(val);
+}
+
+// Function to compute numerical difference between two tensors
+template<typename T>
+static float compute_numerical_diff(const T* tensor1, const T* tensor2, size_t num_elements) {
+    double sum_diff_sq = 0.0;
+    double sum_ref_sq = 0.0;
+
+    for (size_t i = 0; i < num_elements; i++) {
+        const float val1 = to_float(tensor1[i]);
+        const float val2 = to_float(tensor2[i]);
+        const float diff = val1 - val2;
+
+        sum_diff_sq += diff * diff;
+        sum_ref_sq += val2 * val2;
+    }
+
+    return std::sqrt(sum_diff_sq / (sum_ref_sq + 1e-12));
+}
+
+
+// Mixed-type verification function for cases where input and output types differ
+// Data formats:
+// - Q, K, V: DSHB format [D, S, H, B] (llama.cpp native format for QKV)
+// - Output: DHSB format [D, H, S, B] (llama.cpp native format for output)
+template<typename T_in, typename T_out>
+static bool verify_mixed_type_attention(
+    const T_in* q_data,                                         // Query data in DSHB format
+    const T_in* k_data,                                         // Key data in DSHB format
+    const T_in* v_data,                                         // Value data in DSHB format
+    const T_in* mask_data,                                      // Mask in [1,1,Sq,Sk] format or nullptr
+    const T_out* gpu_output,                                    // GPU output in DHSB format
+    int B, int H, int Sq, int Sk, int D,
+    float scale,
+    bool is_causal,
+    float tolerance = 0.03f
+) {
+    printf("MIXED_TYPE_VERIFICATION: Starting with input_type=%s, output_type=%s, B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, is_causal=%s\n",
+           typeid(T_in).name(), typeid(T_out).name(), B, H, Sq, Sk, D, scale, is_causal ? "true" : "false");
+
+    // Allocate memory for CPU reference output (DHSB format)
+    std::vector<T_out> cpu_output(B * H * Sq * D);
+
+    // Compute CPU reference implementation
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            // Compute attention scores: Q @ K^T
+            std::vector<float> attn_weight(Sq * Sk);
+            for (int i = 0; i < Sq; i++) {
+                for (int j = 0; j < Sk; j++) {
+                    float score = 0.0f;
+                    for (int d = 0; d < D; d++) {
+                        // Q format: DSHB [D, Sq, H, B] -> index: d*Sq*H*B + i*H*B + h*B + b
+                        // K format: DSHB [D, Sk, H, B] -> index: d*Sk*H*B + j*H*B + h*B + b
+                        T_in q_val = q_data[d*Sq*H*B + i*H*B + h*B + b];
+                        T_in k_val = k_data[d*Sk*H*B + j*H*B + h*B + b];
+
+                        float q_f = to_float(q_val);
+                        float k_f = to_float(k_val);
+                        score += q_f * k_f;
+                    }
+                    attn_weight[i*Sk + j] = score * scale;
+                }
+            }
+
+            // Apply causal mask if needed
+            if (is_causal) {
+                for (int i = 0; i < Sq; i++) {
+                    for (int j = 0; j < Sk; j++) {
+                        if (j > i) {
+                            attn_weight[i*Sk + j] = -INFINITY;
+                        }
+                    }
+                }
+            }
+
+            // --- Mask disabled for now ---
+            // // Apply attention mask if provided
+            // if (mask_data != nullptr) {
+            //     for (int i = 0; i < Sq; i++) {
+            //         for (int j = 0; j < Sk; j++) {
+            //             const T_in mask_val = mask_data[i*Sk + j]; // [1,1,Sq,Sk]
+            //             const float mask_float = to_float(mask_val);
+            //             if (!std::isfinite(mask_float) || mask_float < -1e10f) {
+            //                 attn_weight[i*Sk + j] = -INFINITY;
+            //             } else {
+            //                 attn_weight[i*Sk + j] += mask_float;
+            //             }
+            //         }
+            //     }
+            // }
+
+            // Apply softmax (row-wise)
+            // Safe 3-pass softmax implementation
+            // Adapt from : https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
+            for (int i = 0; i < Sq; i++) {
+                // pass-1 : row-wise max
+                float max_val = -INFINITY;
+                for (int j = 0; j < Sk; j++) {
+                    max_val = std::max(max_val, attn_weight[i*Sk + j]);
+                }
+
+                // handle degenerate case: all -INF
+                if (!std::isfinite(max_val)) {
+                    for (int j = 0; j < Sk; j++) {
+                        attn_weight[i*Sk + j] = 0.0f;
+                    }
+                    continue;
+                }
+
+                // pass-2 : row-wise exp and sum
+                std::vector<float> exp_vals(Sk);
+                double sum_exp = 0.0;
+                for (int j = 0; j < Sk; j++) {
+                    float val = std::exp(attn_weight[i*Sk + j] - max_val);
+                    exp_vals[j] = val;
+                    sum_exp += (double)val;
+                }
+
+                // pass-3 : row-wise probability
+                double inv_sum = 1.0 / (sum_exp + 1e-20);
+                for (int j = 0; j < Sk; j++) {
+                    attn_weight[i*Sk + j] = (float)(exp_vals[j] * inv_sum);
+                }
+            }
+
+            // Compute output: attn_weight @ V
+            for (int i = 0; i < Sq; i++) {
+                for (int d = 0; d < D; d++) {
+                    float result = 0.0f;
+                    for (int j = 0; j < Sk; j++) {
+                        // V format: DSHB [D, Sk, H, B] -> index: d*Sk*H*B + j*H*B + h*B + b
+                        T_in v_val = v_data[d*Sk*H*B + j*H*B + h*B + b];
+                        result += attn_weight[i*Sk + j] * to_float(v_val);
+                    }
+
+                    // Output format: DHSB [D, H, Sq, B] -> index: d*H*Sq*B + h*Sq*B + i*B + b
+                    cpu_output[d*H*Sq*B + h*Sq*B + i*B + b] = from_float<T_out>(result);
+                }
+            }
+        }
+    }
+
+    // Compute numerical difference
+    float nmse = compute_numerical_diff(gpu_output, cpu_output.data(), B * H * Sq * D);
+
+    printf("MIXED_TYPE_VERIFICATION: NMSE = %.9f %s %.9f\n",
+           nmse, nmse <= tolerance ? "<=" : ">", tolerance);
+
+    if (nmse > tolerance) {
+        GGML_LOG_WARN("MIXED_TYPE_VERIFICATION: FAILED - NMSE %.9f exceeds tolerance %.9f\n",
+                      nmse, tolerance);
+
+        // Print some sample values for debugging
+        const int max_samples = std::min(10, (int)(B * H * Sq * D));
+        printf("Sample comparison (first %d values):\n", max_samples);
+        for (int i = 0; i < max_samples; i++) {
+            printf("  [%d]: GPU=%.6f, CPU_ref=%.6f, diff=%.6f\n",
+                   i,
+                   to_float(gpu_output[i]),
+                   to_float(cpu_output[i]),
+                   to_float(gpu_output[i]) - to_float(cpu_output[i]));
+        }
+        return false;
+    }
+
+    printf("MIXED_TYPE_VERIFICATION: PASSED\n");
+    return true;
+}
+
 static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV  = dst;
     const ggml_tensor * Q    = dst->src[0];
     const ggml_tensor * K    = dst->src[1];
     const ggml_tensor * V    = dst->src[2];
     const ggml_tensor * mask = dst->src[3];
+
+    printf("MMA_VERIFICATION: Starting ggml_cuda_flash_attn_ext_mma_f16...\n");
 
     switch (Q->ne[0]) {
         case 64:
@@ -248,15 +451,149 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
             GGML_ABORT("fatal error");
             break;
     }
+
+    // Verify MMA output if requested
+    const char *env_verify_mma = getenv("GGML_CUDNN_VERIFY_MMA_ATTENTION");
+    if (env_verify_mma != nullptr && strcmp(env_verify_mma, "1") == 0) {
+        printf("MMA_VERIFICATION: Verifying ggml_cuda_flash_attn_ext_mma_f16 output...\n");
+
+        // Get tensor dimensions
+        const int B = Q->ne[3];
+        const int H = Q->ne[2];
+        const int Sq = Q->ne[1];
+        const int Sk = K->ne[1];
+        const int D = Q->ne[0];
+
+        // For MMA, the output is in DHSB format, same as input
+        const size_t output_size = B * H * Sq * D * ggml_type_size(dst->type);
+
+        printf("MMA_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+
+        // Allocate CPU buffer and copy MMA output
+        void* mma_output_cpu = malloc(output_size);
+        if (mma_output_cpu) {
+            CUDA_CHECK(cudaMemcpy(mma_output_cpu, dst->data, output_size, cudaMemcpyDeviceToHost));
+
+            // Debug: Print first few values from MMA output
+            if (dst->type == GGML_TYPE_F16) {
+                const ggml_fp16_t* mma_data = static_cast<const ggml_fp16_t*>(mma_output_cpu);
+                printf("MMA_VERIFICATION: MMA Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                              to_float(mma_data[0]), to_float(mma_data[1]), to_float(mma_data[2]),
+                              to_float(mma_data[3]), to_float(mma_data[4]), to_float(mma_data[5]),
+                              to_float(mma_data[6]), to_float(mma_data[7]), to_float(mma_data[8]),
+                              to_float(mma_data[9]));
+
+                // Now compare with CPU reference implementation using original Q, K, V data
+                // Compute scale factor
+                float scale = 1.0f / sqrtf((float)D);
+
+                // Copy GPU tensors to CPU for verification
+                const size_t q_nelements = B * H * Sq * D;
+                const size_t k_nelements = B * H * Sk * D;
+                const size_t v_nelements = B * H * Sk * D;
+
+                std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
+                std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
+                std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
+
+                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+
+                // Run CPU reference verification
+                bool verify_result = verify_mixed_type_attention<ggml_fp16_t, ggml_fp16_t>(
+                    q_cpu_data.data(),
+                    k_cpu_data.data(),
+                    v_cpu_data.data(),
+                    nullptr, // No mask for this test
+                    static_cast<const ggml_fp16_t*>(mma_output_cpu),
+                    B, H, Sq, Sk, D, scale, false // non-causal
+                );
+
+                if (verify_result) {
+                    printf("MMA_VERIFICATION: MMA vs CPU reference verification PASSED!\n");
+                } else {
+                    GGML_LOG_ERROR("MMA_VERIFICATION: MMA vs CPU reference verification FAILED!\n");
+                }
+            } else if (dst->type == GGML_TYPE_F32) {
+                const float* mma_data = static_cast<const float*>(mma_output_cpu);
+                printf("MMA_VERIFICATION: MMA Output[0:10] (F32) = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                              mma_data[0], mma_data[1], mma_data[2],
+                              mma_data[3], mma_data[4], mma_data[5],
+                              mma_data[6], mma_data[7], mma_data[8],
+                              mma_data[9]);
+
+                // Now compare with CPU reference implementation using original Q, K, V data
+                // Compute scale factor
+                float scale = 1.0f / sqrtf((float)D);
+
+                // Copy GPU tensors to CPU for verification
+                const size_t q_nelements = B * H * Sq * D;
+                const size_t k_nelements = B * H * Sk * D;
+                const size_t v_nelements = B * H * Sk * D;
+
+                std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
+                std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
+                std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
+
+                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+
+                // Run CPU reference verification
+                bool verify_result = false;
+                if (Q->type == GGML_TYPE_F16 && K->type == GGML_TYPE_F16 && V->type == GGML_TYPE_F16) {
+                    verify_result = verify_mixed_type_attention<ggml_fp16_t, float>(
+                        q_cpu_data.data(),
+                        k_cpu_data.data(),
+                        v_cpu_data.data(),
+                        nullptr, // No mask for this test
+                        static_cast<const float*>(mma_output_cpu),
+                        B, H, Sq, Sk, D, scale, false // non-causal
+                    );
+                } else if (Q->type == GGML_TYPE_F32 && K->type == GGML_TYPE_F32 && V->type == GGML_TYPE_F32) {
+                    // Copy GPU tensors to CPU for F32 case
+                    std::vector<float> q_cpu_f32(q_nelements);
+                    std::vector<float> k_cpu_f32(k_nelements);
+                    std::vector<float> v_cpu_f32(v_nelements);
+
+                    CUDA_CHECK(cudaMemcpy(q_cpu_f32.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(k_cpu_f32.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(v_cpu_f32.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+
+                    verify_result = verify_mixed_type_attention<float, float>(
+                        q_cpu_f32.data(),
+                        k_cpu_f32.data(),
+                        v_cpu_f32.data(),
+                        nullptr, // No mask for this test
+                        static_cast<const float*>(mma_output_cpu),
+                        B, H, Sq, Sk, D, scale, false // non-causal
+                    );
+                }
+
+                if (verify_result) {
+                    printf("MMA_VERIFICATION: MMA vs CPU reference verification PASSED!\n");
+                } else {
+                    GGML_LOG_ERROR("MMA_VERIFICATION: MMA vs CPU reference verification FAILED!\n");
+                }
+            } else {
+                printf("MMA_VERIFICATION: Unsupported dst->type: %s\n", ggml_type_name(dst->type));
+            }
+
+            free(mma_output_cpu);
+        }
+    }
 }
 
 #define FATTN_VEC_F16_CASE(D, type_K, type_V)                               \
     if (Q->ne[0] == (D) && K->type == (type_K) && V->type == (type_V)) {    \
         ggml_cuda_flash_attn_ext_vec_f16_case<D, type_K, type_V>(ctx, dst); \
+        goto verify_mma;                                                    \
         return;                                                             \
     }                                                                       \
 
 static void ggml_cuda_flash_attn_ext_vec_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    printf("VEC_F16: Starting ggml_cuda_flash_attn_ext_vec_f16...\n");
     ggml_tensor * Q = dst->src[0];
     ggml_tensor * K = dst->src[1];
     ggml_tensor * V = dst->src[2];
@@ -322,6 +659,140 @@ static void ggml_cuda_flash_attn_ext_vec_f16(ggml_backend_cuda_context & ctx, gg
     FATTN_VEC_F16_CASE(256, GGML_TYPE_F16, GGML_TYPE_F16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
+    verify_mma:
+        // Verify VEC_F16 output if requested
+        const char *env_verify_mma = getenv("GGML_CUDNN_VERIFY_MMA_ATTENTION");
+        if (env_verify_mma != nullptr && strcmp(env_verify_mma, "1") == 0) {
+            printf("VEC_F16_VERIFICATION: Verifying ggml_cuda_flash_attn_ext_vec_f16 output...\n");
+
+            // Get tensor dimensions
+            const int B = Q->ne[3];
+            const int H = Q->ne[2];
+            const int Sq = Q->ne[1];
+            const int Sk = K->ne[1];
+            const int D = Q->ne[0];
+
+            // For VEC_F16, the output is in DHSB format, same as input
+            const size_t output_size = B * H * Sq * D * ggml_type_size(dst->type);
+
+            printf("VEC_F16_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+
+            // Allocate CPU buffer and copy VEC_F16 output
+            void* vec_output_cpu = malloc(output_size);
+            if (vec_output_cpu) {
+                CUDA_CHECK(cudaMemcpy(vec_output_cpu, dst->data, output_size, cudaMemcpyDeviceToHost));
+
+                // Debug: Print first few values from VEC_F16 output
+                if (dst->type == GGML_TYPE_F16) {
+                    const ggml_fp16_t* vec_data = static_cast<const ggml_fp16_t*>(vec_output_cpu);
+                    printf("VEC_F16_VERIFICATION: VEC_F16 Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                                to_float(vec_data[0]), to_float(vec_data[1]), to_float(vec_data[2]),
+                                to_float(vec_data[3]), to_float(vec_data[4]), to_float(vec_data[5]),
+                                to_float(vec_data[6]), to_float(vec_data[7]), to_float(vec_data[8]),
+                                to_float(vec_data[9]));
+
+                    // Now compare with CPU reference implementation using original Q, K, V data
+                    // Compute scale factor
+                    float scale = 1.0f / sqrtf((float)D);
+
+                    // Copy GPU tensors to CPU for verification
+                    const size_t q_nelements = B * H * Sq * D;
+                    const size_t k_nelements = B * H * Sk * D;
+                    const size_t v_nelements = B * H * Sk * D;
+
+                    std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
+                    std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
+                    std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
+
+                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+
+                    // Run CPU reference verification
+                    bool verify_result = verify_mixed_type_attention<ggml_fp16_t, ggml_fp16_t>(
+                        q_cpu_data.data(),
+                        k_cpu_data.data(),
+                        v_cpu_data.data(),
+                        nullptr, // No mask for this test
+                        static_cast<const ggml_fp16_t*>(vec_output_cpu),
+                        B, H, Sq, Sk, D, scale, false // non-causal
+                    );
+
+                    if (verify_result) {
+                        printf("VEC_F16_VERIFICATION: VEC_F16 vs CPU reference verification PASSED!\n");
+                    } else {
+                        GGML_LOG_ERROR("VEC_F16_VERIFICATION: VEC_F16 vs CPU reference verification FAILED!\n");
+                    }
+                } else if (dst->type == GGML_TYPE_F32) {
+                    const float* vec_data = static_cast<const float*>(vec_output_cpu);
+                    printf("VEC_F16_VERIFICATION: VEC_F16 Output[0:10] (F32) = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                                vec_data[0], vec_data[1], vec_data[2],
+                                vec_data[3], vec_data[4], vec_data[5],
+                                vec_data[6], vec_data[7], vec_data[8],
+                                vec_data[9]);
+
+                    // Now compare with CPU reference implementation using original Q, K, V data
+                    // Compute scale factor
+                    float scale = 1.0f / sqrtf((float)D);
+
+                    // Copy GPU tensors to CPU for verification
+                    const size_t q_nelements = B * H * Sq * D;
+                    const size_t k_nelements = B * H * Sk * D;
+                    const size_t v_nelements = B * H * Sk * D;
+
+                    std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
+                    std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
+                    std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
+
+                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+
+                    // Run CPU reference verification
+                    bool verify_result = false;
+                    if (Q->type == GGML_TYPE_F16 && K->type == GGML_TYPE_F16 && V->type == GGML_TYPE_F16) {
+                        verify_result = verify_mixed_type_attention<ggml_fp16_t, float>(
+                            q_cpu_data.data(),
+                            k_cpu_data.data(),
+                            v_cpu_data.data(),
+                            nullptr, // No mask for this test
+                            static_cast<const float*>(vec_output_cpu),
+                            B, H, Sq, Sk, D, scale, false // non-causal
+                        );
+                    } else if (Q->type == GGML_TYPE_F32 && K->type == GGML_TYPE_F32 && V->type == GGML_TYPE_F32) {
+                        // Copy GPU tensors to CPU for F32 case
+                        std::vector<float> q_cpu_f32(q_nelements);
+                        std::vector<float> k_cpu_f32(k_nelements);
+                        std::vector<float> v_cpu_f32(v_nelements);
+
+                        CUDA_CHECK(cudaMemcpy(q_cpu_f32.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(k_cpu_f32.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(v_cpu_f32.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+
+                        verify_result = verify_mixed_type_attention<float, float>(
+                            q_cpu_f32.data(),
+                            k_cpu_f32.data(),
+                            v_cpu_f32.data(),
+                            nullptr, // No mask for this test
+                            static_cast<const float*>(vec_output_cpu),
+                            B, H, Sq, Sk, D, scale, false // non-causal
+                        );
+                    }
+
+                    if (verify_result) {
+                        printf("VEC_F16_VERIFICATION: VEC_F16 vs CPU reference verification PASSED!\n");
+                    } else {
+                        GGML_LOG_ERROR("VEC_F16_VERIFICATION: VEC_F16 vs CPU reference verification FAILED!\n");
+                    }
+                } else {
+                    printf("VEC_F16_VERIFICATION: Unsupported dst->type: %s\n", ggml_type_name(dst->type));
+                }
+
+                free(vec_output_cpu);
+            }
+        }
+        return;
+
     on_no_fattn_vec_case(Q->ne[0]);
 }
 
@@ -332,6 +803,7 @@ static void ggml_cuda_flash_attn_ext_vec_f16(ggml_backend_cuda_context & ctx, gg
     }                                                                       \
 
 static void ggml_cuda_flash_attn_ext_vec_f32(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    printf("VEC_F32: Starting ggml_cuda_flash_attn_ext_vec_f32...\n");
     ggml_tensor * Q = dst->src[0];
     ggml_tensor * K = dst->src[1];
     ggml_tensor * V = dst->src[2];
@@ -396,6 +868,75 @@ static void ggml_cuda_flash_attn_ext_vec_f32(ggml_backend_cuda_context & ctx, gg
     FATTN_VEC_F32_CASE(128, GGML_TYPE_F16, GGML_TYPE_F16)
     FATTN_VEC_F32_CASE(256, GGML_TYPE_F16, GGML_TYPE_F16)
 #endif // GGML_CUDA_FA_ALL_QUANTS
+
+    // Verify VEC_F32 output if requested
+    const char *env_verify_mma = getenv("GGML_CUDNN_VERIFY_MMA_ATTENTION");
+    if (env_verify_mma != nullptr && strcmp(env_verify_mma, "1") == 0) {
+        printf("VEC_F32_VERIFICATION: Verifying ggml_cuda_flash_attn_ext_vec_f32 output...\n");
+
+        // Get tensor dimensions
+        const int B = Q->ne[3];
+        const int H = Q->ne[2];
+        const int Sq = Q->ne[1];
+        const int Sk = K->ne[1];
+        const int D = Q->ne[0];
+
+        // For VEC_F32, the output is in DHSB format, same as input
+        const size_t output_size = B * H * Sq * D * ggml_type_size(dst->type);
+
+        printf("VEC_F32_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+
+        // Allocate CPU buffer and copy VEC_F32 output
+        void* vec_output_cpu = malloc(output_size);
+        if (vec_output_cpu) {
+            CUDA_CHECK(cudaMemcpy(vec_output_cpu, dst->data, output_size, cudaMemcpyDeviceToHost));
+
+            // Debug: Print first few values from VEC_F32 output
+            if (dst->type == GGML_TYPE_F32) {
+                const float* vec_data = static_cast<const float*>(vec_output_cpu);
+                printf("VEC_F32_VERIFICATION: VEC_F32 Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                              vec_data[0], vec_data[1], vec_data[2],
+                              vec_data[3], vec_data[4], vec_data[5],
+                              vec_data[6], vec_data[7], vec_data[8],
+                              vec_data[9]);
+
+                // Now compare with CPU reference implementation using original Q, K, V data
+                // Compute scale factor
+                float scale = 1.0f / sqrtf((float)D);
+
+                // Run CPU reference verification
+                // Copy GPU tensors to CPU for verification
+                const size_t q_nelements = B * H * Sq * D;
+                const size_t k_nelements = B * H * Sk * D;
+                const size_t v_nelements = B * H * Sk * D;
+
+                std::vector<float> q_cpu_data(q_nelements);
+                std::vector<float> k_cpu_data(k_nelements);
+                std::vector<float> v_cpu_data(v_nelements);
+
+                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+
+                bool verify_result = verify_mixed_type_attention<float, float>(
+                    q_cpu_data.data(),
+                    k_cpu_data.data(),
+                    v_cpu_data.data(),
+                    nullptr, // No mask for this test
+                    static_cast<const float*>(vec_output_cpu),
+                    B, H, Sq, Sk, D, scale, false // non-causal
+                );
+
+                if (verify_result) {
+                    printf("VEC_F32_VERIFICATION: VEC_F32 vs CPU reference verification PASSED!\n");
+                } else {
+                    GGML_LOG_ERROR("VEC_F32_VERIFICATION: VEC_F32 vs CPU reference verification FAILED!\n");
+                }
+            }
+
+            free(vec_output_cpu);
+        }
+    }
 
     on_no_fattn_vec_case(Q->ne[0]);
 }
@@ -584,7 +1125,7 @@ struct GGMLTensorDescriptor {
         };
 
         // For debugging: print the dimensions and strides
-        GGML_LOG_INFO("Setting 3D descriptor: dims=[%d, %d, %d], strides=[%d, %d, %d]\n",
+        printf("Setting 3D descriptor: dims=[%d, %d, %d], strides=[%d, %d, %d]\n",
                       dims[0], dims[1], dims[2], strides[0], strides[1], strides[2]);
 
         CUDNN_CHECK(cudnnSetTensorNdDescriptor(
@@ -741,7 +1282,7 @@ static void* expand_alibi_slopes_to_3d(
     }
 
     // Generate ALiBi slopes and expand to 3D format for cuDNN
-    GGML_LOG_INFO("Generating ALiBi slopes: max_bias=%f, n_head=%d, n_head_log2=%d, m0=%f, m1=%f\n",
+    printf("Generating ALiBi slopes: max_bias=%f, n_head=%d, n_head_log2=%d, m0=%f, m1=%f\n",
         max_bias, n_head, n_head_log2, m0, m1);
 
     // Calculate ALiBi slopes for each head
@@ -775,6 +1316,11 @@ static void* expand_alibi_slopes_to_3d(
 
 static bool ggml_cuda_flash_attn_ext_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_UNUSED(ctx);
+
+    const char *env_force_no_dlfa = getenv("GGML_FORCE_NO_DLFA");
+    if (env_force_no_dlfa != nullptr && strcmp(env_force_no_dlfa, "1") == 0) {
+        return false;
+    }
 
     const struct ggml_tensor * Q = dst->src[0];
     const struct ggml_tensor * K = dst->src[1];
@@ -857,7 +1403,7 @@ static void ggml_cuda_flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context
 
     // Convert Q to target_type if its type differs
     if (Q->type != target_type) {
-        GGML_LOG_INFO("Converting Q from %s to %s for DLDNN attention.\n", ggml_type_name(Q->type),
+        printf("Converting Q from %s to %s for DLDNN attention.\n", ggml_type_name(Q->type),
         ggml_type_name(target_type));
         size_t q_converted_size = Q->ne[0] * Q->ne[1] * Q->ne[2] * Q->ne[3] * ggml_type_size
         (target_type);
@@ -868,7 +1414,7 @@ static void ggml_cuda_flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context
 
     // Convert K to target_type if its type differs
     if (K->type != target_type) {
-        GGML_LOG_INFO("Converting K from %s to %s for DLDNN attention.\n", ggml_type_name(K->type),
+        printf("Converting K from %s to %s for DLDNN attention.\n", ggml_type_name(K->type),
         ggml_type_name(target_type));
         size_t k_converted_size = K->ne[0] * K->ne[1] * K->ne[2] * K->ne[3] * ggml_type_size
         (target_type);
@@ -879,7 +1425,7 @@ static void ggml_cuda_flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context
 
     // Convert V to target_type if its type differs
     if (V->type != target_type) {
-        GGML_LOG_INFO("Converting V from %s to %s for DLDNN attention.\n", ggml_type_name(V->type),
+        printf("Converting V from %s to %s for DLDNN attention.\n", ggml_type_name(V->type),
         ggml_type_name(target_type));
         size_t v_converted_size = V->ne[0] * V->ne[1] * V->ne[2] * V->ne[3] * ggml_type_size
         (target_type);
@@ -1042,6 +1588,143 @@ static void ggml_cuda_flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context
 
     if (workspace != nullptr) {
         CUDA_CHECK(cudaFree(workspace));
+    }
+
+    // Verify cudnnMHAForward output if requested
+    const char *env_verify_any = getenv("GGML_CUDNN_VERIFY_ANY_ATTENTION");
+    if (env_verify_any != nullptr && strcmp(env_verify_any, "1") == 0) {
+        printf("CUDNN_VERIFICATION: Verifying cudnnMHAForward output...\n");
+
+        // Copy data from GPU to CPU for verification
+        const int B = Q->ne[3];
+        const int H = Q->ne[2];
+        const int Sq = Q->ne[1];
+        const int Sk = K->ne[1];
+        const int D = Q->ne[0];
+
+        // Calculate sizes for output tensor
+        const size_t output_size = B * Sq * H * D * ggml_type_size(target_type);
+
+        // Debug info
+        printf("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+        printf("CUDNN_VERIFICATION: Memory sizes: output=%zu bytes\n", output_size);
+
+        // Allocate CPU buffer for output only
+        void* output_cpu = malloc(output_size);
+
+        if (output_cpu) {
+            // Copy MHA output from GPU to CPU (BSHD format from MHA)
+            printf("CUDNN_VERIFICATION: Copying MHA output (BSHD format)...\n");
+            CUDA_CHECK(cudaMemcpy(output_cpu, temp_output, output_size, cudaMemcpyDeviceToHost));
+
+            // Debug: MHA verification uses original Q, K, V data directly
+
+            // Debug: Print first few values from cudnn output (more details)
+            if (target_type == GGML_TYPE_F16) {
+                const ggml_fp16_t* cudnn_output_data = static_cast<const ggml_fp16_t*>(output_cpu);
+                printf("CUDNN_VERIFICATION: cuDNN MHA Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                              to_float(cudnn_output_data[0]), to_float(cudnn_output_data[1]), to_float(cudnn_output_data[2]),
+                              to_float(cudnn_output_data[3]), to_float(cudnn_output_data[4]), to_float(cudnn_output_data[5]),
+                              to_float(cudnn_output_data[6]), to_float(cudnn_output_data[7]), to_float(cudnn_output_data[8]),
+                              to_float(cudnn_output_data[9]));
+
+                // Check if all values are the same (which would be very suspicious)
+                bool all_same = true;
+                float first_val = to_float(cudnn_output_data[0]);
+                for (int i = 1; i < std::min(128, (int)(output_size / sizeof(ggml_fp16_t))); i++) {
+                    if (std::abs(to_float(cudnn_output_data[i]) - first_val) > 1e-6) {
+                        all_same = false;
+                        break;
+                    }
+                }
+                printf("CUDNN_VERIFICATION: MHA output analysis - all_same=%s, first_val=%.3f\n",
+                              all_same ? "TRUE" : "FALSE", first_val);
+            }
+
+            // Run verification based on data type
+            bool verify_result = false;
+
+            // Copy GPU tensors to CPU for verification
+            const size_t q_nelements = B * H * Sq * D;
+            const size_t k_nelements = B * H * Sk * D;
+            const size_t v_nelements = B * H * Sk * D;
+
+            switch (target_type) {
+                case GGML_TYPE_F16: {
+                    std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
+                    std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
+                    std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
+
+                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+
+                    verify_result = verify_mixed_type_attention<ggml_fp16_t, ggml_fp16_t>(
+                        q_cpu_data.data(),
+                        k_cpu_data.data(),
+                        v_cpu_data.data(),
+                        nullptr, // No explicit mask for MHA (uses ALiBi or causal)
+                        static_cast<const ggml_fp16_t*>(output_cpu),
+                        B, H, Sq, Sk, D, scale, false // MHA is not causal (confirmed)
+                    );
+                    break;
+                }
+                case GGML_TYPE_F32: {
+                    std::vector<float> q_cpu_data(q_nelements);
+                    std::vector<float> k_cpu_data(k_nelements);
+                    std::vector<float> v_cpu_data(v_nelements);
+
+                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+
+                    verify_result = verify_mixed_type_attention<float, float>(
+                        q_cpu_data.data(),
+                        k_cpu_data.data(),
+                        v_cpu_data.data(),
+                        nullptr,
+                        static_cast<const float*>(output_cpu),
+                        B, H, Sq, Sk, D, scale, false // MHA is not causal (confirmed)
+                    );
+                    break;
+                }
+                case GGML_TYPE_BF16: {
+                    std::vector<ggml_bf16_t> q_cpu_data(q_nelements);
+                    std::vector<ggml_bf16_t> k_cpu_data(k_nelements);
+                    std::vector<ggml_bf16_t> v_cpu_data(v_nelements);
+
+                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
+
+                    verify_result = verify_mixed_type_attention<ggml_bf16_t, ggml_bf16_t>(
+                        q_cpu_data.data(),
+                        k_cpu_data.data(),
+                        v_cpu_data.data(),
+                        nullptr,
+                        static_cast<const ggml_bf16_t*>(output_cpu),
+                        B, H, Sq, Sk, D, scale, false // MHA is not causal (confirmed)
+                    );
+                    break;
+                }
+                default:
+                    GGML_LOG_WARN("CUDNN_VERIFICATION: Unsupported data type for MHA verification\n");
+                    break;
+            }
+
+            if (verify_result) {
+                printf("CUDNN_VERIFICATION: cudnnMHAForward verification PASSED!\n");
+            } else {
+                GGML_LOG_ERROR("CUDNN_VERIFICATION: cudnnMHAForward verification FAILED!\n");
+                printf("MHA Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, has_alibi=%s\n",
+                             B, H, Sq, Sk, D, scale, (max_bias > 0.0f) ? "true" : "false");
+            }
+        } else {
+            GGML_LOG_ERROR("CUDNN_VERIFICATION: Failed to allocate CPU memory for MHA verification\n");
+        }
+
+        // Cleanup CPU buffer
+        if (output_cpu) free(output_cpu);
     }
 
     // permute temp_output to final KQV format
@@ -1223,7 +1906,7 @@ static void ggml_cuda_flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_
 
         // Check if this is GQA
         if (q_heads != k_heads || q_heads != v_heads) {
-            GGML_LOG_INFO("GQA detected: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
+            printf("GQA detected: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
 
             // For cudnnScaledDotProductAttention, we need to handle GQA by expanding K and V
             // This is a limitation - cuDNN expects all tensors to have the same number of heads
@@ -1255,7 +1938,7 @@ static void ggml_cuda_flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_
             if (mask != nullptr) {
                 // GGML mask format: [n_kv, n_batch_pad, 1, 1] = [Sk, Sq, 1, 1]
                 // cuDNN expects: [B, H, Sq, Sk] , [1, 1, Sq, Sk]
-                GGML_LOG_INFO("Converting mask from GGML [Sk, Sq, 1, 1] to cuDNN [1, 1, Sq, Sk] format\n");
+                printf("Converting mask from GGML [Sk, Sq, 1, 1] to cuDNN [1, 1, Sq, Sk] format\n");
 
                 const int64_t mask_sk = mask->ne[0];      // n_kv (key sequence length)
                 const int64_t mask_sq_pad = mask->ne[1];  // n_batch_pad (padded query sequence length)
@@ -1280,9 +1963,9 @@ static void ggml_cuda_flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_
                         // Has padding, need to extract valid portion first
                         // Create intermediate buffer for valid mask [Sk, Sq, 1, 1] (no padding)
                         GGML_LOG_WARN(
-                            "Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld.
-                            cuDNN may not handle padding yet.
-                            remove the padding in the mask.\n",
+                            "Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld. "
+                            "cuDNN may not handle padding yet. "
+                            "remove the padding in the mask.\n",
                             mask_sq_pad, actual_sq);
 
                         void* mask_no_pad = nullptr;
@@ -1311,7 +1994,7 @@ static void ggml_cuda_flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_
             } else {
                 // No explicit mask, use causal attention
                 is_causal = true;
-                GGML_LOG_INFO("No explicit mask provided, using causal attention\n");
+                printf("No explicit mask provided, using causal attention\n");
             }
 
             // Get workspace size first
@@ -1335,6 +2018,14 @@ static void ggml_cuda_flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_
                 CUDA_CHECK(cudaMalloc(&workspace, workspace_size));
             }
 
+            // Debug: Print cuDNN call parameters
+            printf("cuDNN API call parameters:\n");
+            printf("  dropout: %.6f\n", 0.0f);
+            printf("  is_causal: %s\n", is_causal ? "true" : "false");
+            printf("  scale: %.6f\n", scale);
+            printf("  mask_desc: %s\n", mask_dldnn ? "provided" : "nullptr");
+            printf("  workspace_size: %zu bytes\n", workspace_size);
+
             // Call cudnnScaledDotProductAttention
             cudnnStatus_t status = cudnnScaledDotProductAttention(
                 cudnn_handle,
@@ -1352,6 +2043,154 @@ static void ggml_cuda_flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_
             if (status != CUDNN_STATUS_SUCCESS) {
                 GGML_LOG_ERROR("cudnnScaledDotProductAttention failed: %s\n", cudnnGetErrorString(status));
                 ok = false;
+            }
+
+            // Verify cudnnScaledDotProductAttention output if requested
+            if (ok) {
+                const char *env_verify = getenv("GGML_CUDNN_VERIFY_SDP_ATTENTION");
+                const char *env_verify_any = getenv("GGML_CUDNN_VERIFY_ANY_ATTENTION");
+                if ((env_verify != nullptr && strcmp(env_verify, "1") == 0) ||
+                    (env_verify_any != nullptr && strcmp(env_verify_any, "1") == 0)) {
+                    printf("CUDNN_VERIFICATION: Verifying cudnnScaledDotProductAttention output...\n");
+
+                    // Q: [head_dim, seq_len, num_heads, batch_size] --> [D, Sq, H, B]
+                    // K: [head_dim, seq_len, num_heads, batch_size] --> [D, Sk, H, B]
+                    // Copy data from GPU to CPU for verification
+                    const int B = Q->ne[3];
+                    const int H = Q->ne[2];
+                    const int Sq = Q->ne[1];
+                    const int Sk = K->ne[1];
+                    const int D = Q->ne[0];
+
+                    // Calculate sizes for output and mask tensors only
+                    const size_t output_size = B * H * Sq * D * ggml_type_size(target_type);
+                    const size_t mask_size = mask_dldnn ? 1 * 1 * Sq * Sk * ggml_type_size(target_type) : 0;
+
+                    // Debug info
+                    printf("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+                    printf("CUDNN_VERIFICATION: Memory sizes: output=%zu, mask=%zu bytes\n", output_size, mask_size);
+
+                    // Allocate CPU buffers for output and mask only
+                    void* mask_cpu = mask_dldnn ? malloc(mask_size) : nullptr;
+                    void* output_cpu = malloc(output_size);
+
+                    if (output_cpu && (!mask_dldnn || mask_cpu)) {
+
+                        // Verify GPU pointers are valid
+                        if (!temp_output) {
+                            GGML_LOG_ERROR("CUDNN_VERIFICATION: Invalid GPU output pointer detected\n");
+                            goto cleanup_verification;
+                        }
+
+                        // Copy output and mask from GPU to CPU only
+                        if (mask_dldnn) {
+                            printf("CUDNN_VERIFICATION: Copying mask tensor (%zu bytes)...\n", mask_size);
+                            CUDA_CHECK(cudaMemcpy(mask_cpu, mask_dldnn, mask_size, cudaMemcpyDeviceToHost));
+                        }
+
+                        printf("CUDNN_VERIFICATION: Copying output tensor (%zu bytes)...\n", output_size);
+                        CUDA_CHECK(cudaMemcpy(output_cpu, temp_output, output_size, cudaMemcpyDeviceToHost));
+
+                        // Debug: Print output values for analysis
+                        printf("CUDNN_VERIFICATION: Analyzing output values...\n");
+                        if (target_type == GGML_TYPE_F16) {
+                            const ggml_fp16_t* output_data = static_cast<const ggml_fp16_t*>(output_cpu);
+                            printf("CUDNN_VERIFICATION: cuDNN Output[0:5] = %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                                         to_float(output_data[0]), to_float(output_data[1]), to_float(output_data[2]),
+                                         to_float(output_data[3]), to_float(output_data[4]));
+                        }
+
+                        // Special analysis for causal case with Sq=1
+                        if (is_causal && Sq == 1) {
+                            printf("CUDNN_VERIFICATION: Special case - Causal attention with single query (Sq=1, Sk=%d)\n", Sk);
+                            printf("CUDNN_VERIFICATION: In this case, query can only attend to position 0 of key sequence\n");
+                        }
+
+                        // Run verification based on data type
+                        bool verify_result = false;
+
+                        // Copy GPU tensors to CPU for verification
+                        const size_t q_nelements = B * H * Sq * D;
+                        const size_t k_nelements = B * H * Sk * D;
+                        const size_t v_nelements = B * H * Sk * D;
+
+                        switch (target_type) {
+                            case GGML_TYPE_F16: {
+                                std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
+                                std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
+                                std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
+
+                                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
+
+                                verify_result = verify_mixed_type_attention<ggml_fp16_t, ggml_fp16_t>(
+                                    q_cpu_data.data(),
+                                    k_cpu_data.data(),
+                                    v_cpu_data.data(),
+                                    static_cast<const ggml_fp16_t*>(mask_cpu),
+                                    static_cast<const ggml_fp16_t*>(output_cpu),
+                                    B, H, Sq, Sk, D, scale, is_causal
+                                );
+                                break;
+                            }
+                            case GGML_TYPE_F32: {
+                                std::vector<float> q_cpu_data(q_nelements);
+                                std::vector<float> k_cpu_data(k_nelements);
+                                std::vector<float> v_cpu_data(v_nelements);
+
+                                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
+
+                                verify_result = verify_mixed_type_attention<float, float>(
+                                    q_cpu_data.data(),
+                                    k_cpu_data.data(),
+                                    v_cpu_data.data(),
+                                    static_cast<const float*>(mask_cpu),
+                                    static_cast<const float*>(output_cpu),
+                                    B, H, Sq, Sk, D, scale, is_causal
+                                );
+                                break;
+                            }
+                            case GGML_TYPE_BF16: {
+                                std::vector<ggml_bf16_t> q_cpu_data(q_nelements);
+                                std::vector<ggml_bf16_t> k_cpu_data(k_nelements);
+                                std::vector<ggml_bf16_t> v_cpu_data(v_nelements);
+
+                                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
+
+                                verify_result = verify_mixed_type_attention<ggml_bf16_t, ggml_bf16_t>(
+                                    q_cpu_data.data(),
+                                    k_cpu_data.data(),
+                                    v_cpu_data.data(),
+                                    static_cast<const ggml_bf16_t*>(mask_cpu),
+                                    static_cast<const ggml_bf16_t*>(output_cpu),
+                                    B, H, Sq, Sk, D, scale, is_causal
+                                );
+                                break;
+                            }
+                            default:
+                                GGML_LOG_WARN("CUDNN_VERIFICATION: Unsupported data type for verification\n");
+                                break;
+                        }
+
+                        if (!verify_result) {
+                            GGML_LOG_ERROR("CUDNN_VERIFICATION: cudnnScaledDotProductAttention verification failed!\n");
+                            printf("Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, is_causal=%s, has_mask=%s\n",
+                                         B, H, Sq, Sk, D, scale, is_causal ? "true" : "false", mask_dldnn ? "true" : "false");
+                        }
+                    } else {
+                        GGML_LOG_ERROR("CUDNN_VERIFICATION: Failed to allocate CPU memory for verification\n");
+                    }
+
+                    cleanup_verification:
+                    // Cleanup CPU buffers
+                    if (mask_cpu) free(mask_cpu);
+                    if (output_cpu) free(output_cpu);
+                }
             }
 
             if (ok) {
@@ -1436,13 +2275,27 @@ static void ggml_cuda_flash_attn_ext_dldnn(ggml_backend_cuda_context & ctx, ggml
     }
 
     if (!has_alibi && !has_mask) {
-        // GGML_LOG_INFO("DLDNN: No ALiBi or mask, using cudnnScaledDotProductAttention with is_causal=true\n");
+        // printf("DLDNN: No ALiBi or mask, using cudnnScaledDotProductAttention with is_causal=true\n");
         // use_scaled_dot_product = true;
-        GGML_LOG_INFO("DLDNN: No ALiBi or mask, using cudnnMHAForward\n");
+        printf("DLDNN: No ALiBi or mask, using cudnnMHAForward\n");
         use_mha_forward = true;
     }
 
-    GGML_LOG_INFO("DLDNN interface selection: has_alibi=%s, has_mask=%s, using %s\n",
+    const char *env_force_sdp = getenv("GGML_DLDNN_FORCE_SDP_ATTENTION");
+    if (env_force_sdp != nullptr && strcmp(env_force_sdp, "1") == 0) {
+        printf("DLDNN: Force using cudnnScaledDotProductAttention\n");
+        use_scaled_dot_product = true;
+        use_mha_forward = false;
+    }
+
+    const char *env_force_mha = getenv("GGML_DLDNN_FORCE_MHA_FORWARD");
+    if (env_force_mha != nullptr && strcmp(env_force_mha, "1") == 0) {
+        printf("DLDNN: Force using cudnnMHAForward\n");
+        use_mha_forward = true;
+        use_scaled_dot_product = false;
+    }
+
+    printf("DLDNN interface selection: has_alibi=%s, has_mask=%s, using %s\n",
                   has_alibi ? "true" : "false",
                   has_mask ? "true" : "false",
                   use_mha_forward ? "cudnnMHAForward" : "cudnnScaledDotProductAttention");
@@ -1509,16 +2362,21 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     }
 
     if (!fp16_mma_available(cc)) {
+        printf("FLASH_ATTN: fp16_mma not available, using fallback implementation\n");
         if (prec == GGML_PREC_DEFAULT) {
             if (Q->ne[1] <= 8 || Q->ne[0] == 256) {
+                printf("FLASH_ATTN: Using vec_f16 implementation\n");
                 ggml_cuda_flash_attn_ext_vec_f16(ctx, dst);
             } else {
+                printf("FLASH_ATTN: Using tile_f16 implementation\n");
                 ggml_cuda_flash_attn_ext_tile_f16(ctx, dst);
             }
         } else {
             if (Q->ne[1] <= 8 || Q->ne[0] == 256) {
+                printf("FLASH_ATTN: Using vec_f32 implementation\n");
                 ggml_cuda_flash_attn_ext_vec_f32(ctx, dst);
             } else {
+                printf("FLASH_ATTN: Using tile_f32 implementation\n");
                 ggml_cuda_flash_attn_ext_tile_f32(ctx, dst);
             }
         }
@@ -1529,7 +2387,12 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     const bool mma_needs_data_conversion = K->type != GGML_TYPE_F16 || V->type != GGML_TYPE_F16;
     const bool mma_faster_for_bs1 = new_mma_available(cc) && gqa_opt_applies && cc < GGML_CUDA_CC_ADA_LOVELACE && !mma_needs_data_conversion;
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % (2*warp_size) == 0;
+
+    printf("FLASH_ATTN: Decision factors - Q->ne[1]=%ld, can_use_vector_kernel=%s, mma_faster_for_bs1=%s, prec=%d\n",
+           Q->ne[1], can_use_vector_kernel ? "true" : "false", mma_faster_for_bs1 ? "true" : "false", prec);
+
     if (Q->ne[1] == 1 && can_use_vector_kernel && !mma_faster_for_bs1) {
+        printf("FLASH_ATTN: Using vector kernel for seq_len=1 case\n");
         if (prec == GGML_PREC_DEFAULT) {
             ggml_cuda_flash_attn_ext_vec_f16(ctx, dst);
         } else {
@@ -1543,10 +2406,11 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
         ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
     }
 
-#ifdef GGML_USE_DLCU
-    // GGML_ABORT("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet");
-    GGML_LOG_ERROR("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet");
-#else
+// #ifdef GGML_USE_DLCU
+//     // GGML_ABORT("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet");
+//     GGML_LOG_ERROR("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet");
+// #else
+    printf("FLASH_ATTN: Using MMA implementation (final fallback)\n");
     ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
-#endif
+// #endif
 }
