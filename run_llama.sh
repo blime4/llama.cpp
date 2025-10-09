@@ -447,6 +447,7 @@ compile_llama_cpp() {
         -G Ninja
         -B "$build_dir"
         -DGGML_DLCU=ON
+        -DCMAKE_VERBOSE_MAKEFILE=ON
         -DCMAKE_BUILD_TYPE=Release
         -DGGML_BACKEND_DL=ON
         -DGGML_CUDA_GRAPHS=OFF

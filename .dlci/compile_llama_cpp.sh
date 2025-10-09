@@ -173,6 +173,7 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     # Execute CMake with dual logging
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CUDA_GRAPHS=OFF \
@@ -192,6 +193,7 @@ elif [ "$ARCH" = "loongarch64" ]; then
     # Execute CMake with dual logging
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=OFF \
@@ -210,6 +212,7 @@ elif [ "$ARCH" = "riscv64" ]; then
     # Execute CMake with dual logging
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=OFF \
@@ -236,6 +239,7 @@ else
     # Execute CMake with dual logging
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=ON \
