@@ -1176,12 +1176,10 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
 
         // Check if this is GQA
         if (q_heads != k_heads || q_heads != v_heads) {
-            printf("GQA detected: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
-
-            // For cudnnScaledDotProductAttention, we need to handle GQA by expanding K and V
-            // This is a limitation - cuDNN expects all tensors to have the same number of heads
-            GGML_LOG_ERROR("cudnnScaledDotProductAttention doesn't support GQA directly. Need to expand K/V heads or use fallback.\n");
-            ok = false;
+            printf("GQA detected in ScaledDotProduct path: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
+            // SDK now supports GQA - let's try it
+            printf("Attempting cudnnScaledDotProductAttention with GQA (SDK updated)...\n");
+            // If it fails, the error will be caught by cudnnStatus_t check
         }
 
         if (ok) {
@@ -1532,13 +1530,16 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
     // GQA ratio (nr2 parameter in tests)
     const int64_t gqa_ratio = n_head_k > 0 ? n_head_q / n_head_k : 1;
 
-    // TODO: support GQA, need cudnnMHAForward support.
-    // Check if this is GQA (not standard MHA)
+    // SDK now supports GQA - allow it to proceed
     if (n_head_q != n_head_k || n_head_k != n_head_v) {
-        // This is GQA configuration
-        GGML_LOG_WARN("DLDNN Flash Attention: GQA unsupported yet. GQA configuration detected (Q heads: %ld, K heads: %ld, V heads: %ld)\n",
-                      n_head_q, n_head_k, n_head_v);
-        return false;
+        // This is GQA configuration - now supported by SDK
+        printf("DLDNN Flash Attention: GQA configuration detected (Q heads: %ld, K heads: %ld, V heads: %ld, ratio: %ld)\n",
+                      n_head_q, n_head_k, n_head_v, gqa_ratio);
+        // Verify that head counts are compatible
+        if (n_head_q % n_head_k != 0 || n_head_k != n_head_v) {
+            GGML_LOG_WARN("DLDNN Flash Attention: Invalid GQA configuration - Q heads must be divisible by K heads, and K/V heads must match\n");
+            return false;
+        }
     }
 
     // DRAFT: The type conversion is now handled inside flash_attn_ext_dldnn

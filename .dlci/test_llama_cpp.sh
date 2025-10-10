@@ -158,8 +158,8 @@ if [ "$SIMPLE_TEST" = true ]; then
     # ============================================================
     declare -a SIMPLE_TEST_LIST=(
         # "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|NONE"
-        # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
-        "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
+        "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
+        # "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
         # "ADD|${build_dir_bin}/test-backend-ops -o ADD|NONE"  # Example: Add more tests here
         # "MUL|${build_dir_bin}/test-backend-ops -o MUL|NONE"  # Example
     )
@@ -174,7 +174,10 @@ if [ "$SIMPLE_TEST" = true ]; then
 
     # Initialize counters
     fail_count=0
+    pass_count=0
+    skip_count=0
     fail_list=()
+    skip_list=()
     total_tests=${#SIMPLE_TEST_LIST[@]}
 
     # Execute tests from list
@@ -199,13 +202,16 @@ if [ "$SIMPLE_TEST" = true ]; then
         start_time=$(date +%s)
         set +e
 
+        # Create temporary file to capture this specific test's output
+        temp_output="/tmp/test_output_${test_num}_$$.log"
+
         # Execute with or without environment variables
         if [ "$test_env" != "NONE" ]; then
-            env $test_env bash -c "$test_cmd" | tee -a "$test_log"
-            ret=$?
+            env $test_env bash -c "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
+            ret=${PIPESTATUS[0]}
         else
-            eval "$test_cmd" | tee -a "$test_log"
-            ret=$?
+            eval "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
+            ret=${PIPESTATUS[0]}
         fi
 
         set -e
@@ -214,19 +220,74 @@ if [ "$SIMPLE_TEST" = true ]; then
         echo "-----------------------------" | tee -a "$test_log"
 
         # Check results
-        if [ $ret -eq 0 ]; then
-            echo "[PASS] $test_name (${duration}s)" | tee -a "$summary_log"
-        else
+        # Count sub-test failures, passes, and skips in the output (for tests like FLASH_ATTN_EXT that have many sub-tests)
+        sub_test_fail_count=0
+        sub_test_pass_count=0
+        sub_test_skip_count=0
+        sub_test_total_count=0
+
+        # Check if test output contains sub-test results
+        if [ -f "$temp_output" ]; then
+            # Count passes: lines with "OK" (may have ANSI color codes)
+            sub_test_pass_count=$(grep -c "OK" "$temp_output" 2>/dev/null || echo "0")
+            sub_test_pass_count=$(echo "$sub_test_pass_count" | tr -d '\n\r' | xargs)
+
+            # Count failures: lines with "FAIL" or "test failed"
+            fail_count_1=$(grep -c "FAIL" "$temp_output" 2>/dev/null || echo "0")
+            fail_count_2=$(grep -c "test failed" "$temp_output" 2>/dev/null || echo "0")
+            sub_test_fail_count=$((fail_count_1 + fail_count_2))
+
+            # Count "not supported" lines as skipped tests
+            sub_test_skip_count=$(grep -c "not supported" "$temp_output" 2>/dev/null || echo "0")
+            sub_test_skip_count=$(echo "$sub_test_skip_count" | tr -d '\n\r' | xargs)
+
+            # Calculate total
+            sub_test_total_count=$((sub_test_pass_count + sub_test_fail_count + sub_test_skip_count))
+
+            # Display summary if there are failures, passes, or skips
+            if [ "$sub_test_fail_count" -gt 0 ] || [ "$sub_test_pass_count" -gt 0 ] || [ "$sub_test_skip_count" -gt 0 ]; then
+                if [ "$sub_test_total_count" -gt 0 ]; then
+                    # Calculate actual total including skipped tests
+                    actual_total=$((sub_test_pass_count + sub_test_fail_count + sub_test_skip_count))
+                    echo "[INFO] Sub-test results: Pass=$sub_test_pass_count, Fail=$sub_test_fail_count, Skip=$sub_test_skip_count, Total=$actual_total" | tee -a "$summary_log"
+                else
+                    echo "[INFO] Sub-test results: Pass=?, Fail=$sub_test_fail_count, Skip=$sub_test_skip_count" | tee -a "$summary_log"
+                fi
+            fi
+
+            # Clean up temp file
+            rm -f "$temp_output"
+        fi
+
+        # Determine test result status:
+        # - FAIL: if exit code is non-zero OR there are sub-test failures
+        # - SKIP: if exit code is 0, no failures, but all sub-tests were skipped
+        # - PASS: if exit code is 0, no failures, and there are some passed tests
+        if [ $ret -ne 0 ]; then
+            # Exit code non-zero
             echo "[FAIL] $test_name (exit code: $ret, ${duration}s)" | tee -a "$summary_log"
             fail_count=$((fail_count+1))
             fail_list+=("$test_name (exit code $ret)")
+        elif [ $sub_test_fail_count -gt 0 ]; then
+            # Exit code is 0 but sub-tests failed
+            echo "[FAIL] $test_name (${duration}s, $sub_test_fail_count sub-test failures)" | tee -a "$summary_log"
+            fail_count=$((fail_count+1))
+            fail_list+=("$test_name ($sub_test_fail_count sub-test failures)")
+        elif [ $sub_test_pass_count -eq 0 ] && [ $sub_test_skip_count -gt 0 ]; then
+            # All sub-tests were skipped (not supported)
+            echo "[SKIP] $test_name (${duration}s, $sub_test_skip_count sub-tests skipped)" | tee -a "$summary_log"
+            skip_count=$((skip_count+1))
+            skip_list+=("$test_name (all $sub_test_skip_count sub-tests not supported)")
+        else
+            # Passed
+            echo "[PASS] $test_name (${duration}s)" | tee -a "$summary_log"
+            pass_count=$((pass_count+1))
         fi
     done
 
     # Summary
     test_end_time=$(date +%s)
     test_duration=$((test_end_time - test_start_time))
-    pass_count=$((total_tests - fail_count))
 
     echo "" | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
@@ -235,17 +296,34 @@ if [ "$SIMPLE_TEST" = true ]; then
     echo "[INFO]   Total tests:  $total_tests" | tee -a "$summary_log"
     echo "[INFO]   Passed:       $pass_count" | tee -a "$summary_log"
     echo "[INFO]   Failed:       $fail_count" | tee -a "$summary_log"
+    echo "[INFO]   Skipped:      $skip_count" | tee -a "$summary_log"
     echo "[INFO]   Total time:   ${test_duration}s" | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
 
+    # Display skip details if any
+    if [ $skip_count -gt 0 ]; then
+        echo "" | tee -a "$summary_log"
+        echo "[INFO] Skipped tests (not supported):" | tee -a "$summary_log"
+        for skip_item in "${skip_list[@]}"; do
+            echo "  - $skip_item" | tee -a "$summary_log"
+        done
+    fi
+
+    # Display fail details and exit if any failures
     if [ $fail_count -ne 0 ]; then
+        echo "" | tee -a "$summary_log"
         echo "[LLAMA_CPP_FAIL] Simple tests failed:" | tee -a "$summary_log"
         for fail_item in "${fail_list[@]}"; do
             echo "  - $fail_item" | tee -a "$summary_log"
         done
         exit 1
     else
-        echo "[LLAMA_CPP_PASS] All simple tests passed!" | tee -a "$summary_log"
+        echo "" | tee -a "$summary_log"
+        if [ $skip_count -gt 0 ]; then
+            echo "[LLAMA_CPP_PASS] All enabled tests passed! ($skip_count tests skipped)" | tee -a "$summary_log"
+        else
+            echo "[LLAMA_CPP_PASS] All simple tests passed!" | tee -a "$summary_log"
+        fi
     fi
 
     exit 0
