@@ -1,0 +1,66 @@
+#pragma once
+
+/**
+ * @file dl-fattn.cuh
+ * @brief DengLin (DL) Flash Attention CUDA extensions
+ *
+ * This file contains DLDNN-specific Flash Attention implementations using:
+ * - cuDNN MHA Forward (for ALiBi support)
+ * - cuDNN ScaledDotProductAttention (for mask support)
+ *
+ * The implementation is enabled via GGML_USE_DLFA compile flag.
+ */
+
+#ifdef GGML_USE_DLFA
+
+#include "../ggml-cuda/common.cuh"
+#include <cudnn.h>
+
+// ============================================================================
+// Flash Attention - DLDNN Implementation
+// ============================================================================
+
+namespace ggml_dl {
+
+/**
+ * @brief Check if DLDNN Flash Attention is available for this operation
+ * @param ctx CUDA context
+ * @param dst Output tensor
+ * @return true if DLDNN can handle this flash attention operation
+ */
+bool flash_attn_dldnn_available(
+    ggml_backend_cuda_context& ctx,
+    ggml_tensor* dst);
+
+/**
+ * @brief Execute Flash Attention using DLDNN (cuDNN)
+ * @param ctx CUDA context
+ * @param dst Output tensor (KQV)
+ *
+ * This function automatically selects the appropriate cuDNN interface:
+ * - cudnnMHAForward for ALiBi support
+ * - cudnnScaledDotProductAttention for mask support
+ */
+void flash_attn_ext_dldnn(
+    ggml_backend_cuda_context& ctx,
+    ggml_tensor* dst);
+
+/**
+ * @brief Convert tensor data between GGML types on GPU
+ * @param src_data Source data pointer (device)
+ * @param dst_data Destination data pointer (device)
+ * @param src_tensor Source tensor metadata
+ * @param dst_type Target GGML type
+ * @param stream CUDA stream
+ */
+void convert_tensor_data(
+    const void* src_data,
+    void* dst_data,
+    const ggml_tensor* src_tensor,
+    enum ggml_type dst_type,
+    cudaStream_t stream);
+
+} // namespace ggml_dl
+
+#endif // GGML_USE_DLFA
+

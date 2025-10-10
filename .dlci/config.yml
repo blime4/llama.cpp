@@ -1,0 +1,78 @@
+docker_registry:
+  base_url: "ext-artifactory.denglin.com:8082"
+  namespace: "ci-docker-images"
+
+docker_images:
+  x86_64:
+    image: "c-29:manylinux_2_28-gcc12-amd64-20250703"
+    dev_image: "c-29:manylinux_2_28-gcc12-amd64-20250703-dev"
+  aarch64:
+    image: "c-25:manylinux_2_28-gcc12-aarch64-20250702"
+    dev_image: "c-25:manylinux_2_28-gcc12-aarch64-20250702-dev"
+  riscv64:
+    image: "c-37:ubuntu22.04-riscv-20250822"
+    dev_image: "c-37:ubuntu22.04-riscv-20250822-dev"
+  loongarch64:
+    image: "c-41:manylinux_2_38-loongarch64-20250910"
+    dev_image: "c-41:manylinux_2_38-loongarch64-20250910"
+
+platform_suffixes:
+  x86_64: "manylinux_2_28-x86_64"
+  aarch64: "manylinux_2_28-aarch64"
+  riscv64: "linux-riscv64"
+  loongarch64: "manylinux_2_38-loongarch64"
+
+build:
+  sdk:
+    tag: "V2_SOFTWARE_master_202510082141"
+    workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
+    docker_repo_path: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
+
+    # SDK download configuration
+    download:
+      x86_64:
+        repository: "ai-sw-dailybuild-v2"
+        filename: "sdk.tar.bz2"
+        extract_dir: "sdk"
+      aarch64:
+        repository: "ai-sw-sdk-v2-test"
+        filename_pattern: "*manylinux_2_28-aarch64.tar.bz2"
+        extract_dir: "sdk"
+      riscv64:
+        repository: "ai-sw-sdk-v2-test"
+        filename_pattern: "*-riscv64.tar.bz2"
+        extract_dir: "sdk_riscv64"
+      loongarch64:
+        repository: "ai-sw-sdk-v2-test"
+        filename_pattern: "*-loongarch.tar.bz2"
+        extract_dir: "sdk"
+
+  model_path: "/mars/aebox/LLM/model"
+
+  build_dirs:
+    x86_64: "build_x86_64/bin"
+    aarch64: "build_aarch64/bin"
+    riscv64: "build_riscv64/bin"
+    loongarch64: "build_loongarch64/bin"
+
+ci:
+  supported_platforms:
+    - x86_64
+    - aarch64
+    - riscv64
+    - loongarch64
+
+  build_tags:
+    x86_64: "build-x86_64"
+    aarch64: "build-arm64"
+    riscv64: "build-x86_64"  # RISC-V uses a x86_64 builder
+    loongarch64: "build-loongarch64"
+
+  release_branch_pattern: "/^dl-release-.*$/"
+
+utils:
+  default_platform_suffix_template: "linux-{platform}"
+
+  error_messages:
+    unsupported_platform: "Unsupported DOCKER_PLATFORM: {platform}"
+    supported_platforms_info: "Supported platforms: {platforms}"

@@ -1,19 +1,26 @@
 variables:
-  SDK_TAG: V2_SOFTWARE_master_202509180241
   REPO_PATH: "${CI_PROJECT_DIR}"
-  LOCAL_MODEL_PATH: "/mars/aebox/LLM/model"
   SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
-  DOCKER_IMAGE_X86: "ext-artifactory.denglin.com:8082/ci-docker-images/c-29:manylinux_2_28-gcc12-amd64-20250703"
-  DOCKER_IMAGE_AARCH64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-25:manylinux_2_28-gcc12-aarch64-20250702"
-  DOCKER_IMAGE_RISCV64: "ext-artifactory.denglin.com:8082/ci-docker-images/c-37:ubuntu22.04-riscv-20250822"
-  DOCKER_IMAGE_LOONGAARCH64 : "ext-artifactory.denglin.com:8082/ci-docker-images/c-41:manylinux_2_38-loongarch64-20250910"
+
+  # SDK_TAG, LOCAL_MODEL_PATH and Docker images - now managed by unified config in .dlci/config.yml
+  # These variables are set by the utils.sh script in each job
 
 .docker_envs: &docker_envs |
   DOCKER_ENVS=()
   while IFS='=' read -r key value; do
     DOCKER_ENVS+=(--env "${key}=${value}")
   done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH)')
+
+.load_unified_config: &load_unified_config |
+  # Load all configuration from unified config
+  source .dlci/utils.sh
+  export SDK_TAG=$(get_sdk_tag)
+  export LOCAL_MODEL_PATH=$(get_model_path)
+  export DOCKER_IMAGE_X86=$(get_docker_image_with_network "x86_64")
+  export DOCKER_IMAGE_AARCH64=$(get_docker_image_with_network "aarch64")
+  export DOCKER_IMAGE_RISCV64=$(get_docker_image_with_network "riscv64")
+  export DOCKER_IMAGE_LOONGAARCH64=$(get_docker_image_with_network "loongarch64")
 
 stages:
   - compile_and_test_llama_cpp
@@ -27,6 +34,7 @@ compile_and_test_llama_cpp_x86_64:
     - build-x86_64
   script:
     - git submodule sync && git submodule update --init --recursive
+    - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
@@ -48,6 +56,7 @@ compile_and_test_llama_cpp_aarch64:
     - build-arm64
   script:
     - git submodule sync && git submodule update --init --recursive
+    - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
@@ -69,6 +78,7 @@ compile_and_test_llama_cpp_riscv64:
     - build-x86_64
   script:
     - git submodule sync && git submodule update --init --recursive
+    - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk_riscv64"
     - *docker_envs
@@ -92,6 +102,7 @@ compile_and_test_llama_cpp_loongarch64:
     - build-loongarch64
   script:
     - git submodule sync && git submodule update --init --recursive
+    - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
     - *docker_envs
@@ -116,6 +127,7 @@ release_llama_cpp_x86_64:
   only:
     - /^dl-release-.*$/
   script:
+    - *load_unified_config
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
 
@@ -130,6 +142,7 @@ release_llama_cpp_aarch64:
   only:
     - /^dl-release-.*$/
   script:
+    - *load_unified_config
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
 
@@ -144,6 +157,7 @@ release_llama_cpp_riscv64:
   only:
     - /^dl-release-.*$/
   script:
+    - *load_unified_config
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/release_llama_cpp.sh
 
@@ -158,5 +172,6 @@ release_llama_cpp_loongarch64:
   only:
     - /^dl-release-.*$/
   script:
+    - *load_unified_config
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ./.dlci/release_llama_cpp.sh

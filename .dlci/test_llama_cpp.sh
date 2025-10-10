@@ -15,6 +15,7 @@ set -e
 # Parse command line arguments
 CI_TEST_MODE=false
 BINARY_PATH=""
+SIMPLE_TEST=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -26,11 +27,16 @@ while [[ $# -gt 0 ]]; do
             BINARY_PATH="$2"
             shift 2
             ;;
+        --simple-test)
+            SIMPLE_TEST=true
+            shift
+            ;;
         *)
             echo "[ERROR] Unknown parameter: $1"
-            echo "Usage: $0 [--ci-test] [--binary-path <path>]"
+            echo "Usage: $0 [--ci-test] [--binary-path <path>] [--simple-test]"
             echo "  --ci-test: Enable CI test mode using external binaries"
             echo "  --binary-path: Path to the release directory containing binaries"
+            echo "  --simple-test: Run only backend-ops tests (MUL_MAT and DLFA)"
             exit 1
             ;;
     esac
@@ -133,6 +139,117 @@ export GGML_DEBUG=1
 # Limit CUDA devices to maximum 1 to avoid long test times
 export CUDA_VISIBLE_DEVICES=0
 echo "[INFO] CUDA_VISIBLE_DEVICES set to: $CUDA_VISIBLE_DEVICES" | tee -a "$summary_log"
+
+# Simple test mode
+if [ "$SIMPLE_TEST" = true ]; then
+    echo "[INFO] =============================" | tee -a "$summary_log"
+    echo "[INFO] Simple test mode enabled" | tee -a "$summary_log"
+    echo "[INFO] =============================" | tee -a "$summary_log"
+
+    # ============================================================
+    # Test List Configuration
+    # Format: "TEST_NAME|COMMAND|ENV_VARS"
+    # - TEST_NAME: Short name for the test
+    # - COMMAND: The actual command to run (use ${build_dir_bin} for binary path)
+    # - ENV_VARS: Environment variables (optional, use "NONE" if not needed)
+    #
+    # To add a new test, simply add a new line here
+    # To remove a test, comment out or delete the line
+    # ============================================================
+    declare -a SIMPLE_TEST_LIST=(
+        # "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|NONE"
+        # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
+        "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
+        # "ADD|${build_dir_bin}/test-backend-ops -o ADD|NONE"  # Example: Add more tests here
+        # "MUL|${build_dir_bin}/test-backend-ops -o MUL|NONE"  # Example
+    )
+
+    # Print test list
+    echo "[INFO] Test list (${#SIMPLE_TEST_LIST[@]} tests):" | tee -a "$summary_log"
+    for i in "${!SIMPLE_TEST_LIST[@]}"; do
+        IFS='|' read -r test_name test_cmd test_env <<< "${SIMPLE_TEST_LIST[$i]}"
+        echo "[INFO]   $((i+1)). $test_name" | tee -a "$summary_log"
+    done
+    echo "" | tee -a "$summary_log"
+
+    # Initialize counters
+    fail_count=0
+    fail_list=()
+    total_tests=${#SIMPLE_TEST_LIST[@]}
+
+    # Execute tests from list
+    for i in "${!SIMPLE_TEST_LIST[@]}"; do
+        # Parse test configuration
+        IFS='|' read -r test_name test_cmd test_env <<< "${SIMPLE_TEST_LIST[$i]}"
+        test_num=$((i+1))
+
+        echo "" | tee -a "$summary_log"
+        echo "[INFO] ========================================" | tee -a "$summary_log"
+        echo "[INFO] Test $test_num/$total_tests: $test_name" | tee -a "$summary_log"
+
+        # Display command with environment
+        if [ "$test_env" != "NONE" ]; then
+            echo "[INFO] Running: $test_env $test_cmd" | tee -a "$summary_log"
+        else
+            echo "[INFO] Running: $test_cmd" | tee -a "$summary_log"
+        fi
+        echo "[INFO] ========================================" | tee -a "$summary_log"
+        echo "-----------------------------" | tee -a "$test_log"
+
+        start_time=$(date +%s)
+        set +e
+
+        # Execute with or without environment variables
+        if [ "$test_env" != "NONE" ]; then
+            env $test_env bash -c "$test_cmd" | tee -a "$test_log"
+            ret=$?
+        else
+            eval "$test_cmd" | tee -a "$test_log"
+            ret=$?
+        fi
+
+        set -e
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+        echo "-----------------------------" | tee -a "$test_log"
+
+        # Check results
+        if [ $ret -eq 0 ]; then
+            echo "[PASS] $test_name (${duration}s)" | tee -a "$summary_log"
+        else
+            echo "[FAIL] $test_name (exit code: $ret, ${duration}s)" | tee -a "$summary_log"
+            fail_count=$((fail_count+1))
+            fail_list+=("$test_name (exit code $ret)")
+        fi
+    done
+
+    # Summary
+    test_end_time=$(date +%s)
+    test_duration=$((test_end_time - test_start_time))
+    pass_count=$((total_tests - fail_count))
+
+    echo "" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Simple Test Summary" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO]   Total tests:  $total_tests" | tee -a "$summary_log"
+    echo "[INFO]   Passed:       $pass_count" | tee -a "$summary_log"
+    echo "[INFO]   Failed:       $fail_count" | tee -a "$summary_log"
+    echo "[INFO]   Total time:   ${test_duration}s" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+
+    if [ $fail_count -ne 0 ]; then
+        echo "[LLAMA_CPP_FAIL] Simple tests failed:" | tee -a "$summary_log"
+        for fail_item in "${fail_list[@]}"; do
+            echo "  - $fail_item" | tee -a "$summary_log"
+        done
+        exit 1
+    else
+        echo "[LLAMA_CPP_PASS] All simple tests passed!" | tee -a "$summary_log"
+    fi
+
+    exit 0
+fi
 
 # Full test set for all platforms
 echo "[INFO] Running full test suite for all platforms" | tee -a "$summary_log"

@@ -6,6 +6,10 @@
 
 set -e
 
+# Source unified utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/.dlci/utils.sh"
+
 # Script version
 VERSION="1.0.0"
 
@@ -65,7 +69,8 @@ Options:
   --no-auto-install       Disable automatic installation of missing dependencies
   --interactive           Interactive setup
   --debug-mode            Enable debug mode with verbose output
-  --simple-test           Run simplified CPU-only tests for troubleshooting
+  --simple-test           Run only backend-ops tests (MUL_MAT and DLFA tests)
+  --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
                           Device check uses standalone script: .dlci/check_device_status.sh
   --help, -h              Show help information
@@ -78,7 +83,7 @@ Action descriptions:
 Environment variables:
   sdk_path                SDK path
   REPO_PATH              Repository path (default: current directory)
-  LOCAL_MODEL_PATH       Model path (default: /mars/aebox/LLM/model)
+  LOCAL_MODEL_PATH       Model path (default: from config.yml)
 
 Examples:
   # Auto-detect platform, full process
@@ -510,6 +515,133 @@ compile_llama_cpp() {
     log_success "Compilation completed, time taken: ${compile_duration} seconds"
 }
 
+# Run tests with repeat support
+run_tests_with_repeat() {
+    local platform="$1"
+    local build_dir="$2"
+    local debug_mode="$3"
+    local simple_test="$4"
+    local repeat_count="${5:-1}"
+
+    if [ "$repeat_count" -eq 1 ]; then
+        # Single run
+        run_tests "$platform" "$build_dir" "$debug_mode" "$simple_test"
+        return $?
+    fi
+
+    # Multiple runs with statistics
+    log_info "Running tests $repeat_count times with statistics collection..."
+    log_info "Progress will be displayed below, detailed logs are saved to files"
+    echo ""
+
+    local total_runs=0
+    local failed_runs=0
+    local passed_runs=0
+    local failed_details_file="/tmp/test_repeat_failures_$(date +%Y%m%d_%H%M%S).log"
+    local all_logs_file="/tmp/test_repeat_all_logs_$(date +%Y%m%d_%H%M%S).log"
+
+    echo "=== Test Repeat Statistics ===" > "$failed_details_file"
+    echo "Start Time: $(date)" >> "$failed_details_file"
+    echo "Repeat Count: $repeat_count" >> "$failed_details_file"
+    echo "" >> "$failed_details_file"
+
+    # Progress bar display
+    local start_time=$(date +%s)
+
+    for i in $(seq 1 $repeat_count); do
+        total_runs=$((total_runs + 1))
+
+        # Run test and capture output (redirect to log file)
+        local test_output_file="/tmp/test_run_${i}_$(date +%Y%m%d_%H%M%S).log"
+
+        # Print progress on same line
+        printf "\r${BLUE}[INFO]${NC} Progress: [%d/%d] " "$i" "$repeat_count"
+
+        if run_tests "$platform" "$build_dir" "$debug_mode" "$simple_test" > "$test_output_file" 2>&1; then
+            passed_runs=$((passed_runs + 1))
+            printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d" "$passed_runs" "$failed_runs"
+        else
+            failed_runs=$((failed_runs + 1))
+            printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d ${RED}[FAILED at iteration %d]${NC}" "$passed_runs" "$failed_runs" "$i"
+
+            # Record failure details
+            echo "" >> "$failed_details_file"
+            echo "=== Failure #$failed_runs (Iteration $i) ===" >> "$failed_details_file"
+            echo "Time: $(date)" >> "$failed_details_file"
+
+            # Extract NMSE errors from log
+            grep -E "(NMSE|FAIL|ERROR)" "$test_output_file" >> "$failed_details_file" 2>/dev/null || true
+            echo "" >> "$failed_details_file"
+        fi
+
+        # Append to all logs
+        cat "$test_output_file" >> "$all_logs_file"
+
+        # Clean up individual test log to save space
+        rm -f "$test_output_file"
+
+        # Brief pause between runs
+        if [ $i -lt $repeat_count ]; then
+            sleep 1
+        fi
+    done
+
+    # New line after progress bar
+    echo ""
+    echo ""
+
+    # Calculate elapsed time
+    local end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+    local elapsed_str=""
+    if [ $elapsed -ge 60 ]; then
+        local minutes=$((elapsed / 60))
+        local seconds=$((elapsed % 60))
+        elapsed_str="${minutes}m ${seconds}s"
+    else
+        elapsed_str="${elapsed}s"
+    fi
+
+    # Print summary
+    log_info ""
+    log_info "=========================================="
+    log_info "  Test Repeat Statistics Summary"
+    log_info "=========================================="
+    log_info "Total Runs:   $total_runs"
+    log_success "Passed Runs:  $passed_runs"
+    if [ $failed_runs -gt 0 ]; then
+        log_error "Failed Runs:  $failed_runs"
+    else
+        log_info "Failed Runs:  $failed_runs"
+    fi
+
+    local pass_rate=$(awk "BEGIN {printf \"%.2f\", ($passed_runs/$total_runs)*100}")
+    log_info "Pass Rate:    ${pass_rate}%"
+    log_info "Total Time:   $elapsed_str"
+    log_info "=========================================="
+    log_info ""
+    log_info "Log files:"
+    log_info "  All logs:       $all_logs_file"
+
+    if [ $failed_runs -gt 0 ]; then
+        log_info "  Failure details: $failed_details_file"
+        log_warn ""
+        log_warn "Summary of failures:"
+        echo ""
+        tail -n 50 "$failed_details_file"
+    else
+        log_success "All test iterations passed!"
+        rm -f "$failed_details_file"
+    fi
+
+    # Return failure if any run failed
+    if [ $failed_runs -gt 0 ]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
 # Run tests
 run_tests() {
     local platform="$1"
@@ -549,6 +681,13 @@ run_tests() {
     export DOCKER_PLATFORM="$platform"
     export REPO_PATH="${REPO_PATH}"
 
+    # Build test script arguments
+    local test_script_args=""
+    if [ "$simple_test" = "true" ]; then
+        test_script_args="--simple-test"
+        log_info "Simple test mode enabled"
+    fi
+
     # Check if the comprehensive test script exists
     local test_script="${REPO_PATH}/.dlci/test_llama_cpp.sh"
 
@@ -563,14 +702,7 @@ run_tests() {
         chmod +x "$test_script"
     fi
 
-    log_info "Running comprehensive test suite using: $test_script"
-    log_info "This includes Qwen model correctness validation and full llama.cpp tests"
-
-    # Determine test mode based on simple_test flag
-    if [ "$simple_test" = "true" ]; then
-        log_info "Simple test mode requested - will run basic tests only"
-        # We could add a flag to test_llama_cpp.sh for simple mode, but for now run full suite
-    fi
+    log_info "Running test suite using: $test_script"
 
     # Run the comprehensive test script
     local ret=0
@@ -581,7 +713,7 @@ run_tests() {
         log_info "Running comprehensive test suite with LoongArch64 timeout monitoring..."
 
         # Run the test script in background
-        bash "$test_script" &
+        bash "$test_script" $test_script_args &
         local test_pid=$!
 
         # Monitor for timeout with periodic status
@@ -616,7 +748,7 @@ run_tests() {
     else
         # Normal execution for other platforms
         log_info "Executing comprehensive test suite..."
-        bash "$test_script"
+        bash "$test_script" $test_script_args
         ret=$?
     fi
 
@@ -638,21 +770,26 @@ run_tests() {
         duration_str="${test_duration}s"
     fi
 
-    # Report results
+    # Report results (unified for all test modes)
+    local test_mode_name="Test suite"
+    if [ "$simple_test" = "true" ]; then
+        test_mode_name="Simple tests"
+    else
+        test_mode_name="Comprehensive test suite"
+    fi
+
     if [ $ret -eq 0 ]; then
-        log_success "Comprehensive test suite completed successfully!"
+        log_success "$test_mode_name completed successfully!"
         log_success "Total execution time: $duration_str"
-        log_info "This includes:"
-        log_info "  - Full llama.cpp backend and functionality tests"
-        log_info "  - Qwen2, Qwen2.5, and Qwen3 model correctness validation"
-        log_info "  - Content-based output verification with reference comparison"
         return 0
     elif [ $ret -eq 124 ]; then
-        log_error "Comprehensive test suite timed out after $duration_str"
-        log_error "Consider running with --simple-test for faster execution"
+        log_error "$test_mode_name timed out after $duration_str"
+        if [ "$simple_test" != "true" ]; then
+            log_error "Consider running with --simple-test for faster execution"
+        fi
         return 1
     else
-        log_error "Comprehensive test suite failed (exit code: $ret)"
+        log_error "$test_mode_name failed (exit code: $ret)"
         log_error "Execution time: $duration_str"
         log_error "Check the detailed logs in the test script output above"
         return 1
@@ -671,6 +808,7 @@ main() {
     local debug_mode=false
     local simple_test=false
     local skip_device_check=false
+    local repeat_test=1
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -710,6 +848,10 @@ main() {
             --simple-test)
                 simple_test=true
                 shift
+                ;;
+            --repeat-test)
+                repeat_test="$2"
+                shift 2
                 ;;
             --skip-device-check)
                 skip_device_check=true
@@ -764,8 +906,8 @@ main() {
     if [ -n "$model_path_arg" ]; then
         export LOCAL_MODEL_PATH="$model_path_arg"
     elif [ -z "$LOCAL_MODEL_PATH" ]; then
-        export LOCAL_MODEL_PATH="/mars/aebox/LLM/model"
-        log_info "Using default LOCAL_MODEL_PATH: $LOCAL_MODEL_PATH"
+        export LOCAL_MODEL_PATH="$(get_model_path)"
+        log_info "Using default LOCAL_MODEL_PATH from config: $LOCAL_MODEL_PATH"
     fi
 
     # Validate required parameters
@@ -787,6 +929,9 @@ main() {
     fi
     if [ "$simple_test" = "true" ]; then
         log_info "Simple test mode: enabled"
+    fi
+    if [ "$repeat_test" -gt 1 ]; then
+        log_info "Repeat test: $repeat_test times"
     fi
     if [ "$skip_device_check" = "true" ]; then
         log_warn "Device check: disabled (--skip-device-check)"
@@ -834,7 +979,7 @@ main() {
                     log_warn "Device status check skipped by user request"
                 fi
 
-                run_tests "$platform" "$build_dir" "$debug_mode" "$simple_test"
+                run_tests_with_repeat "$platform" "$build_dir" "$debug_mode" "$simple_test" "$repeat_test"
 
                 if [ "$action" = "test" ]; then
                     log_success "Testing completed"

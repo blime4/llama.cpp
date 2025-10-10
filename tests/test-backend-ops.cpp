@@ -5400,6 +5400,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                         for (int n : {1, 32, 129}) {
                             int m = 512;
                             int k = 256;
+
+                            // // BUGID: Skip known flaky test case with random precision issues
+                            // // MUL_MAT_ID(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)
+                            // if (type_a == GGML_TYPE_Q4_1 && type_b == GGML_TYPE_F32 &&
+                            //     n_mats == 4 && n_used == 1 && b == true &&
+                            //     m == 512 && n == 1 && k == 256) {
+                            //     continue;  // Skip this flaky test case
+                            // }
+
                             test_cases.emplace_back(new test_mul_mat_id(type_a, type_b, n_mats, n_used, b, m, n, k));
                         }
                     }

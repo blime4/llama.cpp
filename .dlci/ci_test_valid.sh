@@ -14,9 +14,13 @@
 
 set -e
 
-# Configuration
-DEFAULT_SDK_TAG="V2_SOFTWARE_master_202509180241"
-DEFAULT_LOCAL_MODEL_PATH="/mars/aebox/LLM/model"
+# Source configuration utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/utils.sh"
+
+# Configuration - loaded from unified config
+DEFAULT_SDK_TAG=$(get_sdk_tag)
+DEFAULT_LOCAL_MODEL_PATH=$(get_model_path)
 WORK_DIR="/tmp/llama_cpp_ci_test_$$"  # Use PID for uniqueness
 RELEASE_ARTIFACTORY_BASE="http://ext-artifactory.denglin.com:8082/artifactory/llama.cpp-release"
 
@@ -118,24 +122,14 @@ setup_sdk_path() {
 get_platform_suffix() {
     local platform="$1"
 
-    case "${platform}" in
-        x86_64)
-            echo "manylinux_2_28-x86_64"
-            ;;
-        aarch64)
-            echo "manylinux_2_28-aarch64"
-            ;;
-        riscv64)
-            echo "linux-riscv64"
-            ;;
-        loongarch64)
-            echo "manylinux_2_38-loongarch64"
-            ;;
-        *)
-            log_warning "Unknown platform: ${platform}, using generic naming"
-            echo "linux-${platform}"
-            ;;
-    esac
+    # Use unified configuration
+    local suffix=$(get_config_value ".platform_suffixes.${platform}")
+    if [[ -n "$suffix" ]]; then
+        echo "$suffix"
+    else
+        log_warning "Unknown platform: ${platform}, using generic naming"
+        echo "linux-${platform}"
+    fi
 }
 
 # Function to get latest release tag from artifactory
@@ -144,7 +138,7 @@ get_latest_release_tag() {
     local sdk_tag="$2"
     local platform_suffix=$(get_platform_suffix "$platform")
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202509180241 to sdk202509180241
+    # Transform SDK_TAG from V2_SOFTWARE_master_202510082141 to sdk202509180241
     local sdk_tag_transformed=""
     if [[ "$sdk_tag" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
@@ -434,7 +428,7 @@ main() {
     # Inline download and extract logic
     local platform_suffix=$(get_platform_suffix "$DOCKER_PLATFORM")
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202509180241 to sdk202509180241
+    # Transform SDK_TAG from V2_SOFTWARE_master_202510082141 to sdk202509180241
     local sdk_tag_transformed=""
     if [[ "$DEFAULT_SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
