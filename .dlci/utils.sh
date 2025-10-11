@@ -269,7 +269,7 @@ setup_docker_repo() {
         local network_env=$(detect_network_env)
         echo "[INFO] Docker directory does not exist, cloning from $network_env network..."
         echo "[INFO] Using repository: $git_repo_url"
-        git clone "$git_repo_url" "$docker_repo_path"
+        git clone "$git_repo_url" --depth 1 "$docker_repo_path"
     else
         echo "[INFO] Docker directory already exists, checking branch..."
         cd "$docker_repo_path"
@@ -541,6 +541,16 @@ ci_build() {
 
         # Show log information
         echo "[INFO] Build logs are available in: /LocalRun/$(whoami)/logs/llama_cpp_compile/"
+
+        # Create release package after successful build
+        echo ""
+        echo "[INFO] Creating release package..."
+        if create_release_package; then
+            echo "[INFO] Release package created successfully"
+        else
+            echo "[WARNING] Failed to create release package, but build was successful"
+            # Don't fail the entire build if packaging fails
+        fi
     else
         echo ""
         echo "======================================"
@@ -548,6 +558,94 @@ ci_build() {
         echo "======================================"
         echo "[INFO] Check build logs in: /LocalRun/$(whoami)/logs/llama_cpp_compile/"
         exit $exit_code
+    fi
+}
+
+# =============================================================================
+# Release Package Functions
+# =============================================================================
+
+# Create release package (without uploading)
+# Usage: create_release_package
+# Requires: REPO_PATH, DOCKER_PLATFORM, CI_COMMIT_TAG, CI_COMMIT_SHA, SDK_TAG
+# Returns: 0 on success, 1 on failure
+create_release_package() {
+    local arch="${DOCKER_PLATFORM}"
+    local build_dir="${REPO_PATH}/build_${arch}"
+    local release_dir="${REPO_PATH}/release"
+
+    echo ""
+    echo "======================================"
+    echo "Creating Release Package"
+    echo "======================================"
+    echo "[INFO] Platform: ${arch}"
+    echo "[INFO] Build directory: ${build_dir}"
+    echo "[INFO] Release directory: ${release_dir}"
+    echo ""
+
+    # Validate build directory exists
+    if [ ! -d "${build_dir}/bin" ]; then
+        echo "[ERROR] Build directory not found: ${build_dir}/bin"
+        echo "[ERROR] Cannot create release package without successful build"
+        return 1
+    fi
+
+    # Create clean release directory
+    rm -rf "${release_dir}"
+    mkdir -p "${release_dir}"
+
+    # Copy release files from build/bin
+    echo "[INFO] Copying release files from ${build_dir}/bin"
+    cp "${build_dir}/bin"/* "${release_dir}/"
+
+    echo "[INFO] Files to be released:"
+    ls -la "${release_dir}/"
+    echo ""
+
+    # Create version.txt with build information
+    echo "[INFO] Creating version.txt"
+    cat > "${release_dir}/version.txt" << EOF
+Release Version: ${CI_COMMIT_TAG:-unknown}
+Build Date: $(date)
+Commit SHA: ${CI_COMMIT_SHA:-unknown}
+Build Platform: ${arch}
+Architecture: $(uname -m)
+SDK Tag: ${SDK_TAG:-unknown}
+EOF
+
+    # Determine platform suffix using unified config
+    local platform_suffix=$(get_platform_suffix "${arch}")
+    if [[ -z "$platform_suffix" ]]; then
+        echo "[WARNING] Unknown architecture: ${arch}, using generic naming"
+        platform_suffix="linux-${arch}"
+    fi
+
+    # Transform SDK_TAG from V2_SOFTWARE_master_202510082141 to sdk202510082141
+    local sdk_tag_transformed=""
+    if [[ "$SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
+        sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
+    else
+        # Fallback: if pattern doesn't match, use original SDK_TAG
+        sdk_tag_transformed="${SDK_TAG:-unknown}"
+    fi
+
+    # Create release package name
+    local release_name="llama-${CI_COMMIT_TAG:-dev}-${sdk_tag_transformed}-bin-${platform_suffix}.zip"
+
+    echo "[INFO] Creating release package: ${release_name}"
+    cd "${REPO_PATH}"
+    zip -r "${release_name}" release/*
+
+    if [ $? -eq 0 ]; then
+        echo ""
+        echo "[SUCCESS] Release package created: ${release_name}"
+        echo "[INFO] Package location: ${REPO_PATH}/${release_name}"
+        ls -lh "${REPO_PATH}/${release_name}"
+        echo ""
+        return 0
+    else
+        echo "[ERROR] Failed to create release package"
+        return 1
     fi
 }
 
