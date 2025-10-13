@@ -7437,12 +7437,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                             for (int nb : { 1, 3, 32, 35, }) {
                                                 for (ggml_prec prec : {GGML_PREC_F32, GGML_PREC_DEFAULT}) {
                                                     if (hsk != 128 && prec == GGML_PREC_DEFAULT) continue;
-                                                    for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+                                                    for (ggml_type type_KV : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
 #ifdef GGML_USE_DLFA
                                                         if (sinks) continue; // DL-TODO: support attention sinks later.
                                                         if (max_bias > 0.0f) continue; // alibi not support now.
                                                         if (nr3 > 1) continue; // decode path currently supports batch=1
-                                                        if (type_KV != GGML_TYPE_F16) continue; // only support fp16.
+                                                        if (type_KV != GGML_TYPE_F16) continue; // only support fp16. // DL-TODO: check fp32 and bf16.
                                                         if (!GGML_DLFA_SUPPORT_NONZERO_LOGIT_SOFTCAP && logit_softcap > 0.0f) continue;
 #endif
                                                         test_cases.emplace_back(new test_flash_attn_ext(
