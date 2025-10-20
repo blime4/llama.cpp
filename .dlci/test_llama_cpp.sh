@@ -89,6 +89,11 @@ summary_log="${logs_dir}/test_summary_$(date +%Y%m%d_%H%M%S).log"
 echo "[INFO] Test suite started at: $(date)" | tee -a "$test_log"
 echo "[INFO] Detailed logs will be saved to: $test_log" | tee -a "$summary_log"
 echo "[INFO] Summary will be saved to: $summary_log" | tee -a "$summary_log"
+if [ "$VERBOSE" = "true" ]; then
+    echo "[INFO] VERBOSE MODE ENABLED - All test outputs will be displayed in real-time" | tee -a "$summary_log"
+else
+    echo "[INFO] Standard mode - Only limited output shown (use --verbose for full output)" | tee -a "$summary_log"
+fi
 
 # ---------- ci/cd ----------
 echo "[INFO] Setting up environment..." | tee -a "$summary_log"
