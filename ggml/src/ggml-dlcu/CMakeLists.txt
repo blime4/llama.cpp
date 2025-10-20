@@ -4,11 +4,13 @@ list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 # Add DL-specific headers (in this directory)
 list(APPEND GGML_HEADERS_CUDA "ggml-dl.cuh")
 list(APPEND GGML_HEADERS_CUDA "dl-fattn.cuh")
+list(APPEND GGML_HEADERS_CUDA "dl-fattn-golden.cuh")
 
 file(GLOB   GGML_SOURCES_CUDA "../ggml-cuda/*.cu")
 # Add DL-specific sources (in this directory)
 list(APPEND GGML_SOURCES_CUDA "ggml-dl.cu")
 list(APPEND GGML_SOURCES_CUDA "dl-fattn.cu")
+list(APPEND GGML_SOURCES_CUDA "dl-fattn-golden.cu")
 
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-mma*.cu")
 list(APPEND GGML_SOURCES_CUDA ${SRCS})

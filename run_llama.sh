@@ -68,8 +68,9 @@ Options:
   --model-path PATH       Model path (or use environment variable LOCAL_MODEL_PATH)
   --no-auto-install       Disable automatic installation of missing dependencies
   --interactive           Interactive setup
-  --debug-mode            Enable debug mode with verbose output
+  --debug                 Enable full debug mode (Debug build + verbose runtime output)
   --simple-test           Run only backend-ops tests (MUL_MAT and DLFA tests)
+  --simple-model          Run only Qwen2.5 model tests with GGML_DLFA_READY=1
   --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
                           Device check uses standalone script: .dlci/check_device_status.sh
@@ -434,6 +435,7 @@ prepare_loongarch64_test() {
 compile_llama_cpp() {
     local platform="$1"
     local build_dir="$2"
+    local debug="${3:-false}"
 
     log_info "Starting llama.cpp compilation (platform: $platform)"
     local compile_start_time=$(date +%s)
@@ -447,13 +449,22 @@ compile_llama_cpp() {
     # Create build directory
     mkdir -p "$build_dir"
 
+    # Determine build type
+    local build_type="Release"
+    if [ "$debug" = "true" ]; then
+        build_type="Debug"
+        log_info "Compiling in Debug mode (with debug symbols, no optimization)"
+    else
+        log_info "Compiling in Release mode (optimized)"
+    fi
+
     # Build CMake arguments
     local cmake_common_args=(
         -G Ninja
         -B "$build_dir"
         -DGGML_DLCU=ON
         -DCMAKE_VERBOSE_MAKEFILE=ON
-        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE="$build_type"
         -DGGML_BACKEND_DL=ON
         -DGGML_CUDA_GRAPHS=OFF
         -DLLAMA_CURL=OFF
@@ -519,13 +530,14 @@ compile_llama_cpp() {
 run_tests_with_repeat() {
     local platform="$1"
     local build_dir="$2"
-    local debug_mode="$3"
+    local debug="$3"
     local simple_test="$4"
-    local repeat_count="${5:-1}"
+    local simple_model="$5"
+    local repeat_count="${6:-1}"
 
     if [ "$repeat_count" -eq 1 ]; then
         # Single run
-        run_tests "$platform" "$build_dir" "$debug_mode" "$simple_test"
+        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model"
         return $?
     fi
 
@@ -557,7 +569,7 @@ run_tests_with_repeat() {
         # Print progress on same line
         printf "\r${BLUE}[INFO]${NC} Progress: [%d/%d] " "$i" "$repeat_count"
 
-        if run_tests "$platform" "$build_dir" "$debug_mode" "$simple_test" > "$test_output_file" 2>&1; then
+        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" > "$test_output_file" 2>&1; then
             passed_runs=$((passed_runs + 1))
             printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d" "$passed_runs" "$failed_runs"
         else
@@ -646,8 +658,9 @@ run_tests_with_repeat() {
 run_tests() {
     local platform="$1"
     local build_dir="$2"
-    local debug_mode="${3:-false}"
+    local debug="${3:-false}"
     local simple_test="${4:-false}"
+    local simple_model="${5:-false}"
 
     log_info "Starting test execution (platform: $platform)"
     local test_start_time=$(date +%s)
@@ -668,11 +681,11 @@ run_tests() {
     fi
 
     # Apply debug mode settings
-    if [ "$debug_mode" = "true" ]; then
+    if [ "$debug" = "true" ]; then
         export GGML_DEBUG=2
         export GGML_VERBOSE=1
         export CUDA_LAUNCH_BLOCKING=1
-        log_info "Enabled debug mode"
+        log_info "Enabled debug mode (verbose output + synchronous CUDA)"
     fi
 
     export CUDA_VISIBLE_DEVICES=0
@@ -686,6 +699,10 @@ run_tests() {
     if [ "$simple_test" = "true" ]; then
         test_script_args="--simple-test"
         log_info "Simple test mode enabled"
+    fi
+    if [ "$simple_model" = "true" ]; then
+        test_script_args="$test_script_args --simple-model"
+        log_info "Simple model test mode enabled"
     fi
 
     # Check if the comprehensive test script exists
@@ -805,8 +822,9 @@ main() {
     local model_path_arg=""
     local auto_install=true
     local interactive=false
-    local debug_mode=false
+    local debug=false
     local simple_test=false
+    local simple_model=false
     local skip_device_check=false
     local repeat_test=1
 
@@ -841,12 +859,16 @@ main() {
                 interactive=true
                 shift
                 ;;
-            --debug-mode)
-                debug_mode=true
+            --debug)
+                debug=true
                 shift
                 ;;
             --simple-test)
                 simple_test=true
+                shift
+                ;;
+            --simple-model)
+                simple_model=true
                 shift
                 ;;
             --repeat-test)
@@ -924,11 +946,16 @@ main() {
     log_info "SDK path: $sdk_path"
     log_info "Repository path: $REPO_PATH"
     log_info "Model path: $LOCAL_MODEL_PATH"
-    if [ "$debug_mode" = "true" ]; then
-        log_info "Debug mode: enabled"
+    if [ "$debug" = "true" ]; then
+        log_info "Debug mode: ENABLED (Debug build + verbose output)"
+    else
+        log_info "Build type: Release (optimized, use --debug for debugging)"
     fi
     if [ "$simple_test" = "true" ]; then
         log_info "Simple test mode: enabled"
+    fi
+    if [ "$simple_model" = "true" ]; then
+        log_info "Simple model test mode: enabled (Qwen2.5 with GGML_DLFA_READY=1)"
     fi
     if [ "$repeat_test" -gt 1 ]; then
         log_info "Repeat test: $repeat_test times"
@@ -960,7 +987,7 @@ main() {
             setup_sdk "$sdk_path"
             setup_ccache "$platform"
             get_version_info
-            compile_llama_cpp "$platform" "$build_dir"
+            compile_llama_cpp "$platform" "$build_dir" "$debug"
 
             if [ "$action" = "compile" ]; then
                 log_success "Compilation completed"
@@ -979,7 +1006,7 @@ main() {
                     log_warn "Device status check skipped by user request"
                 fi
 
-                run_tests_with_repeat "$platform" "$build_dir" "$debug_mode" "$simple_test" "$repeat_test"
+                run_tests_with_repeat "$platform" "$build_dir" "$debug_mode" "$simple_test" "$simple_model" "$repeat_test"
 
                 if [ "$action" = "test" ]; then
                     log_success "Testing completed"

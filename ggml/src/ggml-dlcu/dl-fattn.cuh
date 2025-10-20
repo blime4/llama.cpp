@@ -46,6 +46,16 @@ void flash_attn_ext_dldnn(
     ggml_tensor* dst);
 
 /**
+ * @brief Precise FAIL-case skip check for FLASH_ATTN_EXT
+ * @param src   Q,K,V,mask tensor array (op->src)
+ * @param op_params  pointer to op->op_params (int32_t array with floats)
+ * @return true if this case should be skipped (known failing), false otherwise
+ */
+bool flash_attn_ext_should_skip(
+    const ggml_tensor * const * src,
+    const int32_t * op_params);
+
+/**
  * @brief Convert tensor data between GGML types on GPU
  * @param src_data Source data pointer (device)
  * @param dst_data Destination data pointer (device)

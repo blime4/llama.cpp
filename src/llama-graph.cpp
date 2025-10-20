@@ -1051,12 +1051,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             v = ggml_transpose(ctx0, v);
         }
 
-        LLAMA_LOG_WARN("[debug] Q, K, V have different types: Q=%s, K=%s, V=%s. Using V's type: %s as common type\n",
-            ggml_type_name(q->type),
-            ggml_type_name(k->type),
-            ggml_type_name(v->type),
-            ggml_type_name(v->type));
-
 #ifndef LLAMA_USE_DLFA // FIXME: nowadays cudnnMHAForward only support qkvo are the same type;
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
         if (k->type == GGML_TYPE_F32) {
@@ -1068,11 +1062,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 #else
         if (q->type != k->type || q->type != v->type) {
-            LLAMA_LOG_WARN("Q, K, V have different types: Q=%s, K=%s, V=%s. Using V's type: %s as common type\n",
-                            ggml_type_name(q->type),
-                            ggml_type_name(k->type),
-                            ggml_type_name(v->type),
-                            ggml_type_name(v->type));
+            // LLAMA_LOG_WARN("Q, K, V have different types: Q=%s, K=%s, V=%s. Using V's type: %s as common type\n",
+            //                 ggml_type_name(q->type),
+            //                 ggml_type_name(k->type),
+            //                 ggml_type_name(v->type),
+            //                 ggml_type_name(v->type));
 
             if (q->type != k->type) {
                 k = ggml_cast(ctx0, k, q->type);

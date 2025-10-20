@@ -56,7 +56,7 @@ if [ -f "${REPO_PATH}/${RELEASE_NAME}" ]; then
     echo "[INFO] Uploading ${RELEASE_NAME} to artifactory..."
     cd "${REPO_PATH}"
     jf rt u "${RELEASE_NAME}" llama.cpp-release/ --flat=true
-    
+
     package_name=$(basename "${RELEASE_NAME}")
     echo ""
     echo "[SUCCESS] Package uploaded successfully!"

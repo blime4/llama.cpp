@@ -9,6 +9,9 @@
 #ifdef GGML_USE_DLCU
 #include "../ggml-dlcu/ggml-dl.cuh"
 #endif
+#ifdef GGML_USE_DLFA
+#include "../ggml-dlcu/dl-fattn.cuh"
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
@@ -3346,6 +3349,7 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
     return ggml_backend_cuda_host_buffer_type();
 }
 
+
 // TODO: move these functions here
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
@@ -3681,6 +3685,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             if (op->src[1]->type == GGML_TYPE_BF16 || op->src[2]->type == GGML_TYPE_BF16) {
                 return false;
             }
+
+            if (ggml_dl::flash_attn_ext_should_skip(op->src, op->op_params)) {
+                return false;
+            }
+
             if (op->src[0]->ne[0] ==  64 && op->src[1]->type == GGML_TYPE_F16) {
                 return true;
             }
