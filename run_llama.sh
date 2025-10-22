@@ -21,21 +21,42 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Logging functions
+# Global log file
+MAIN_LOG_FILE=""
+
+# Initialize logging
+init_logging() {
+    MAIN_LOG_FILE="${REPO_PATH}/run_llama_$(date +%Y%m%d_%H%M%S).log"
+    echo "=== llama.cpp Build and Test Log ===" > "$MAIN_LOG_FILE"
+    echo "Start Time: $(date)" >> "$MAIN_LOG_FILE"
+    echo "Platform: ${platform:-auto-detect}" >> "$MAIN_LOG_FILE"
+    echo "SDK Path: ${sdk_path:-not set}" >> "$MAIN_LOG_FILE"
+    echo "========================================" >> "$MAIN_LOG_FILE"
+}
+
+# Unified logging functions
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    local msg="[INFO] $1"
+    echo -e "${BLUE}${msg}${NC}"
+    [ -n "$MAIN_LOG_FILE" ] && echo "$msg" >> "$MAIN_LOG_FILE"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    local msg="[ERROR] $1"
+    echo -e "${RED}${msg}${NC}"
+    [ -n "$MAIN_LOG_FILE" ] && echo "$msg" >> "$MAIN_LOG_FILE"
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    local msg="[SUCCESS] $1"
+    echo -e "${GREEN}${msg}${NC}"
+    [ -n "$MAIN_LOG_FILE" ] && echo "$msg" >> "$MAIN_LOG_FILE"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    local msg="[WARN] $1"
+    echo -e "${YELLOW}${msg}${NC}"
+    [ -n "$MAIN_LOG_FILE" ] && echo "$msg" >> "$MAIN_LOG_FILE"
 }
 
 # Display banner
@@ -71,9 +92,15 @@ Options:
   --debug                 Enable full debug mode (Debug build + verbose runtime output)
   --simple-test           Run only backend-ops tests (MUL_MAT and DLFA tests)
   --simple-model          Run only Qwen2.5 model tests with GGML_DLFA_READY=1
+  --simple-tp             Run tensor parallel tests with split-mode variations
+  --simple-perf           Run performance comparison tests (Pool vs Legacy modes)
+  --big                   Use big model for testing (e.g., Qwen3-30B instead of Qwen2.5-1.5B)
   --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
                           Device check uses standalone script: .dlci/check_device_status.sh
+  --dlpti "OPTIONS"       Enable dlPTI profiling with specified options
+                          Example: --dlpti "--activity-mask cmd,cu,curt --data-file profile.db"
+                          See dlpti_tools capture --help for available options
   --help, -h              Show help information
 
 Action descriptions:
@@ -98,6 +125,12 @@ Examples:
 
   # Interactive setup
   $0 --interactive
+
+  # Enable dlPTI profiling with simple model test
+  $0 --simple-model --dlpti "--activity-mask cmd,cu,curt --data-file llama_profile.db"
+
+  # Enable dlPTI profiling with big model and TP test
+  $0 --simple-tp --big --dlpti "--activity-mask cmd,cu,curt,nne --data-file tp_profile_{datetime}.db"
 
 Quick start:
   export sdk_path="/path/to/your/sdk"
@@ -375,8 +408,6 @@ setup_ccache() {
     ccache --set-config max_size=20G
     ccache --zero-stats
 
-    export CCACHE_LOGFILE="/LocalRun/$(whoami)/cache/ccache.log"
-
     # Create custom bin directory for ccache wrappers
     local custom_bin_dir="$sdk_path/custom_bin"
     mkdir -p "$custom_bin_dir"
@@ -408,6 +439,220 @@ get_version_info() {
     fi
 
     log_info "Build version: $LLAMA_CPP_BUILD_VERSION"
+}
+
+# Check dlPTI tools availability
+check_dlpti_tools() {
+    log_info "Checking dlPTI tools availability..."
+
+    # Ensure SDK bin directory is in PATH and lib directory is in LD_LIBRARY_PATH
+    if [ -n "$sdk_path" ]; then
+        if [ -d "$sdk_path/bin" ]; then
+            export PATH="$sdk_path/bin:$PATH"
+            log_info "Added SDK bin directory to PATH: $sdk_path/bin"
+        fi
+
+        if [ -d "$sdk_path/lib" ]; then
+            export LD_LIBRARY_PATH="$sdk_path/lib:${LD_LIBRARY_PATH:-}"
+            log_info "Ensured SDK lib directory in LD_LIBRARY_PATH: $sdk_path/lib"
+        fi
+    fi
+
+    if ! command -v dlpti_tools >/dev/null 2>&1; then
+        log_error "dlpti_tools not found in PATH"
+        log_error "Expected location: $sdk_path/bin/dlpti_tools"
+        log_error "Please ensure dlPTI SDK is properly installed and sourced"
+        log_error "Typical setup: source /path/to/dlpti/sdk/env.sh"
+        return 1
+    fi
+
+    # Test dlpti_tools basic functionality
+    # Note: dlpti_tools --help returns exit code 255, so we check if it produces expected output
+    local help_output=$(dlpti_tools --help 2>&1)
+    if [[ ! "$help_output" =~ "dlpti_tools - A comprehensive tool" ]]; then
+        log_error "dlpti_tools command failed or produced unexpected output"
+        log_error "Output: $help_output"
+        return 1
+    fi
+
+    log_success "dlPTI tools check passed"
+    log_info "dlpti_tools location: $(which dlpti_tools)"
+    return 0
+}
+
+# Setup dlPTI environment and validate options
+setup_dlpti_environment() {
+    local dlpti_options="$1"
+
+    log_info "Setting up dlPTI environment..."
+
+    # Validate dlPTI options format
+    if [[ "$dlpti_options" =~ --data-file ]]; then
+        log_info "Custom data file specified in dlPTI options"
+    else
+        log_info "No custom data file specified, dlpti_tools will use default naming"
+    fi
+
+    # Set dlPTI environment variables for better performance and compatibility
+    export DLPTI_AUTO_LOAD=1
+
+    # Ensure library paths are properly set for dlPTI
+    if [ -n "$sdk_path" ] && [ -d "$sdk_path/lib" ]; then
+        export LD_LIBRARY_PATH="$sdk_path/lib:${LD_LIBRARY_PATH:-}"
+        log_info "Reinforced LD_LIBRARY_PATH with SDK lib: $sdk_path/lib"
+    fi
+
+    # Check for LD_PRELOAD conflicts and provide warnings
+    if [ -n "$LD_PRELOAD" ]; then
+        log_info "LD_PRELOAD detected: $LD_PRELOAD"
+        if [[ "$LD_PRELOAD" =~ libdlpti_injection\.so ]]; then
+            log_warn "dlPTI injection library detected in LD_PRELOAD"
+            log_warn "This may cause issues with system commands (rm, ls, etc.)"
+            log_info "Using safe command wrappers to avoid conflicts"
+        fi
+    fi
+
+    # Check device permissions and setup
+    log_info "Checking dlPTI device access..."
+
+    # Ensure we have access to DL devices
+    if [ -d "/dev/dl" ]; then
+        local dl_devices=$(ls /dev/dl* 2>/dev/null | wc -l)
+        log_info "Found $dl_devices DL device(s)"
+
+        # Check device permissions
+        if ! ls -la /dev/dl* >/dev/null 2>&1; then
+            log_warn "Cannot access DL devices, dlPTI may fail"
+            log_warn "Consider running with appropriate permissions or check device status"
+        fi
+    else
+        log_warn "No DL devices found in /dev/, dlPTI capture may not work properly"
+    fi
+
+    # Test basic dlpti_tools functionality with a simple command
+    log_info "Testing dlPTI capture functionality..."
+
+    # First, test if dlpti_tools can run without library issues
+    local basic_test_output=$(dlpti_tools --help 2>&1)
+    if [[ ! "$basic_test_output" =~ "dlpti_tools - A comprehensive tool" ]]; then
+        log_warn "dlpti_tools basic test failed"
+        log_warn "Output: $basic_test_output"
+
+        # Run troubleshooting if basic test failed
+        echo ""
+        dlpti_troubleshoot
+        echo ""
+
+        return 1  # Indicate setup failure
+    fi
+
+    # Test capture functionality with a very simple command
+    local test_output=$(timeout 10 dlpti_tools capture --activity-mask cmd --data-file /tmp/dlpti_test_$$.db -- /bin/true 2>&1)
+    local test_ret=$?
+
+    if [ $test_ret -eq 0 ]; then
+        log_success "dlPTI capture test successful"
+        # Use safe_rm to avoid dlpti injection issues
+        safe_rm -f "/tmp/dlpti_test_$$.db" 2>/dev/null
+    else
+        log_warn "dlPTI capture test failed (exit code: $test_ret)"
+        log_warn "Test output: $test_output"
+
+        # Check if it's a library loading issue
+        if [[ "$test_output" =~ "libdlpti.so" ]] || [[ "$test_output" =~ "cannot open shared object file" ]]; then
+            log_error "dlPTI library loading issue detected"
+
+            # Run troubleshooting for library issues
+            echo ""
+            dlpti_troubleshoot
+            echo ""
+
+            return 1  # Indicate setup failure
+        else
+            log_warn "dlPTI profiling may not work correctly, but continuing..."
+            log_warn "This might be due to device access issues rather than library problems"
+        fi
+    fi
+
+    log_success "dlPTI environment setup completed"
+    return 0
+}
+
+# Safe command wrapper for commands that might conflict with dlPTI injection
+safe_exec() {
+    # Execute command without LD_PRELOAD to avoid dlpti injection issues
+    # Use bash builtin to avoid LD_PRELOAD affecting env command itself
+    local old_preload="$LD_PRELOAD"
+    unset LD_PRELOAD
+    "$@"
+    local ret=$?
+    if [ -n "$old_preload" ]; then
+        export LD_PRELOAD="$old_preload"
+    fi
+    return $ret
+}
+
+# dlPTI troubleshooting and diagnostics
+dlpti_troubleshoot() {
+    log_info "=== dlPTI Troubleshooting ==="
+
+    # Check basic environment
+    log_info "1. Environment Check:"
+    log_info "   SDK path: ${sdk_path:-NOT SET}"
+    log_info "   dlpti_tools: $(which dlpti_tools 2>/dev/null || echo "NOT FOUND")"
+    log_info "   DLPTI_AUTO_LOAD: ${DLPTI_AUTO_LOAD:-NOT SET}"
+    log_info "   LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-NOT SET}"
+    log_info "   LD_PRELOAD: ${LD_PRELOAD:-NOT SET}"
+
+    # Check library files
+    log_info "2. Library Check:"
+    if [ -n "$sdk_path" ]; then
+        local libdlpti="$sdk_path/lib/libdlpti.so"
+        local libdlpti_injection="$sdk_path/lib/libdlpti_injection.so"
+
+        log_info "   libdlpti.so: $([ -f "$libdlpti" ] && echo "EXISTS" || echo "MISSING")"
+        log_info "   libdlpti_injection.so: $([ -f "$libdlpti_injection" ] && echo "EXISTS" || echo "MISSING")"
+
+        if [ -f "$libdlpti" ]; then
+            log_info "   libdlpti.so size: $(stat -c%s "$libdlpti" 2>/dev/null || echo "UNKNOWN") bytes"
+        fi
+    fi
+
+    # Check device access
+    log_info "3. Device Access Check:"
+    if [ -d "/dev" ]; then
+        local dl_devices=$(ls /dev/dl* 2>/dev/null || echo "")
+        if [ -n "$dl_devices" ]; then
+            log_info "   DL devices found:"
+            ls -la /dev/dl* 2>/dev/null | while read -r line; do
+                log_info "     $line"
+            done
+        else
+            log_warn "   No DL devices found in /dev/"
+        fi
+    fi
+
+    # Check permissions
+    log_info "4. Permission Check:"
+    log_info "   Current user: $(whoami)"
+    log_info "   User groups: $(groups)"
+
+    # Suggest solutions
+    log_info "5. Common Solutions:"
+    log_info "   - Ensure DL devices are available and accessible"
+    log_info "   - Check if running with appropriate permissions"
+    log_info "   - Verify SDK environment is properly sourced"
+    log_info "   - Try running device check: .dlci/check_device_status.sh"
+    log_info "   - For permission issues, consider: sudo usermod -a -G dl \$(whoami)"
+
+    # Check for LD_PRELOAD conflicts
+    if [ -n "$LD_PRELOAD" ] && [[ "$LD_PRELOAD" =~ libdlpti_injection\.so ]]; then
+        log_info "6. LD_PRELOAD Conflict Solutions:"
+        log_info "   - LD_PRELOAD injection may cause system command failures"
+        log_info "   - Use 'env -u LD_PRELOAD command' for problematic commands"
+        log_info "   - Consider temporarily disabling LD_PRELOAD if issues persist"
+        log_info "   - Example: env -u LD_PRELOAD rm /tmp/file"
+    fi
 }
 
 # Check device card status and handle failures
@@ -605,28 +850,22 @@ run_tests_with_repeat() {
     local simple_test="$4"
     local simple_model="$5"
     local repeat_count="${6:-1}"
+    local enable_dlpti="${7:-false}"
+    local dlpti_options="${8:-}"
 
     if [ "$repeat_count" -eq 1 ]; then
         # Single run
-        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model"
+        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options"
         return $?
     fi
 
     # Multiple runs with statistics
     log_info "Running tests $repeat_count times with statistics collection..."
-    log_info "Progress will be displayed below, detailed logs are saved to files"
     echo ""
 
     local total_runs=0
     local failed_runs=0
     local passed_runs=0
-    local failed_details_file="/tmp/test_repeat_failures_$(date +%Y%m%d_%H%M%S).log"
-    local all_logs_file="/tmp/test_repeat_all_logs_$(date +%Y%m%d_%H%M%S).log"
-
-    echo "=== Test Repeat Statistics ===" > "$failed_details_file"
-    echo "Start Time: $(date)" >> "$failed_details_file"
-    echo "Repeat Count: $repeat_count" >> "$failed_details_file"
-    echo "" >> "$failed_details_file"
 
     # Progress bar display
     local start_time=$(date +%s)
@@ -634,34 +873,19 @@ run_tests_with_repeat() {
     for i in $(seq 1 $repeat_count); do
         total_runs=$((total_runs + 1))
 
-        # Run test and capture output (redirect to log file)
-        local test_output_file="/tmp/test_run_${i}_$(date +%Y%m%d_%H%M%S).log"
-
         # Print progress on same line
         printf "\r${BLUE}[INFO]${NC} Progress: [%d/%d] " "$i" "$repeat_count"
 
-        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" > "$test_output_file" 2>&1; then
+        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" >/dev/null 2>&1; then
             passed_runs=$((passed_runs + 1))
             printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d" "$passed_runs" "$failed_runs"
         else
             failed_runs=$((failed_runs + 1))
             printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d ${RED}[FAILED at iteration %d]${NC}" "$passed_runs" "$failed_runs" "$i"
 
-            # Record failure details
-            echo "" >> "$failed_details_file"
-            echo "=== Failure #$failed_runs (Iteration $i) ===" >> "$failed_details_file"
-            echo "Time: $(date)" >> "$failed_details_file"
-
-            # Extract NMSE errors from log
-            grep -E "(NMSE|FAIL|ERROR)" "$test_output_file" >> "$failed_details_file" 2>/dev/null || true
-            echo "" >> "$failed_details_file"
+            # Log failure to main log
+            log_error "Test iteration $i failed"
         fi
-
-        # Append to all logs
-        cat "$test_output_file" >> "$all_logs_file"
-
-        # Clean up individual test log to save space
-        rm -f "$test_output_file"
 
         # Brief pause between runs
         if [ $i -lt $repeat_count ]; then
@@ -702,19 +926,11 @@ run_tests_with_repeat() {
     log_info "Pass Rate:    ${pass_rate}%"
     log_info "Total Time:   $elapsed_str"
     log_info "=========================================="
-    log_info ""
-    log_info "Log files:"
-    log_info "  All logs:       $all_logs_file"
 
     if [ $failed_runs -gt 0 ]; then
-        log_info "  Failure details: $failed_details_file"
-        log_warn ""
-        log_warn "Summary of failures:"
-        echo ""
-        tail -n 50 "$failed_details_file"
+        log_warn "Some test iterations failed - check main log for details"
     else
         log_success "All test iterations passed!"
-        rm -f "$failed_details_file"
     fi
 
     # Return failure if any run failed
@@ -732,6 +948,8 @@ run_tests() {
     local debug="${3:-false}"
     local simple_test="${4:-false}"
     local simple_model="${5:-false}"
+    local enable_dlpti="${6:-false}"
+    local dlpti_options="${7:-}"
 
     log_info "Starting test execution (platform: $platform)"
     local test_start_time=$(date +%s)
@@ -812,6 +1030,18 @@ run_tests() {
         test_script_args="$test_script_args --simple-model"
         log_info "Simple model test mode enabled"
     fi
+    if [ "$simple_tp" = "true" ]; then
+        test_script_args="$test_script_args --simple-tp"
+        log_info "Simple TP test mode enabled"
+    fi
+    if [ "$simple_perf" = "true" ]; then
+        test_script_args="$test_script_args --simple-perf"
+        log_info "Simple performance test mode enabled"
+    fi
+    if [ "$big_model" = "true" ]; then
+        test_script_args="$test_script_args --big"
+        log_info "Big model mode enabled"
+    fi
 
     # Check if the comprehensive test script exists
     local test_script="${REPO_PATH}/.dlci/test_llama_cpp.sh"
@@ -829,16 +1059,78 @@ run_tests() {
 
     log_info "Running test suite using: $test_script"
 
+    # dlPTI integration
+    local dlpti_prefix=""
+    local dlpti_data_file=""
+    local dlpti_working=false
+
+    if [ "$enable_dlpti" = "true" ]; then
+        log_info "dlPTI profiling enabled, setting up capture environment..."
+
+        # Check dlPTI tools availability
+        if ! check_dlpti_tools; then
+            log_error "dlPTI tools check failed, disabling profiling"
+            enable_dlpti=false
+        else
+            if setup_dlpti_environment "$dlpti_options"; then
+                dlpti_working=true
+
+                # Build dlpti_tools capture command prefix
+                dlpti_prefix="dlpti_tools capture $dlpti_options --"
+
+                # Extract data file name for reporting (if specified)
+                if [[ "$dlpti_options" =~ --data-file[[:space:]]+([^[:space:]]+) ]]; then
+                    dlpti_data_file="${BASH_REMATCH[1]}"
+                else
+                    dlpti_data_file="capture-$(date +%Y%m%d%H%M%S).db"
+                fi
+
+                log_info "dlPTI capture command: $dlpti_prefix"
+                log_info "dlPTI data file: $dlpti_data_file"
+            else
+                log_warn "dlPTI environment setup failed, but continuing with profiling attempt..."
+                dlpti_working=false
+
+                # Still try to set up the command, but with warnings
+                dlpti_prefix="dlpti_tools capture $dlpti_options --"
+                if [[ "$dlpti_options" =~ --data-file[[:space:]]+([^[:space:]]+) ]]; then
+                    dlpti_data_file="${BASH_REMATCH[1]}"
+                else
+                    dlpti_data_file="capture-$(date +%Y%m%d%H%M%S).db"
+                fi
+
+                log_warn "dlPTI may not work correctly due to setup issues"
+            fi
+        fi
+    fi
+
     # Run the comprehensive test script
     local ret=0
     local start_time=$(date +%s)
+
+    # Use main log file for all output
 
     if [ "$platform" = "loongarch64" ]; then
         # LoongArch64 specific handling with timeout monitoring
         log_info "Running comprehensive test suite with LoongArch64 timeout monitoring..."
 
-        # Run the test script in background
-        bash "$test_script" $test_script_args &
+        if [ "$verbose" = "true" ]; then
+            log_info "Verbose mode: Real-time output enabled"
+            if [ "$enable_dlpti" = "true" ]; then
+                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
+                $dlpti_prefix bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE" &
+            else
+                bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE" &
+            fi
+        else
+            log_info "Output will be saved to main log file"
+            if [ "$enable_dlpti" = "true" ]; then
+                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
+                $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
+            else
+                bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
+            fi
+        fi
         local test_pid=$!
 
         # Monitor for timeout with periodic status
@@ -873,8 +1165,28 @@ run_tests() {
     else
         # Normal execution for other platforms
         log_info "Executing comprehensive test suite..."
-        bash "$test_script" $test_script_args
-        ret=$?
+
+        if [ "$verbose" = "true" ]; then
+            log_info "Verbose mode: Real-time output enabled"
+            if [ "$enable_dlpti" = "true" ]; then
+                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
+                $dlpti_prefix bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE"
+                ret=${PIPESTATUS[0]}
+            else
+                bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE"
+                ret=${PIPESTATUS[0]}
+            fi
+        else
+            log_info "Output will be saved to main log file"
+            if [ "$enable_dlpti" = "true" ]; then
+                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
+                $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
+                ret=$?
+            else
+                bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
+                ret=$?
+            fi
+        fi
     fi
 
     local end_time=$(date +%s)
@@ -906,9 +1218,75 @@ run_tests() {
     if [ $ret -eq 0 ]; then
         log_success "$test_mode_name completed successfully!"
         log_success "Total execution time: $duration_str"
+        log_info "Full test log saved to: $MAIN_LOG_FILE"
+
+        # Report dlPTI data file if profiling was enabled
+        if [ "$enable_dlpti" = "true" ] && [ -n "$dlpti_data_file" ]; then
+            echo ""
+            log_info "=== dlPTI Profiling Results ==="
+
+            if [ -f "$dlpti_data_file" ]; then
+                local file_size=$(stat -c%s "$dlpti_data_file" 2>/dev/null || echo "0")
+                if [ "$file_size" -gt 1024 ]; then
+                    local dlpti_abs_path=$(realpath "$dlpti_data_file")
+                    log_success "dlPTI profile data saved to: $dlpti_abs_path"
+                    log_success "Profile data size: $(du -h "$dlpti_data_file" | cut -f1)"
+                    echo ""
+                    log_info "Analysis options:"
+                    log_info "  1. GUI Analysis: dlsys-ui $dlpti_abs_path"
+                    log_info "  2. Export to Perfetto: dlpti_tools export --format perfetto-json $dlpti_abs_path"
+                    log_info "  3. Range-based export: dlpti_tools export --export-range 10%:90% --format perfetto-json $dlpti_abs_path"
+                else
+                    local dlpti_abs_path=$(realpath "$dlpti_data_file")
+                    log_warn "dlPTI data file exists but is very small ($file_size bytes): $dlpti_abs_path"
+                    log_warn "This may indicate a capture failure or very short execution time"
+                fi
+            else
+                local dlpti_abs_path=$(realpath "$dlpti_data_file" 2>/dev/null || echo "$dlpti_data_file")
+                log_warn "dlPTI data file not found: $dlpti_abs_path"
+                log_info "Checking for alternative dlPTI output files..."
+
+                # Look for any capture files in current directory
+                local capture_files=$(ls capture-*.db 2>/dev/null | head -5)
+                if [ -n "$capture_files" ]; then
+                    log_info "Found alternative capture files:"
+                    for file in $capture_files; do
+                        local size=$(du -h "$file" | cut -f1)
+                        local file_abs_path=$(realpath "$file")
+                        log_info "  - $file_abs_path ($size)"
+                    done
+                else
+                    log_warn "No dlPTI capture files found in current directory"
+                    log_info "This may indicate:"
+                    log_info "  - dlPTI capture failed due to device access issues"
+                    log_info "  - Insufficient permissions to access DL devices"
+                    log_info "  - Target application executed too quickly"
+                fi
+            fi
+
+            # Check for dlPTI error messages in main log
+            if [ -f "$MAIN_LOG_FILE" ]; then
+                local dlpti_errors=$(grep -i "dlpti.*error\|capture failed" "$MAIN_LOG_FILE" 2>/dev/null || true)
+                if [ -n "$dlpti_errors" ]; then
+                    log_warn "dlPTI errors detected in log:"
+                    echo "$dlpti_errors" | while read -r line; do
+                        log_warn "  $line"
+                    done
+                fi
+            fi
+        fi
         return 0
     elif [ $ret -eq 124 ]; then
         log_error "$test_mode_name timed out after $duration_str"
+        log_error "Test log file: $MAIN_LOG_FILE"
+
+        # Show log content on timeout (always show for timeout errors)
+        if [ -f "$MAIN_LOG_FILE" ]; then
+            log_error "=== Last 50 lines of test output ==="
+            tail -n 50 "$MAIN_LOG_FILE"
+            log_error "=== End of test output ==="
+        fi
+
         if [ "$simple_test" != "true" ]; then
             log_error "Consider running with --simple-test for faster execution"
         fi
@@ -916,7 +1294,17 @@ run_tests() {
     else
         log_error "$test_mode_name failed (exit code: $ret)"
         log_error "Execution time: $duration_str"
-        log_error "Check the detailed logs in the test script output above"
+        log_error "Test log file: $MAIN_LOG_FILE"
+
+        # Show log content on error (always show for failed tests)
+        if [ -f "$MAIN_LOG_FILE" ] && [ "$verbose" != "true" ]; then
+            log_error "=== Last 50 lines of test output ==="
+            tail -n 50 "$MAIN_LOG_FILE"
+            log_error "=== End of test output ==="
+        elif [ "$verbose" = "true" ]; then
+            log_error "Error details already shown above in verbose mode"
+        fi
+
         return 1
     fi
 }
@@ -933,8 +1321,13 @@ main() {
     local debug=false
     local simple_test=false
     local simple_model=false
+    local simple_tp=false
+    local simple_perf=false
+    local big_model=false
     local skip_device_check=false
     local repeat_test=1
+    local enable_dlpti=false
+    local dlpti_options=""
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -979,6 +1372,18 @@ main() {
                 simple_model=true
                 shift
                 ;;
+            --simple-tp)
+                simple_tp=true
+                shift
+                ;;
+            --simple-perf)
+                simple_perf=true
+                shift
+                ;;
+            --big)
+                big_model=true
+                shift
+                ;;
             --repeat-test)
                 repeat_test="$2"
                 shift 2
@@ -986,6 +1391,11 @@ main() {
             --skip-device-check)
                 skip_device_check=true
                 shift
+                ;;
+            --dlpti)
+                enable_dlpti=true
+                dlpti_options="$2"
+                shift 2
                 ;;
             --help|-h)
                 show_usage
@@ -1001,6 +1411,18 @@ main() {
 
     # Display banner
     show_banner
+
+    # Set default repository path for logging
+    if [ -z "$REPO_PATH" ]; then
+        export REPO_PATH="$(pwd)"
+    fi
+
+    # Ensure log directory exists
+    mkdir -p "$REPO_PATH"
+
+    # Initialize logging
+    init_logging
+    log_info "Script started with arguments: $*"
 
     # Interactive setup
     if [ "$interactive" = "true" ]; then
@@ -1071,6 +1493,10 @@ main() {
     if [ "$skip_device_check" = "true" ]; then
         log_warn "Device check: disabled (--skip-device-check)"
     fi
+    if [ "$enable_dlpti" = "true" ]; then
+        log_info "dlPTI profiling: ENABLED"
+        log_info "dlPTI options: $dlpti_options"
+    fi
     echo ""
 
     # Configure platform parameters
@@ -1114,7 +1540,7 @@ main() {
                     log_warn "Device status check skipped by user request"
                 fi
 
-                run_tests_with_repeat "$platform" "$build_dir" "$debug_mode" "$simple_test" "$simple_model" "$repeat_test"
+                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$repeat_test" "$enable_dlpti" "$dlpti_options"
 
                 if [ "$action" = "test" ]; then
                     log_success "Testing completed"
@@ -1130,6 +1556,10 @@ main() {
 
     log_success "All steps completed! Platform: $platform"
     echo "Build artifacts: $build_dir/bin/"
+
+    # Log completion
+    log_info "Script completed successfully"
+    log_info "Complete log saved to: $MAIN_LOG_FILE"
 }
 
 # Script entry point

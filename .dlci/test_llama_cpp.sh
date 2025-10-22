@@ -12,11 +12,19 @@
 
 set -e
 
+# Load shared utility helpers (includes safe_rm)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/utils.sh"
+
 # Parse command line arguments
 CI_TEST_MODE=false
 BINARY_PATH=""
 SIMPLE_TEST=false
 SIMPLE_MODEL=false
+SIMPLE_PERF=false
+SIMPLE_TP=false
+BIG_MODEL=false
+VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -36,13 +44,33 @@ while [[ $# -gt 0 ]]; do
             SIMPLE_MODEL=true
             shift
             ;;
+        --simple-perf)
+            SIMPLE_PERF=true
+            shift
+            ;;
+        --simple-tp)
+            SIMPLE_TP=true
+            shift
+            ;;
+        --big)
+            BIG_MODEL=true
+            shift
+            ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
         *)
             echo "[ERROR] Unknown parameter: $1"
-            echo "Usage: $0 [--ci-test] [--binary-path <path>] [--simple-test] [--simple-model]"
+            echo "Usage: $0 [--ci-test] [--binary-path <path>] [--simple-test] [--simple-model] [--simple-perf] [--simple-tp] [--big] [--verbose]"
             echo "  --ci-test: Enable CI test mode using external binaries"
             echo "  --binary-path: Path to the release directory containing binaries"
             echo "  --simple-test: Run only backend-ops tests (MUL_MAT and DLFA)"
             echo "  --simple-model: Run only Qwen2.5 model tests with GGML_DLFA_READY=1"
+            echo "  --simple-perf: Run model performance stress tests comparing Pool vs Legacy modes"
+            echo "  --simple-tp: Run Tensor Parallel tests with split-mode (row/layer/none)"
+            echo "  --big: Use large model for TP tests (Qwen3-30B instead of Qwen2.5-1.5B)"
+            echo "  --verbose: Enable verbose output (show detailed logs in real-time)"
             exit 1
             ;;
     esac
@@ -98,7 +126,16 @@ fi
 # ---------- ci/cd ----------
 echo "[INFO] Setting up environment..." | tee -a "$summary_log"
 env >> "$test_log" 2>&1
-source ${sdk_path}/env.sh >> "$test_log" 2>&1
+# env.sh invokes rm before it resets LD_LIBRARY_PATH, so dlPTI's injector must be disabled temporarily.
+if [ -n "$LD_PRELOAD" ]; then
+    saved_ld_preload="$LD_PRELOAD"
+    unset LD_PRELOAD
+    source "${sdk_path}/env.sh" >> "$test_log" 2>&1
+    export LD_PRELOAD="$saved_ld_preload"
+    unset saved_ld_preload
+else
+    source "${sdk_path}/env.sh" >> "$test_log" 2>&1
+fi
 env >> "$test_log" 2>&1
 
 # Configure ccache
@@ -278,7 +315,7 @@ if [ "$SIMPLE_TEST" = true ]; then
             fi
 
             # Clean up temp file
-            rm -f "$temp_output"
+            safe_rm -f "$temp_output"
         fi
 
         # Determine test result status:
@@ -520,7 +557,7 @@ if [ "$SIMPLE_MODEL" = true ]; then
         fi
 
         # Clean up temp file
-        rm -f "$temp_output"
+        safe_rm -f "$temp_output"
     done
 
     # Summary
@@ -548,7 +585,388 @@ if [ "$SIMPLE_MODEL" = true ]; then
         exit 1
     else
         echo "" | tee -a "$summary_log"
-        echo "[LLAMA_CPP_PASS] All Qwen2.5 model tests passed with GGML_DLFA_READY=1!" | tee -a "$summary_log"
+        echo "[LLAMA_CPP_PASS] All Qwen2.5 model tests passed with Flash Attention + Pool/Legacy Mode comparison!" | tee -a "$summary_log"
+    fi
+
+    exit 0
+fi
+
+# Performance test mode - Model stress testing comparing Pool vs Legacy modes
+if [ "$SIMPLE_PERF" = true ]; then
+    echo "[INFO] ============================================================" | tee -a "$summary_log"
+    echo "[INFO] Performance Test Mode - Pool vs Legacy Mode Stress Testing" | tee -a "$summary_log"
+    echo "[INFO] ============================================================" | tee -a "$summary_log"
+    echo "[INFO] Target Models: Qwen2.5-1.5B (fp16)" | tee -a "$summary_log"
+    echo "[INFO] Test Type: Stress testing with multiple iterations" | tee -a "$summary_log"
+    echo "[INFO] Comparison: 🔄 Pool Mode vs 🔧 Legacy Mode performance" | tee -a "$summary_log"
+    echo "[INFO] ============================================================" | tee -a "$summary_log"
+
+    # Initialize counters
+    fail_count=0
+    pass_count=0
+    fail_list=()
+
+    # Define test model
+    model_base_path="${LOCAL_MODEL_PATH}"
+    performance_model="Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+    model_path="${model_base_path}/${performance_model}"
+
+    # Check if model exists
+    if [ ! -f "$model_path" ]; then
+        echo "[ERROR] Performance test model not found: $model_path" | tee -a "$summary_log"
+        echo "[INFO] Please ensure the Qwen2.5-1.5B model is available for performance testing" | tee -a "$summary_log"
+        exit 1
+    fi
+
+    echo "[INFO] Performance test model: $performance_model" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+
+    # Performance test configuration
+    PERF_ITERATIONS=5
+    PERF_TOKENS=100
+    PERF_PROMPT="Write a detailed explanation of artificial intelligence and machine learning, including their applications in modern technology and their potential impact on society."
+
+    # Test both modes
+    declare -A mode_times
+    declare -A mode_results
+
+    for mode in "POOL" "LEGACY"; do
+        if [ "$mode" = "POOL" ]; then
+            mode_env="GGML_GPTQ_USE_POOL=1"
+            mode_icon="🔄"
+            mode_desc="Pool Mode"
+        else
+            mode_env="GGML_GPTQ_USE_POOL=0"
+            mode_icon="🔧"
+            mode_desc="Legacy Mode"
+        fi
+
+        echo "[INFO] ========================================" | tee -a "$summary_log"
+        echo "[INFO] Performance Testing: $mode_icon $mode_desc" | tee -a "$summary_log"
+        echo "[INFO] Iterations: $PERF_ITERATIONS, Tokens: $PERF_TOKENS" | tee -a "$summary_log"
+        echo "[INFO] ========================================" | tee -a "$summary_log"
+
+        mode_total_time=0
+        mode_success_count=0
+        mode_fail_count=0
+
+        for i in $(seq 1 $PERF_ITERATIONS); do
+            echo "[INFO] $mode_icon $mode_desc - Iteration $i/$PERF_ITERATIONS" | tee -a "$summary_log"
+
+            start_time=$(date +%s.%N)
+            set +e
+
+            # Run performance test
+            temp_output=$(mktemp)
+            env $mode_env ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n $PERF_TOKENS --temp 0.7 --top-k 40 --top-p 0.9 -s $i -p "$PERF_PROMPT" > "$temp_output" 2>&1
+            ret=$?
+
+            end_time=$(date +%s.%N)
+            duration=$(echo "$end_time - $start_time" | bc -l)
+
+            # Show output in verbose mode
+            if [ "$VERBOSE" = "true" ]; then
+                echo "[INFO] Performance test output (VERBOSE):" | tee -a "$test_log"
+                cat "$temp_output" | tee -a "$test_log"
+                echo "-----------------------------" | tee -a "$test_log"
+            fi
+
+            set -e
+
+            if [ $ret -eq 0 ]; then
+                mode_success_count=$((mode_success_count + 1))
+                mode_total_time=$(echo "$mode_total_time + $duration" | bc -l)
+                echo "[PASS] $mode_icon Iteration $i: ${duration}s" | tee -a "$summary_log"
+            else
+                mode_fail_count=$((mode_fail_count + 1))
+                echo "[FAIL] $mode_icon Iteration $i: Exit code $ret" | tee -a "$summary_log"
+                fail_count=$((fail_count + 1))
+                fail_list+=("$mode_desc - Iteration $i (exit code $ret)")
+            fi
+
+            safe_rm -f "$temp_output"
+        done
+
+        # Calculate statistics for this mode
+        if [ $mode_success_count -gt 0 ]; then
+            mode_avg_time=$(echo "scale=3; $mode_total_time / $mode_success_count" | bc -l)
+            mode_times[$mode]=$mode_avg_time
+            mode_results[$mode]="$mode_success_count/$PERF_ITERATIONS successful"
+            echo "[INFO] $mode_icon $mode_desc Results: $mode_success_count/$PERF_ITERATIONS successful, Avg time: ${mode_avg_time}s" | tee -a "$summary_log"
+        else
+            mode_times[$mode]="N/A"
+            mode_results[$mode]="0/$PERF_ITERATIONS successful"
+            echo "[FAIL] $mode_icon $mode_desc Results: All iterations failed" | tee -a "$summary_log"
+        fi
+
+        echo "" | tee -a "$summary_log"
+    done
+
+    # Performance comparison summary
+    test_end_time=$(date +%s)
+    test_duration=$((test_end_time - test_start_time))
+
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Performance Test Summary" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Model: $performance_model" | tee -a "$summary_log"
+    echo "[INFO] Test Configuration: $PERF_ITERATIONS iterations, $PERF_TOKENS tokens each" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+    echo "[INFO] 🔄 Pool Mode Results: ${mode_results[POOL]}" | tee -a "$summary_log"
+    echo "[INFO] 🔄 Pool Mode Avg Time: ${mode_times[POOL]}s" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+    echo "[INFO] 🔧 Legacy Mode Results: ${mode_results[LEGACY]}" | tee -a "$summary_log"
+    echo "[INFO] 🔧 Legacy Mode Avg Time: ${mode_times[LEGACY]}s" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+
+    # Performance comparison
+    if [ "${mode_times[POOL]}" != "N/A" ] && [ "${mode_times[LEGACY]}" != "N/A" ]; then
+        pool_time=${mode_times[POOL]}
+        legacy_time=${mode_times[LEGACY]}
+
+        # Calculate performance difference (using bc for floating point)
+        if (( $(echo "$pool_time < $legacy_time" | bc -l) )); then
+            improvement=$(echo "scale=2; ($legacy_time - $pool_time) / $legacy_time * 100" | bc -l)
+            echo "[INFO] 🚀 Performance: Pool Mode is ${improvement}% faster than Legacy Mode" | tee -a "$summary_log"
+        elif (( $(echo "$pool_time > $legacy_time" | bc -l) )); then
+            degradation=$(echo "scale=2; ($pool_time - $legacy_time) / $legacy_time * 100" | bc -l)
+            echo "[INFO] ⚠️  Performance: Pool Mode is ${degradation}% slower than Legacy Mode" | tee -a "$summary_log"
+        else
+            echo "[INFO] ⚖️  Performance: Pool Mode and Legacy Mode have similar performance" | tee -a "$summary_log"
+        fi
+    fi
+
+    echo "[INFO] Total test time: ${test_duration}s" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+
+    # Final result
+    if [ $fail_count -ne 0 ]; then
+        echo "" | tee -a "$summary_log"
+        echo "[LLAMA_CPP_FAIL] Performance tests failed:" | tee -a "$summary_log"
+        for fail_item in "${fail_list[@]}"; do
+            echo "  - $fail_item" | tee -a "$summary_log"
+        done
+        exit 1
+    else
+        echo "" | tee -a "$summary_log"
+        echo "[LLAMA_CPP_PASS] All performance tests completed successfully!" | tee -a "$summary_log"
+        echo "[INFO] Performance comparison between Pool and Legacy modes completed" | tee -a "$summary_log"
+    fi
+
+    exit 0
+fi
+
+# Simple TP test mode - Tensor Parallel testing with split-mode variations
+if [ "$SIMPLE_TP" = true ]; then
+    echo "[INFO] ============================================================" | tee -a "$summary_log"
+    echo "[INFO] Simple TP Test Mode - Tensor Parallel Split Mode Testing" | tee -a "$summary_log"
+    echo "[INFO] ============================================================" | tee -a "$summary_log"
+    # Define test model based on --big option
+    model_base_path="${LOCAL_MODEL_PATH}"
+    if [ "$BIG_MODEL" = true ]; then
+        tp_model="Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf"
+        model_name="Qwen3-30B (Q4_K_M)"
+        echo "[INFO] Target Model: $model_name (BIG MODEL)" | tee -a "$summary_log"
+    else
+        tp_model="Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
+        model_name="Qwen2.5-1.5B (fp16)"
+        echo "[INFO] Target Model: $model_name (SMALL MODEL)" | tee -a "$summary_log"
+    fi
+
+    echo "[INFO] Split Modes: row, layer, none" | tee -a "$summary_log"
+    echo "[INFO] GPTQ Modes: 🔄 Pool Mode vs 🔧 Legacy Mode" | tee -a "$summary_log"
+    echo "[INFO] ============================================================" | tee -a "$summary_log"
+
+    # Initialize counters
+    fail_count=0
+    pass_count=0
+    fail_list=()
+
+    model_path="${model_base_path}/${tp_model}"
+
+    # Check if model exists
+    if [ ! -f "$model_path" ]; then
+        echo "[ERROR] TP test model not found: $model_path" | tee -a "$summary_log"
+        if [ "$BIG_MODEL" = true ]; then
+            echo "[INFO] Please ensure the Qwen3-30B model is available for TP testing" | tee -a "$summary_log"
+            echo "[INFO] Expected path: ${model_base_path}/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf" | tee -a "$summary_log"
+        else
+            echo "[INFO] Please ensure the Qwen2.5-1.5B model is available for TP testing" | tee -a "$summary_log"
+            echo "[INFO] Expected path: ${model_base_path}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf" | tee -a "$summary_log"
+        fi
+        exit 1
+    fi
+
+    echo "[INFO] TP test model: $tp_model" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+
+    # TP test configuration - adjust parameters based on model size
+    if [ "$BIG_MODEL" = true ]; then
+        TP_TOKENS=10  # Use fewer tokens for large model to avoid memory issues
+        echo "[INFO] Using reduced token count ($TP_TOKENS) for large model" | tee -a "$summary_log"
+    else
+        TP_TOKENS=30  # Standard token count for small model
+    fi
+    TP_PROMPT="What is 2+3? Answer with only the number."
+    TP_EXPECTED_CONTENT="5"  # Expected answer for correctness validation
+
+    # Define split modes and GPTQ modes
+    split_modes=("row" "layer" "none")
+    gptq_modes=("POOL" "LEGACY")
+
+    total_tp_tests=$((${#split_modes[@]} * ${#gptq_modes[@]}))
+    current_test=0
+
+    # Test each combination
+    for split_mode in "${split_modes[@]}"; do
+        for gptq_mode in "${gptq_modes[@]}"; do
+            current_test=$((current_test + 1))
+
+            if [ "$gptq_mode" = "POOL" ]; then
+                mode_env="GGML_GPTQ_USE_POOL=1"
+                mode_icon="🔄"
+                mode_desc="Pool Mode"
+            else
+                mode_env="GGML_GPTQ_USE_POOL=0"
+                mode_icon="🔧"
+                mode_desc="Legacy Mode"
+            fi
+
+            test_name="TP-${split_mode^^}-${gptq_mode}"
+
+            echo "" | tee -a "$summary_log"
+            echo "[INFO] ========================================" | tee -a "$summary_log"
+            echo "[INFO] Test $current_test/$total_tp_tests: $test_name ($mode_icon $mode_desc)" | tee -a "$summary_log"
+            echo "[INFO] Split Mode: $split_mode" | tee -a "$summary_log"
+            echo "[INFO] Model: $model_path" | tee -a "$summary_log"
+            echo "[INFO] Environment: $mode_env" | tee -a "$summary_log"
+            echo "[INFO] ========================================" | tee -a "$summary_log"
+            echo "-----------------------------" | tee -a "$test_log"
+
+            start_time=$(date +%s)
+            set +e
+
+            # Run TP test
+            temp_output=$(mktemp)
+            echo "[DEBUG] Running TP test with split-mode=$split_mode and $mode_env" | tee -a "$test_log"
+            env $mode_env ${build_dir_bin}/llama-cli -m "$model_path" --split-mode "$split_mode" -no-cnv -n $TP_TOKENS --temp 0.7 --top-k 40 --top-p 0.9 -s 42 -p "$TP_PROMPT" > "$temp_output" 2>&1
+            ret=$?
+
+            # Display output (verbose mode shows all, otherwise first 10 lines)
+            if [ "$VERBOSE" = "true" ]; then
+                echo "[INFO] Test output (VERBOSE - showing all output):" | tee -a "$test_log"
+                cat "$temp_output" | tee -a "$test_log"
+            else
+                echo "[INFO] Test output (first 10 lines):" | tee -a "$test_log"
+                head -n 10 "$temp_output" | tee -a "$test_log"
+            fi
+
+            set -e
+            end_time=$(date +%s)
+            duration=$((end_time - start_time))
+            echo "-----------------------------" | tee -a "$test_log"
+
+            # Validate result - both functionality and correctness
+            if [ $ret -eq 0 ]; then
+                # Check if expected content is in the output for correctness validation
+                output_content=$(cat "$temp_output")
+                if echo "$output_content" | grep -qi "$TP_EXPECTED_CONTENT"; then
+                    echo "[PASS] $test_name ($mode_icon $mode_desc) (${duration}s) ✓ Correctness verified" | tee -a "$summary_log"
+                    echo "[INFO] Split mode '$split_mode' with $mode_desc: Functionality ✓ Correctness ✓" | tee -a "$summary_log"
+                    echo "[INFO] Expected content '$TP_EXPECTED_CONTENT' found in output" | tee -a "$summary_log"
+                    pass_count=$((pass_count+1))
+                else
+                    echo "[FAIL] $test_name ($mode_icon $mode_desc) (${duration}s) ❌ Correctness failed" | tee -a "$summary_log"
+                    echo "[WARN] Split mode '$split_mode' with $mode_desc: Functionality ✓ Correctness ❌" | tee -a "$summary_log"
+                    echo "[DEBUG] Expected content '$TP_EXPECTED_CONTENT' not found in output" | tee -a "$summary_log"
+                    echo "[DEBUG] Actual output excerpt:" | tee -a "$test_log"
+                    echo "$output_content" | tail -n 10 | tee -a "$test_log"
+                    fail_count=$((fail_count+1))
+                    fail_list+=("$test_name ($mode_desc, correctness validation failed)")
+                fi
+            else
+                echo "[FAIL] $test_name ($mode_icon $mode_desc) (exit code: $ret, ${duration}s) ❌ Functionality failed" | tee -a "$summary_log"
+                echo "[WARN] Split mode '$split_mode' with $mode_desc: Functionality ❌" | tee -a "$summary_log"
+                fail_count=$((fail_count+1))
+                fail_list+=("$test_name ($mode_desc, exit code $ret)")
+
+                # Show error details
+                echo "[DEBUG] Error output:" | tee -a "$test_log"
+                tail -n 20 "$temp_output" | tee -a "$test_log"
+            fi
+
+            # Clean up temp file
+            safe_rm -f "$temp_output"
+        done
+    done
+
+    # Summary
+    test_end_time=$(date +%s)
+    test_duration=$((test_end_time - test_start_time))
+
+    echo "" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Simple TP Test Summary" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Model: $tp_model" | tee -a "$summary_log"
+    echo "[INFO] Split modes tested: ${split_modes[*]}" | tee -a "$summary_log"
+    echo "[INFO] GPTQ modes tested: ${gptq_modes[*]}" | tee -a "$summary_log"
+    echo "[INFO] Total tests: $total_tp_tests" | tee -a "$summary_log"
+    echo "[INFO] Passed: $pass_count" | tee -a "$summary_log"
+    echo "[INFO] Failed: $fail_count" | tee -a "$summary_log"
+    echo "[INFO] Total time: ${test_duration}s" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+
+    # Performance comparison by split mode
+    echo "" | tee -a "$summary_log"
+    echo "[INFO] Split Mode Performance Analysis:" | tee -a "$summary_log"
+    for split_mode in "${split_modes[@]}"; do
+        pool_test="TP-${split_mode^^}-POOL"
+        legacy_test="TP-${split_mode^^}-LEGACY"
+
+        # Check if tests passed (default to true, set false if found in fail_list)
+        pool_passed=true
+        legacy_passed=true
+
+        # Check if pool test failed
+        for i in "${!fail_list[@]}"; do
+            if [[ "${fail_list[$i]}" == *"$pool_test"* ]]; then
+                pool_passed=false
+                break
+            fi
+        done
+
+        # Check if legacy test failed
+        for i in "${!fail_list[@]}"; do
+            if [[ "${fail_list[$i]}" == *"$legacy_test"* ]]; then
+                legacy_passed=false
+                break
+            fi
+        done
+
+        if [ "$pool_passed" = true ] && [ "$legacy_passed" = true ]; then
+            echo "[INFO] ✅ Split mode '$split_mode': Both Pool and Legacy modes working" | tee -a "$summary_log"
+        elif [ "$pool_passed" = true ]; then
+            echo "[INFO] 🔄 Split mode '$split_mode': Only Pool mode working" | tee -a "$summary_log"
+        elif [ "$legacy_passed" = true ]; then
+            echo "[INFO] 🔧 Split mode '$split_mode': Only Legacy mode working" | tee -a "$summary_log"
+        else
+            echo "[WARN] ❌ Split mode '$split_mode': Both modes failed" | tee -a "$summary_log"
+        fi
+    done
+
+    # Final result
+    if [ $fail_count -ne 0 ]; then
+        echo "" | tee -a "$summary_log"
+        echo "[LLAMA_CPP_FAIL] TP tests failed:" | tee -a "$summary_log"
+        for fail_item in "${fail_list[@]}"; do
+            echo "  - $fail_item" | tee -a "$summary_log"
+        done
+        exit 1
+    else
+        echo "" | tee -a "$summary_log"
+        echo "[LLAMA_CPP_PASS] All TP tests passed successfully!" | tee -a "$summary_log"
+        echo "[INFO] Tensor Parallel implementation verified across all split modes" | tee -a "$summary_log"
     fi
 
     exit 0
@@ -819,7 +1237,7 @@ validate_qwen_output() {
         echo "[FAIL] llama-cli command failed with exit code $cmd_result"
         echo "[DEBUG] Command output:" >> "$test_log"
         cat "$output_file" >> "$test_log"
-        rm -f "$output_file"
+        safe_rm -f "$output_file"
         return 1
     fi
 
@@ -831,13 +1249,13 @@ validate_qwen_output() {
     if [ $validation_result -eq 0 ]; then
         echo "[PASS] Correctness test passed: $model_name - $test_name"
         # Clean up temporary output file
-        rm -f "$output_file"
+        safe_rm -f "$output_file"
         return 0
     else
         echo "[FAIL] Correctness test failed: $model_name - $test_name"
         echo "[DEBUG] Failed test output:" >> "$test_log"
         cat "$output_file" >> "$test_log"
-        rm -f "$output_file"
+        safe_rm -f "$output_file"
         return 1
     fi
 }
@@ -973,11 +1391,11 @@ for test_case in "${test_cases[@]}"; do
                     test_results_status+=("$sub_status")
                 fi
             done < "$temp_clean"
-            rm -f "$temp_clean"
+            safe_rm -f "$temp_clean"
         fi
 
         # Clean up temp file
-        rm -f "$temp_output"
+        safe_rm -f "$temp_output"
 
         end_time=$(date +%s)
         duration=$((end_time - start_time))

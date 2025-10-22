@@ -333,7 +333,7 @@ run_ci_test() {
 cleanup() {
     if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
         log_info "Cleaning up temporary directory: $WORK_DIR"
-        rm -rf "$WORK_DIR"
+        safe_rm -rf "$WORK_DIR"
     fi
 }
 
@@ -344,7 +344,7 @@ cleanup_on_error() {
         log_info "Work directory contents before cleanup:"
         ls -la "$WORK_DIR" 2>/dev/null || true
         log_info "Cleaning up temporary directory: $WORK_DIR"
-        rm -rf "$WORK_DIR"
+        safe_rm -rf "$WORK_DIR"
     fi
 }
 

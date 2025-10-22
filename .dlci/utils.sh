@@ -7,6 +7,21 @@
 # Previously split across multiple files, now unified for better maintainability.
 #
 
+# Safe command execution without LD_PRELOAD injection
+# This prevents issues when LD_PRELOAD contains dlpti_injection.so
+safe_rm() {
+    # Execute rm without LD_PRELOAD to avoid dlpti injection issues
+    # Use bash builtin to avoid LD_PRELOAD affecting env command itself
+    local old_preload="$LD_PRELOAD"
+    unset LD_PRELOAD
+    rm "$@"
+    local ret=$?
+    if [ -n "$old_preload" ]; then
+        export LD_PRELOAD="$old_preload"
+    fi
+    return $ret
+}
+
 get_config_file() {
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     echo "${script_dir}/config.yml"
@@ -600,7 +615,7 @@ create_release_package() {
     fi
 
     # Create clean release directory
-    rm -rf "${release_dir}"
+    safe_rm -rf "${release_dir}"
     mkdir -p "${release_dir}"
 
     # Copy release files from build/bin
