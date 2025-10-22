@@ -2239,6 +2239,13 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
         which_branch = "ggml_cuda_op_mul_mat";
     }
+    // Emit a debug line once per invocation so we can see which GPU path executed.
+    GGML_LOG_DEBUG("ggml_cuda_mul_mat: selected CUDA branch '%s' (dst=%s, src0_type=%s, src1_type=%s)\n",
+                   which_branch[0] ? which_branch : "unknown",
+                   dst->name,
+                   ggml_type_name(src0->type),
+                   ggml_type_name(src1->type));
+
     if (need_compare) {
         const bool can_compare = (dst->type == GGML_TYPE_F32) && (src1->type == GGML_TYPE_F32);
         const bool can_mmv = can_compare && use_mul_mat_vec;

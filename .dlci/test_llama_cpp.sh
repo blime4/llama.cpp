@@ -25,6 +25,8 @@ SIMPLE_PERF=false
 SIMPLE_TP=false
 BIG_MODEL=false
 VERBOSE=false
+NO_FA=false
+SIMPLE_MODEL_GPU_LAYERS=999
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -60,9 +62,13 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        --no-fa)
+            NO_FA=true
+            shift
+            ;;
         *)
             echo "[ERROR] Unknown parameter: $1"
-            echo "Usage: $0 [--ci-test] [--binary-path <path>] [--simple-test] [--simple-model] [--simple-perf] [--simple-tp] [--big] [--verbose]"
+            echo "Usage: $0 [--ci-test] [--binary-path <path>] [--simple-test] [--simple-model] [--simple-perf] [--simple-tp] [--big] [--verbose] [--no-fa]"
             echo "  --ci-test: Enable CI test mode using external binaries"
             echo "  --binary-path: Path to the release directory containing binaries"
             echo "  --simple-test: Run only backend-ops tests (MUL_MAT and DLFA)"
@@ -71,6 +77,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --simple-tp: Run Tensor Parallel tests with split-mode (row/layer/none)"
             echo "  --big: Use large model for TP tests (Qwen3-30B instead of Qwen2.5-1.5B)"
             echo "  --verbose: Enable verbose output (show detailed logs in real-time)"
+            echo "  --no-fa: Disable Flash Attention (do not use -fa flag)"
             exit 1
             ;;
     esac
@@ -391,10 +398,17 @@ fi
 # Simple model test mode - Qwen2.5 models with GGML_DLFA_READY=1
 if [ "$SIMPLE_MODEL" = true ]; then
     echo "[INFO] ============================================================" | tee -a "$summary_log"
-    echo "[INFO] Simple Model Test Mode - Flash Attention Validation" | tee -a "$summary_log"
-    echo "[INFO] ============================================================" | tee -a "$summary_log"
-    echo "[INFO] Target Models: Qwen2.5-1.5B (fp16/q4_k_m)" | tee -a "$summary_log"
-    echo "[INFO] Environment: GGML_DLFA_READY=1 (Flash Attention ENABLED)" | tee -a "$summary_log"
+    if [ "$NO_FA" = "true" ]; then
+        echo "[INFO] Simple Model Test Mode - WITHOUT Flash Attention" | tee -a "$summary_log"
+        echo "[INFO] ============================================================" | tee -a "$summary_log"
+        echo "[INFO] Target Models: Qwen2.5-1.5B (fp16/q4_k_m)" | tee -a "$summary_log"
+        echo "[INFO] Environment: Flash Attention DISABLED (--no-fa enabled)" | tee -a "$summary_log"
+    else
+        echo "[INFO] Simple Model Test Mode - Flash Attention Validation" | tee -a "$summary_log"
+        echo "[INFO] ============================================================" | tee -a "$summary_log"
+        echo "[INFO] Target Models: Qwen2.5-1.5B (fp16/q4_k_m)" | tee -a "$summary_log"
+        echo "[INFO] Environment: GGML_DLFA_READY=1 (Flash Attention ENABLED)" | tee -a "$summary_log"
+    fi
     echo "[INFO] ============================================================" | tee -a "$summary_log"
 
     # Initialize counters
@@ -515,18 +529,28 @@ if [ "$SIMPLE_MODEL" = true ]; then
         echo "[INFO] ========================================" | tee -a "$summary_log"
         echo "[INFO] Test $test_num/$total_tests: $model_name - $test_name" | tee -a "$summary_log"
         echo "[INFO] Model: $model_path" | tee -a "$summary_log"
-        echo "[INFO] *** Flash Attention ENABLED: GGML_DLFA_READY=1 ***" | tee -a "$summary_log"
+        if [ "$NO_FA" = "true" ]; then
+            echo "[INFO] *** Flash Attention DISABLED: --no-fa enabled ***" | tee -a "$summary_log"
+        else
+            echo "[INFO] *** Flash Attention ENABLED: GGML_DLFA_READY=1 ***" | tee -a "$summary_log"
+        fi
         echo "[INFO] ========================================" | tee -a "$summary_log"
         echo "-----------------------------" | tee -a "$test_log"
 
         start_time=$(date +%s)
         set +e
 
-        # Run inference with GGML_DLFA_READY=1 (Flash Attention enabled)
+        # Run inference with or without Flash Attention based on --no-fa flag
         temp_output=$(mktemp)
-        echo "[DEBUG] Running with GGML_DLFA_READY=1 and --flash-attn" | tee -a "$test_log"
-        GGML_DLFA_READY=1 ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -p "$prompt" > "$temp_output" 2>&1
-        ret=$?
+        if [ "$NO_FA" = "true" ]; then
+            echo "[DEBUG] Running WITHOUT Flash Attention (--no-fa enabled), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
+            CUDA_VISIBLE_DEVICES=0 ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
+            ret=$?
+        else
+            echo "[DEBUG] Running with GGML_DLFA_READY=1, --flash-attn, -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
+            CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
+            ret=$?
+        fi
 
         # Display output
         cat "$temp_output" | tee -a "$test_log"
@@ -566,9 +590,15 @@ if [ "$SIMPLE_MODEL" = true ]; then
 
     echo "" | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
-    echo "[INFO] Simple Model Test Summary (Flash Attention)" | tee -a "$summary_log"
-    echo "[INFO] =============================================" | tee -a "$summary_log"
-    echo "[INFO]   Environment:  GGML_DLFA_READY=1" | tee -a "$summary_log"
+    if [ "$NO_FA" = "true" ]; then
+        echo "[INFO] Simple Model Test Summary (WITHOUT Flash Attention)" | tee -a "$summary_log"
+        echo "[INFO] =============================================" | tee -a "$summary_log"
+        echo "[INFO]   Environment:  Flash Attention DISABLED" | tee -a "$summary_log"
+    else
+        echo "[INFO] Simple Model Test Summary (Flash Attention)" | tee -a "$summary_log"
+        echo "[INFO] =============================================" | tee -a "$summary_log"
+        echo "[INFO]   Environment:  GGML_DLFA_READY=1" | tee -a "$summary_log"
+    fi
     echo "[INFO]   Total tests:  $total_tests" | tee -a "$summary_log"
     echo "[INFO]   Passed:       $pass_count" | tee -a "$summary_log"
     echo "[INFO]   Failed:       $fail_count" | tee -a "$summary_log"
@@ -585,7 +615,11 @@ if [ "$SIMPLE_MODEL" = true ]; then
         exit 1
     else
         echo "" | tee -a "$summary_log"
-        echo "[LLAMA_CPP_PASS] All Qwen2.5 model tests passed with Flash Attention + Pool/Legacy Mode comparison!" | tee -a "$summary_log"
+        if [ "$NO_FA" = "true" ]; then
+            echo "[LLAMA_CPP_PASS] All Qwen2.5 model tests passed WITHOUT Flash Attention!" | tee -a "$summary_log"
+        else
+            echo "[LLAMA_CPP_PASS] All Qwen2.5 model tests passed with Flash Attention + Pool/Legacy Mode comparison!" | tee -a "$summary_log"
+        fi
     fi
 
     exit 0

@@ -1200,6 +1200,12 @@ void ggml_compute_forward_mul_mat(
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
 
+    // Only the first worker prints, so we get a single CPU-path breadcrumb.
+    if (params->ith == 0) {
+        GGML_LOG_DEBUG("ggml_compute_forward_mul_mat: executing on CPU backend (dst=%s, src0_type=%s, src1_type=%s)\n",
+                       dst->name, ggml_type_name(src0->type), ggml_type_name(src1->type));
+    }
+
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int ith = params->ith;

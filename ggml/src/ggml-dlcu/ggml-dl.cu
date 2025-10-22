@@ -3,6 +3,7 @@
 * @brief DengLin (DL) CUDA extensions implementation
  */
 
+#include <csignal>
 #ifdef GGML_USE_DLCU
 
 #include "ggml-dl.cuh"
@@ -666,6 +667,10 @@ static void ggml_cuda_dlblas_gemmex(
 }
 
 static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    // Helpful debug signal so we can tell when the DLBLAS path is taken.
+    GGML_LOG_DEBUG("ggml_cuda_mul_mat_dlblas: using DLBLAS backend (dst=%s, src0=%s, src1=%s)\n",
+                   dst->name, src0->name, src1->name);
+
     // In unit tests. TODO: Refactor : Others that do not go through llama_model::load_tensors are theoretically needed
     static const bool is_test_mode = getenv("GGML_TEST_MODE") != nullptr;
     if (is_test_mode) {
