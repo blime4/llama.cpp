@@ -21,6 +21,7 @@ variables:
   export DOCKER_IMAGE_AARCH64=$(get_docker_image_with_network "aarch64")
   export DOCKER_IMAGE_RISCV64=$(get_docker_image_with_network "riscv64")
   export DOCKER_IMAGE_LOONGAARCH64=$(get_docker_image_with_network "loongarch64")
+  export DOCKER_IMAGE_ANDROID=$(get_docker_image_with_network "android")
 
 stages:
   - compile_and_test_llama_cpp
@@ -33,7 +34,6 @@ compile_and_test_llama_cpp_x86_64:
   tags:
     - build-x86_64
   script:
-    - git submodule sync && git submodule update --init --recursive
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
@@ -55,7 +55,6 @@ compile_and_test_llama_cpp_aarch64:
   tags:
     - build-arm64
   script:
-    - git submodule sync && git submodule update --init --recursive
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
@@ -77,7 +76,6 @@ compile_and_test_llama_cpp_riscv64:
   tags:
     - build-x86_64
   script:
-    - git submodule sync && git submodule update --init --recursive
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk_riscv64"
@@ -101,7 +99,6 @@ compile_and_test_llama_cpp_loongarch64:
   tags:
     - build-loongarch64
   script:
-    - git submodule sync && git submodule update --init --recursive
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
     - export sdk_path="${SDK_WORKSPACE}/sdk"
@@ -115,6 +112,30 @@ compile_and_test_llama_cpp_loongarch64:
       - logs/compile/
     expire_in: 1 day
     when: always
+
+# compile_and_test_llama_cpp_android:
+#   stage: compile_and_test_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: android
+#   tags:
+#     - build-x86_64  # Android cross-compilation uses x86_64 builder
+#   script:
+#     - *load_unified_config
+#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+#     - export sdk_path="${SDK_WORKSPACE}/sdk"
+#     - *docker_envs
+#     - echo "[INFO] Skipping device check for Android platform (cross-compilation target)"
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/compile_llama_cpp.sh
+#     # Android cross-compiled binaries cannot run on host, so skip runtime tests
+#     - echo "[INFO] Skipping runtime tests for Android (cross-compilation target)"
+#     # Instead, run basic binary validation
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" bash -c "file build_android/bin/* && ls -la build_android/bin/"
+#   artifacts:
+#     paths:
+#       - build_android/bin
+#       - logs/compile/
+#     expire_in: 1 day
+#     when: always
 
 release_llama_cpp_x86_64:
   stage: release_llama_cpp
@@ -175,3 +196,18 @@ release_llama_cpp_loongarch64:
     - *load_unified_config
     - *docker_envs
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ./.dlci/release_llama_cpp.sh
+
+# release_llama_cpp_android:
+#   stage: release_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: android
+#   tags:
+#     - build-x86_64  # Android cross-compilation uses x86_64 builder
+#   dependencies:
+#     - compile_and_test_llama_cpp_android
+#   only:
+#     - /^dl-release-.*$/
+#   script:
+#     - *load_unified_config
+#     - *docker_envs
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/release_llama_cpp.sh

@@ -337,7 +337,7 @@ print_ci_build_usage() {
     echo ""
     echo "Required Environment Variables:"
     echo "  SDK_PATH         - Path to SDK directory"
-    echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64)"
+    echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64, android)"
     echo ""
     echo "Optional Environment Variables:"
     echo "  REPO_PATH        - Repository path (default: current directory)"
@@ -504,6 +504,15 @@ ci_build() {
         docker_cmd=(
             "${DOCKER_REPO_PATH}/bash.sh"
             --platform "linux/riscv64"
+            --env "DOCKER_PLATFORM=${DOCKER_PLATFORM}"
+            "${DOCKER_ENVS[@]}"
+            "$DOCKER_IMAGE"
+            "./.dlci/compile_llama_cpp.sh"
+        )
+    elif [ "$DOCKER_PLATFORM" = "android" ]; then
+        # Android uses x86_64 host for cross-compilation
+        docker_cmd=(
+            "${DOCKER_REPO_PATH}/bash.sh"
             --env "DOCKER_PLATFORM=${DOCKER_PLATFORM}"
             "${DOCKER_ENVS[@]}"
             "$DOCKER_IMAGE"

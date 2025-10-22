@@ -49,7 +49,7 @@ show_banner() {
 EOF
     echo -e "${NC}"
     echo -e "${CYAN}Version: $VERSION${NC}"
-    echo -e "${CYAN}Supported platforms: x86_64, aarch64, loongarch64${NC}"
+    echo -e "${CYAN}Supported platforms: x86_64, aarch64, loongarch64, android${NC}"
     echo ""
 }
 
@@ -61,7 +61,7 @@ llama.cpp integrated compilation and testing script
 Usage: $0 [options]
 
 Options:
-  --platform PLATFORM     Target platform (x86_64, aarch64, loongarch64)
+  --platform PLATFORM     Target platform (x86_64, aarch64, loongarch64, android)
   --action ACTION         Action to execute (compile, test, all)
   --sdk-path PATH         SDK path (or use environment variable sdk_path)
   --repo-path PATH        Repository path (or use environment variable REPO_PATH)
@@ -93,6 +93,9 @@ Examples:
   # Specify LoongArch64 platform compilation
   $0 --platform loongarch64 --action compile --sdk-path /opt/sdk
 
+  # Android cross-compilation
+  $0 --platform android --action compile --sdk-path /opt/sdk
+
   # Interactive setup
   $0 --interactive
 
@@ -111,6 +114,7 @@ detect_platform() {
         loongarch64) echo "loongarch64" ;;
         *)
             log_error "Unsupported architecture: $(uname -m)"
+            log_error "Note: For Android cross-compilation, use --platform android"
             exit 1
             ;;
     esac
@@ -139,6 +143,13 @@ configure_platform() {
             CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF"
             TEST_TIMEOUT=600
             ENABLE_FULL_TESTS=true
+            ;;
+        android)
+            log_info "Configuring Android platform parameters (cross-compilation)"
+            CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF -DGGML_NATIVE=OFF"
+            TEST_TIMEOUT=300  # Shorter timeout for cross-compiled binaries
+            ENABLE_FULL_TESTS=false  # Disable full tests for cross-compilation
+            log_warn "Android platform detected - tests will be limited (cross-compilation target)"
             ;;
         *)
             log_error "Unknown platform: $platform"
@@ -189,14 +200,16 @@ interactive_setup() {
     echo "2) x86_64 (Intel/AMD 64-bit)"
     echo "3) aarch64 (ARM 64-bit)"
     echo "4) loongarch64 (LoongArch 64-bit)"
+    echo "5) android (Android ARM64 cross-compilation)"
 
-    printf "Please select (1-4): "
+    printf "Please select (1-5): "
     if read choice; then
         case "$choice" in
             1) INTERACTIVE_PLATFORM=$(detect_platform) ;;
             2) INTERACTIVE_PLATFORM="x86_64" ;;
             3) INTERACTIVE_PLATFORM="aarch64" ;;
             4) INTERACTIVE_PLATFORM="loongarch64" ;;
+            5) INTERACTIVE_PLATFORM="android" ;;
             *) log_error "Invalid selection"; return 1 ;;
         esac
         log_info "Selected platform: $INTERACTIVE_PLATFORM"
@@ -478,8 +491,66 @@ compile_llama_cpp() {
     IFS=' ' read -ra platform_args <<< "$CMAKE_ARGS"
     cmake_common_args+=("${platform_args[@]}")
 
+    # Android special handling: set Android NDK toolchain
+    if [ "$platform" = "android" ]; then
+        log_info "Setting up Android NDK toolchain for cross-compilation..."
+
+        # Android NDK toolchain path
+        local android_ndk_root="/opt/android-sdk-linux/ndk/25.2.9519653"
+        local android_toolchain_file="${android_ndk_root}/build/cmake/android.toolchain.cmake"
+
+        # Validate Android NDK exists
+        if [ ! -f "$android_toolchain_file" ]; then
+            log_error "Android NDK toolchain not found: $android_toolchain_file"
+            log_error "Please ensure Android NDK 25.2.9519653 is installed in /opt/android-sdk-linux/ndk/"
+            return 1
+        fi
+
+        log_info "Using Android NDK: $android_ndk_root"
+        log_info "Using Android toolchain: $android_toolchain_file"
+        log_info "CUDA compiler (dlcc): $CUDA_NVCC_EXECUTABLE"
+
+        # Set explicit Android compilers
+        local android_c_compiler="${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+        local android_cxx_compiler="${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
+        log_info "Android C compiler: $android_c_compiler"
+        log_info "Android C++ compiler: $android_cxx_compiler"
+
+        # Ensure CUDA compilation uses dlcc from SDK, not Android NDK
+        if [ ! -f "$CUDA_NVCC_EXECUTABLE" ]; then
+            log_error "CUDA compiler (dlcc) not found: $CUDA_NVCC_EXECUTABLE"
+            log_error "Please ensure SDK environment is properly set up"
+            return 1
+        fi
+
+        # Android-specific library paths and flags
+        local android_sysroot="${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+        local android_lib_path="${android_sysroot}/usr/lib/aarch64-linux-android/28"
+
+        log_info "Android sysroot: $android_sysroot"
+        log_info "Android lib path: $android_lib_path"
+
+        # Add Android-specific CMake arguments (following official android.md recommendations)
+        cmake_common_args+=(
+            "-DCMAKE_TOOLCHAIN_FILE=$android_toolchain_file"
+            "-DANDROID_ABI=arm64-v8a"
+            "-DANDROID_PLATFORM=android-28"
+            "-DANDROID_NDK=$android_ndk_root"
+            "-DCMAKE_C_COMPILER=$android_c_compiler"
+            "-DCMAKE_CXX_COMPILER=$android_cxx_compiler"
+            "-DCMAKE_C_FLAGS=-march=armv8.7a"
+            "-DCMAKE_CXX_FLAGS=-march=armv8.7a"
+            "-DCMAKE_EXE_LINKER_FLAGS=-L${android_lib_path} -latomic"
+            "-DCMAKE_SHARED_LINKER_FLAGS=-L${android_lib_path} -latomic"
+            "-DGGML_OPENMP=OFF"
+            "-DGGML_LLAMAFILE=OFF"
+            "-DCUDA_NVCC_EXECUTABLE=$CUDA_NVCC_EXECUTABLE"
+            "-DCMAKE_CUDA_COMPILER=$CUDA_NVCC_EXECUTABLE"
+            "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH"
+            "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH"
+        )
     # LoongArch64 special handling: set correct OpenMP library path
-    if [ "$platform" = "loongarch64" ]; then
+    elif [ "$platform" = "loongarch64" ]; then
         local actual_libgomp=""
         local libgomp_search_paths=(
             "/usr/lib/gcc/loongarch64-openEuler-linux/12/libgomp.so"
@@ -670,7 +741,44 @@ run_tests() {
     export GGML_DEBUG=1
 
     # Platform-specific environment variables
-    if [ "$platform" = "loongarch64" ]; then
+    if [ "$platform" = "android" ]; then
+        # Android cross-compilation - skip most tests as they can't run on host
+        log_warn "Android platform detected - most tests will be skipped (cross-compilation target)"
+        log_warn "Only basic compilation verification will be performed"
+
+        # Check if binaries were created
+        local android_build_dir="${REPO_PATH}/build_android"
+        if [ ! -d "$android_build_dir/bin" ]; then
+            log_error "Android build directory not found: $android_build_dir/bin"
+            return 1
+        fi
+
+        local android_binaries=("llama-cli" "llama-server" "llama-bench")
+        local missing_binaries=()
+
+        for binary in "${android_binaries[@]}"; do
+            if [ ! -f "$android_build_dir/bin/$binary" ]; then
+                missing_binaries+=("$binary")
+            fi
+        done
+
+        if [ ${#missing_binaries[@]} -gt 0 ]; then
+            log_error "Missing Android binaries:"
+            for binary in "${missing_binaries[@]}"; do
+                log_error "  - $binary"
+            done
+            return 1
+        fi
+
+        log_success "Android cross-compilation verification completed"
+        log_info "Android binaries created in: $android_build_dir/bin/"
+
+        # List created binaries
+        log_info "Created Android binaries:"
+        ls -la "$android_build_dir/bin/"
+
+        return 0
+    elif [ "$platform" = "loongarch64" ]; then
         # LoongArch64 specific settings to avoid timeout issues
         export GGML_CUDA_DEVICE_TIMEOUT=30
         export GGML_CUDA_FORCE_MMQ=1

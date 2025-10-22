@@ -7,7 +7,7 @@
 #
 # Required Environment Variables:
 #   SDK_PATH        - Path to the SDK directory (e.g., /path/to/sdk)
-#   DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64)
+#   DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64, android)
 #
 # Optional Environment Variables:
 #   REPO_PATH       - Path to the repository (default: current directory)

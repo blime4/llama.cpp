@@ -16,7 +16,7 @@ show_help() {
     echo "  -c, --compile        Compile llama.cpp before entering docker"
     echo "  -cc, --re-compile    Re-compile (clean and build) llama.cpp before entering docker"
     echo "  -h, --help           Show this help message"
-    echo "  -p, --platform       Set platform (supported: x86_64, aarch64, loongarch64, riscv64, default: auto-detect)"
+    echo "  -p, --platform       Set platform (supported: x86_64, aarch64, loongarch64, riscv64, android, default: auto-detect)"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Enter docker with default SDK_TAG"
@@ -46,6 +46,7 @@ case "$DOCKER_PLATFORM" in
         ;;
     *)
         echo "[WARNING] Unknown architecture: $DOCKER_PLATFORM, defaulting to x86_64"
+        echo "[INFO] For Android cross-compilation, use: $0 -p android"
         DOCKER_PLATFORM="x86_64"
         ;;
 esac
@@ -70,11 +71,11 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -p|--platform)
-            if [[ "$2" =~ ^(x86_64|aarch64|loongarch64|riscv64)$ ]]; then
+            if [[ "$2" =~ ^(x86_64|aarch64|loongarch64|riscv64|android)$ ]]; then
                 DOCKER_PLATFORM="$2"
             else
                 echo "[ERROR] Unsupported platform: $2"
-                echo "Supported platforms: x86_64, aarch64, loongarch64, riscv64"
+                echo "Supported platforms: x86_64, aarch64, loongarch64, riscv64, android"
                 exit 1
             fi
             shift 2
@@ -109,6 +110,7 @@ DOCKER_IMAGE_X86=$(get_docker_image_with_network "x86_64" "dev_image")
 DOCKER_IMAGE_AARCH64=$(get_docker_image_with_network "aarch64" "dev_image")
 DOCKER_IMAGE_RISCV64=$(get_docker_image_with_network "riscv64" "dev_image")
 DOCKER_IMAGE_LOONGAARCH64=$(get_docker_image_with_network "loongarch64" "dev_image")
+DOCKER_IMAGE_ANDROID=$(get_docker_image_with_network "android" "dev_image")
 
 case "$DOCKER_PLATFORM" in
     x86_64)
@@ -122,6 +124,11 @@ case "$DOCKER_PLATFORM" in
         ;;
     loongarch64)
         DOCKER_IMAGE_COMPILE="$DOCKER_IMAGE_LOONGAARCH64"
+        ;;
+    android)
+        DOCKER_IMAGE_COMPILE="$DOCKER_IMAGE_ANDROID"
+        echo "[INFO] Android cross-compilation mode enabled"
+        echo "[INFO] Android binaries will be generated for ARM64 architecture"
         ;;
     *)
         echo "[ERROR] unsupported DOCKER_PLATFORM: $DOCKER_PLATFORM"
@@ -196,16 +203,38 @@ fi
 
 # Step 6: Enter docker for development
 echo "[Step 6] Entering docker for development..."
-echo "You can now interactively develop with llama.cpp in the docker container."
-echo "You need to source $sdk_path/env.sh to use the SDK."
-echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT"
-echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT -p \"(hsk=64.*hsv=64|hsk=128.*hsv=128|hsk=256.*hsv=256).*nb=1\""
-echo "One-click command: test-backend-ops -o GATED_LINEAR_ATTN"
 
-echo "Available commands:"
-echo "  - llama-cli --help"
-echo "  - llama-server --help"
-echo "  - llama-bench --help"
+if [ "$DOCKER_PLATFORM" = "android" ]; then
+    echo "=== Android Cross-Compilation Development Environment ==="
+    echo "You are entering an Android cross-compilation environment."
+    echo "Generated binaries are for Android ARM64 and cannot run in this container."
+    echo ""
+    echo "You need to source $sdk_path/env.sh to use the SDK."
+    echo ""
+    echo "Available development commands:"
+    echo "  - Compile: ninja -C build (after cmake configuration)"
+    echo "  - Check binaries: file build/bin/* (verify ARM64 architecture)"
+    echo "  - List binaries: ls -la build/bin/"
+    echo "  - Static analysis: readelf -d build/bin/llama-cli"
+    echo ""
+    echo "To test on Android device:"
+    echo "  - adb push build/bin/* /data/local/tmp/llama/"
+    echo "  - adb shell 'cd /data/local/tmp/llama && LD_LIBRARY_PATH=. ./llama-cli --help'"
+    echo ""
+    echo "Note: test-backend-ops and direct binary execution will NOT work (cross-compilation)"
+else
+    echo "You can now interactively develop with llama.cpp in the docker container."
+    echo "You need to source $sdk_path/env.sh to use the SDK."
+    echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT"
+    echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT -p \"(hsk=64.*hsv=64|hsk=128.*hsv=128|hsk=256.*hsv=256).*nb=1\""
+    echo "One-click command: test-backend-ops -o GATED_LINEAR_ATTN"
+
+    echo "Available commands:"
+    echo "  - llama-cli --help"
+    echo "  - llama-server --help"
+    echo "  - llama-bench --help"
+fi
+
 echo "  - exit (to leave docker)"
 echo ""
 
@@ -216,18 +245,36 @@ cd ../..
 echo "Entering docker container for interactive development..."
 echo "Using direct docker run to ensure interactive session..."
 
-# Use exec to replace current shell with docker bash
-exec docker run --rm -it                                   \
-    --runtime=dlrt -e DENGLIN_DEVICES=all                  \
-    -v "$(pwd):/workspace"                                 \
-    -v "${sdk_path}:/sdk_path"                             \
-    -v "$(get_model_path):/models"                         \
-    -w /workspace                                          \
-    -v "${build_dir}:/workspace/build"                     \
-    --network host                                         \
-    "${DOCKER_ENVS[@]}"                                    \
-    "${DOCKER_IMAGE_COMPILE}"                              \
-    /bin/bash --rcfile scripts/denglin/docker_env.sh
+# Platform-specific Docker configuration
+if [ "$DOCKER_PLATFORM" = "android" ]; then
+    echo "Configuring Docker for Android cross-compilation environment..."
+    # Android cross-compilation doesn't need GPU runtime, but needs access to Android NDK
+    # Add user mapping to fix permission issues
+    exec docker run --rm -it                                   \
+        --user $(id -u):$(id -g)                               \
+        -v "$(pwd):/workspace"                                 \
+        -v "${sdk_path}:/sdk_path"                             \
+        -v "$(get_model_path):/models"                         \
+        -w /workspace                                          \
+        -v "${build_dir}:/workspace/build"                     \
+        --network host                                         \
+        "${DOCKER_ENVS[@]}"                                    \
+        "${DOCKER_IMAGE_COMPILE}"                              \
+        /bin/bash --rcfile scripts/denglin/docker_env.sh
+else
+    # Standard development environment with GPU runtime
+    exec docker run --rm -it                                   \
+        --runtime=dlrt -e DENGLIN_DEVICES=all                  \
+        -v "$(pwd):/workspace"                                 \
+        -v "${sdk_path}:/sdk_path"                             \
+        -v "$(get_model_path):/models"                         \
+        -w /workspace                                          \
+        -v "${build_dir}:/workspace/build"                     \
+        --network host                                         \
+        "${DOCKER_ENVS[@]}"                                    \
+        "${DOCKER_IMAGE_COMPILE}"                              \
+        /bin/bash --rcfile scripts/denglin/docker_env.sh
+fi
 
 # This line will only be reached if docker command fails
 echo "=== Development session ended ==="

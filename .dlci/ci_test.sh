@@ -8,7 +8,7 @@
 # Required Environment Variables:
 #   BINARY_PATH     - Path to the extracted release directory containing binaries
 #   SDK_PATH        - Path to the SDK directory (e.g., /path/to/sdk)
-#   DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64)
+#   DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64, android)
 #
 # Optional Environment Variables:
 #   LOCAL_MODEL_PATH - Path to model files (default: /mars/aebox/LLM/model)
@@ -33,7 +33,7 @@ print_usage() {
     echo "Required Environment Variables:"
     echo "  BINARY_PATH      - Path to extracted release directory with binaries"
     echo "  SDK_PATH         - Path to SDK directory"
-    echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64)"
+    echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64, android)"
     echo "  REPO_PATH        - Repository path (default: current directory)"
     echo "  LOCAL_MODEL_PATH - Path to model files (default: ${DEFAULT_LOCAL_MODEL_PATH})"
     echo ""
@@ -203,6 +203,18 @@ main() {
             "./.dlci/test_llama_cpp.sh"
             "--ci-test"
             "--binary-path" "$BINARY_PATH"
+        )
+    elif [ "$DOCKER_PLATFORM" = "android" ]; then
+        # Android cross-compiled binaries - limited testing
+        docker_cmd=(
+            "${DOCKER_REPO_PATH}/bash.sh"
+            --env "DOCKER_PLATFORM=${DOCKER_PLATFORM}"
+            "${DOCKER_ENVS[@]}"
+            "$DOCKER_IMAGE"
+            "./.dlci/test_llama_cpp.sh"
+            "--ci-test"
+            "--binary-path" "$BINARY_PATH"
+            "--android-mode"
         )
     fi
 

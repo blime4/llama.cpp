@@ -15,16 +15,20 @@ docker_images:
   loongarch64:
     image: "c-41:manylinux_2_38-loongarch64-20250910"
     dev_image: "c-41:manylinux_2_38-loongarch64-20250910"
+  android:
+    image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251020"
+    dev_image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251020"
 
 platform_suffixes:
   x86_64: "manylinux_2_28-x86_64"
   aarch64: "manylinux_2_28-aarch64"
   riscv64: "linux-riscv64"
   loongarch64: "manylinux_2_38-loongarch64"
+  android: "android-arm64-v8a-api28"
 
 build:
   sdk:
-    tag: "V2_SOFTWARE_master_202510082141"
+    tag: "V2_SOFTWARE_master_202510172141"
     workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
     docker_repo_path: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
@@ -46,6 +50,15 @@ build:
         repository: "ai-sw-sdk-v2-test"
         filename_pattern: "*-loongarch.tar.bz2"
         extract_dir: "sdk"
+      android:
+        # Android cross-compilation SDK configuration
+        # Note: Using aarch64 SDK for Android ARM64 target compatibility
+        # Docker image: ubuntu22.04-amd64-android-ndk (x86_64 host for cross-compilation)
+        # SDK: aarch64 libraries (compatible with Android ARM64 target)
+        # Target: Android ARM64 (cross-compiled output)
+        repository: "ai-sw-sdk-v2-test"
+        filename_pattern: "*manylinux_2_28-aarch64.tar.bz2"
+        extract_dir: "sdk"
 
   model_path: "/mars/aebox/LLM/model"
 
@@ -54,6 +67,7 @@ build:
     aarch64: "build_aarch64/bin"
     riscv64: "build_riscv64/bin"
     loongarch64: "build_loongarch64/bin"
+    android: "build_android/bin"
 
 ci:
   supported_platforms:
@@ -61,12 +75,14 @@ ci:
     - aarch64
     - riscv64
     - loongarch64
+    - android
 
   build_tags:
     x86_64: "build-x86_64"
     aarch64: "build-arm64"
     riscv64: "build-x86_64"  # RISC-V uses a x86_64 builder
     loongarch64: "build-loongarch64"
+    android: "build-x86_64"  # Android uses a x86_64 builder for cross-compilation
 
   release_branch_pattern: "/^dl-release-.*$/"
 

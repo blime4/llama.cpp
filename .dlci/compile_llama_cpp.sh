@@ -40,6 +40,9 @@ fi
 echo "[INFO] Environment setup..." | tee -a "$compile_log"
 env >> "$compile_log" 2>&1
 source ${sdk_path}/env.sh >> "$compile_log" 2>&1
+# Set LIBRARY_PATH for dlcc compiler
+export LIBRARY_PATH="${sdk_path}/lib:${LIBRARY_PATH}"
+echo "LIBRARY_PATH set to: $LIBRARY_PATH" | tee -a "$compile_log"
 env >> "$compile_log" 2>&1
 
 echo "[INFO] Setting up ccache..." | tee -a "$compile_log"
@@ -168,6 +171,95 @@ elif [ "$ARCH" = "loongarch64" ]; then
         -DSDK_DIR=${sdk}"
 
     exec_with_log "$cmake_cmd"
+elif [ "$ARCH" = "android" ]; then
+    echo "[INFO] Detected Android platform (cross-compilation)" | tee -a "$compile_log"
+
+    # Android NDK toolchain path
+    ANDROID_NDK_ROOT="/opt/android-sdk-linux/ndk/25.2.9519653"
+    ANDROID_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake"
+
+    # Validate Android NDK exists
+    if [ ! -f "$ANDROID_TOOLCHAIN_FILE" ]; then
+        echo "[ERROR] Android NDK toolchain not found: $ANDROID_TOOLCHAIN_FILE" | tee -a "$compile_log"
+        echo "[ERROR] Please ensure Android NDK 25.2.9519653 is installed in /opt/android-sdk-linux/ndk/" | tee -a "$compile_log"
+        exit 1
+    fi
+
+    echo "[INFO] Using Android NDK: $ANDROID_NDK_ROOT" | tee -a "$compile_log"
+    echo "[INFO] Using Android toolchain: $ANDROID_TOOLCHAIN_FILE" | tee -a "$compile_log"
+    echo "[INFO] CUDA compiler (dlcc): $CUDA_NVCC_EXECUTABLE" | tee -a "$compile_log"
+
+    # Ensure CUDA compilation uses dlcc from SDK, not Android NDK
+    if [ ! -f "$CUDA_NVCC_EXECUTABLE" ]; then
+        echo "[ERROR] CUDA compiler (dlcc) not found: $CUDA_NVCC_EXECUTABLE" | tee -a "$compile_log"
+        echo "[ERROR] Please ensure SDK environment is properly set up" | tee -a "$compile_log"
+        exit 1
+    fi
+
+    # Set Android-specific environment variables for cross-compilation
+    export ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT"
+    export ANDROID_ABI="arm64-v8a"
+    export ANDROID_PLATFORM="android-28"
+    echo "[INFO] Android cross-compilation environment configured" | tee -a "$compile_log"
+
+    # Execute CMake with Android toolchain (following official android.md recommendations)
+    # Explicitly set Android compilers to avoid detection issues
+    ANDROID_C_COMPILER="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+    ANDROID_CXX_COMPILER="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
+
+    echo "[INFO] Android C compiler: $ANDROID_C_COMPILER" | tee -a "$compile_log"
+    echo "[INFO] Android C++ compiler: $ANDROID_CXX_COMPILER" | tee -a "$compile_log"
+
+    # Android-specific library paths and flags
+    ANDROID_SYSROOT="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+    ANDROID_LIB_PATH="${ANDROID_SYSROOT}/usr/lib/aarch64-linux-android/28"
+
+    echo "[INFO] Android sysroot: $ANDROID_SYSROOT" | tee -a "$compile_log"
+    echo "[INFO] Android lib path: $ANDROID_LIB_PATH" | tee -a "$compile_log"
+
+    # TODO: Remove this (-allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all)
+    # after Android SDK libraries are ready.
+
+    cmake_cmd="cmake -G Ninja -B ${build_dir} \
+        -DCMAKE_TOOLCHAIN_FILE=${ANDROID_TOOLCHAIN_FILE} \
+        -DANDROID_ABI=arm64-v8a \
+        -DANDROID_PLATFORM=android-28 \
+        -DANDROID_NDK=${ANDROID_NDK_ROOT} \
+        -DCMAKE_C_COMPILER=${ANDROID_C_COMPILER} \
+        -DCMAKE_CXX_COMPILER=${ANDROID_CXX_COMPILER} \
+        -DCMAKE_C_FLAGS=\"-march=armv8.7a\" \
+        -DCMAKE_CXX_FLAGS=\"-march=armv8.7a\" \
+        -DCMAKE_EXE_LINKER_FLAGS=\"-L${ANDROID_LIB_PATH} -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all\" \
+        -DCMAKE_SHARED_LINKER_FLAGS=\"-L${ANDROID_LIB_PATH} -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all\" \
+        -DGGML_DLCU=ON \
+        -DCMAKE_VERBOSE_MAKEFILE=ON \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_BACKEND_DL=ON \
+        -DGGML_CPU_ALL_VARIANTS=OFF \
+        -DGGML_OPENMP=OFF \
+        -DGGML_LLAMAFILE=OFF \
+        -DGGML_CUDA_GRAPHS=OFF \
+        -DLLAMA_CURL=OFF \
+        -DCURL_FOUND=FALSE \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DGGML_CUDA_FA=ON \
+        -DGGML_CUDA_FA_ALL_QUANTS=ON \
+        -DGGML_RVV=OFF \
+        -DGGML_NATIVE=OFF \
+        -DSDK_DIR=${sdk} \
+        -DCUDA_NVCC_EXECUTABLE=${CUDA_NVCC_EXECUTABLE} \
+        -DCMAKE_CUDA_COMPILER=${CUDA_NVCC_EXECUTABLE} \
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH"
+
+    exec_with_log "$cmake_cmd"
+
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] CMake configuration failed for Android platform" | tee -a "$compile_log"
+        echo "[ERROR] Check cmake logs for details: $compile_log" | tee -a "$compile_log"
+        exit 1
+    fi
+    echo "[INFO] CMake configuration completed successfully for Android" | tee -a "$compile_log"
 elif [ "$ARCH" = "riscv64" ]; then
     echo "[INFO] Detected RISC-V 64-bit platform" | tee -a "$compile_log"
 
