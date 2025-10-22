@@ -249,8 +249,25 @@ static cudaDataType_t ggml_ptr_elem_size_to_cuda_dtype(size_t elem_size) {
     }
 }
 
-// DL: used to store the gptq-format weight tensor.
-static std::unordered_map<const ggml_tensor*, ggml_gptq_data*> g_gptq_weights_map;
+struct ggml_gptq_cache_key {
+    const ggml_tensor* base;
+    int device;
+
+    bool operator==(const ggml_gptq_cache_key & other) const noexcept {
+        return base == other.base && device == other.device;
+    }
+};
+
+struct ggml_gptq_cache_key_hash {
+    size_t operator()(const ggml_gptq_cache_key & key) const noexcept {
+        const size_t h1 = std::hash<const void*>{}(key.base);
+        const size_t h2 = std::hash<int>{}(key.device);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ull + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+// DL: used to store the gptq-format weight tensor per (tensor, device).
+static std::unordered_map<ggml_gptq_cache_key, ggml_gptq_data*, ggml_gptq_cache_key_hash> g_gptq_weights_map;
 static std::mutex g_gptq_weights_mutex;
 
 // helper: trace to the base (non-view) tensor
@@ -262,14 +279,16 @@ static inline const ggml_tensor * ggml_cuda_get_base_tensor(const ggml_tensor * 
 }
 
 // DL: used to store the gptq-format weight tensor.
-static void ggml_cuda_gptq_store_weight(const ggml_tensor* tensor, ggml_gptq_data* gptq_data) {
+static void ggml_cuda_gptq_store_weight(const ggml_tensor* tensor, ggml_gptq_data* gptq_data, int device_id) {
     std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
 
     // always use base tensor as the key
     const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
 
+    const ggml_gptq_cache_key key { base, device_id };
+
     // DL: if the weight tensor already exists, release the old one.
-    auto it = g_gptq_weights_map.find(base);
+    auto it = g_gptq_weights_map.find(key);
     if (it != g_gptq_weights_map.end()) {
         ggml_gptq_data* old_data = it->second;
         if (old_data->qweight) cudaFree(old_data->qweight);
@@ -278,20 +297,163 @@ static void ggml_cuda_gptq_store_weight(const ggml_tensor* tensor, ggml_gptq_dat
         delete old_data;
     }
 
-    g_gptq_weights_map[base] = gptq_data;
+    g_gptq_weights_map[key] = gptq_data;
 }
 
-static ggml_gptq_data* ggml_cuda_gptq_get_weight(const ggml_tensor* tensor) {
+static ggml_gptq_data* ggml_cuda_gptq_get_weight(const ggml_tensor* tensor, int device_id) {
     std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
     const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
-    auto it = g_gptq_weights_map.find(base);
+
+    const ggml_gptq_cache_key key { base, device_id };
+
+    auto it = g_gptq_weights_map.find(key);
     return (it != g_gptq_weights_map.end()) ? it->second : nullptr;
 }
 
-static bool ggml_cuda_gptq_has_weight(const ggml_tensor* tensor) {
+static bool ggml_cuda_gptq_has_weight(const ggml_tensor* tensor, int device_id) {
     std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
     const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
-    return g_gptq_weights_map.find(base) != g_gptq_weights_map.end();
+
+    const ggml_gptq_cache_key key { base, device_id };
+
+    return g_gptq_weights_map.find(key) != g_gptq_weights_map.end();
+}
+
+static ggml_gptq_data* ggml_cuda_gptq_get_weight_any(const ggml_tensor* tensor, int * device_id_out) {
+    std::lock_guard<std::mutex> lock(g_gptq_weights_mutex);
+    const ggml_tensor * base = ggml_cuda_get_base_tensor(tensor);
+    for (const auto & entry : g_gptq_weights_map) {
+        if (entry.first.base == base) {
+            if (device_id_out) {
+                *device_id_out = entry.first.device;
+            }
+            return entry.second;
+        }
+    }
+    if (device_id_out) {
+        *device_id_out = -1;
+    }
+    return nullptr;
+}
+
+static bool ggml_cuda_gptq_has_any_weight(const ggml_tensor* tensor) {
+    int dummy_device = -1;
+    return ggml_cuda_gptq_get_weight_any(tensor, &dummy_device) != nullptr;
+}
+
+static int ggml_cuda_gptq_default_bits() {
+    const char * env = getenv("GGML_QUANT_BITS");
+    if (env != nullptr) {
+        int bits = atoi(env);
+        if (bits == 4 || bits == 8) {
+            return bits;
+        }
+    }
+    return 4;
+}
+
+static void ggml_cuda_copy_device_buffer(void * dst, int dst_device, const void * src, int src_device, size_t size) {
+    if (size == 0) {
+        return;
+    }
+
+    if (src_device == dst_device) {
+        ggml_cuda_set_device(dst_device);
+        CUDA_CHECK(cudaMemcpy(dst, src, size, cudaMemcpyDeviceToDevice));
+        return;
+    }
+
+    cudaError_t err = cudaMemcpyPeer(dst, dst_device, src, src_device, size);
+    if (err == cudaErrorInvalidDevice || err == cudaErrorPeerAccessUnsupported || err == cudaErrorInvalidValue || err == cudaErrorInvalidDevicePointer) {
+        // Peer access unavailable, fall back to host staging
+        (void)cudaGetLastError(); // clear the error
+        std::vector<char> host_buffer(size);
+
+        ggml_cuda_set_device(src_device);
+        CUDA_CHECK(cudaMemcpy(host_buffer.data(), src, size, cudaMemcpyDeviceToHost));
+
+        ggml_cuda_set_device(dst_device);
+        CUDA_CHECK(cudaMemcpy(dst, host_buffer.data(), size, cudaMemcpyHostToDevice));
+    } else {
+        CUDA_CHECK(err);
+    }
+}
+
+static ggml_gptq_data* ggml_cuda_gptq_clone_weight(const ggml_tensor* tensor, const ggml_gptq_data* src_data, int src_device, int dst_device) {
+    GGML_ASSERT(src_data != nullptr);
+    fprintf(stderr, "[ggml-dlcu] cloning GPTQ weight '%s' from device %d to device %d\n",
+            tensor->name ? tensor->name : "(null)", src_device, dst_device);
+
+    ggml_gptq_data* cloned = new ggml_gptq_data();
+    cloned->bits         = src_data->bits;
+    cloned->group_size   = src_data->group_size;
+    cloned->scales_type  = src_data->scales_type;
+    cloned->qzeros_type  = src_data->qzeros_type;
+    cloned->num_groups   = src_data->num_groups;
+    cloned->M            = src_data->M;
+    cloned->K            = src_data->K;
+    cloned->qweight_size = src_data->qweight_size;
+    cloned->qzeros_size  = src_data->qzeros_size;
+    cloned->scales_size  = src_data->scales_size;
+
+    ggml_cuda_set_device(dst_device);
+
+    if (cloned->qweight_size > 0) {
+        CUDA_CHECK(cudaMalloc(&cloned->qweight, cloned->qweight_size));
+        ggml_cuda_copy_device_buffer(cloned->qweight, dst_device, src_data->qweight, src_device, cloned->qweight_size);
+    } else {
+        cloned->qweight = nullptr;
+    }
+
+    if (cloned->qzeros_size > 0) {
+        CUDA_CHECK(cudaMalloc(&cloned->qzeros, cloned->qzeros_size));
+        ggml_cuda_copy_device_buffer(cloned->qzeros, dst_device, src_data->qzeros, src_device, cloned->qzeros_size);
+    } else {
+        cloned->qzeros = nullptr;
+    }
+
+    if (cloned->scales_size > 0) {
+        CUDA_CHECK(cudaMalloc(&cloned->scales, cloned->scales_size));
+        ggml_cuda_copy_device_buffer(cloned->scales, dst_device, src_data->scales, src_device, cloned->scales_size);
+    } else {
+        cloned->scales = nullptr;
+    }
+
+    ggml_cuda_gptq_store_weight(tensor, cloned, dst_device);
+
+    return cloned;
+}
+
+static void ggml_cuda_gptq_ensure_on_device(const ggml_tensor* tensor, ggml_gptq_data* data, int device_id) {
+    auto ensure_ptr = [&](void** ptr, size_t size, const char* label) {
+        if (*ptr == nullptr || size == 0) {
+            return;
+        }
+
+        cudaPointerAttributes attr;
+        cudaError_t err = cudaPointerGetAttributes(&attr, *ptr);
+        if (err != cudaSuccess || attr.type != cudaMemoryTypeDevice || attr.device != device_id) {
+            const int src_device = (err == cudaSuccess && attr.type == cudaMemoryTypeDevice) ? attr.device : device_id;
+            void* new_ptr = nullptr;
+            ggml_cuda_set_device(device_id);
+            CUDA_CHECK(cudaMalloc(&new_ptr, size));
+            ggml_cuda_copy_device_buffer(new_ptr, device_id, *ptr, src_device, size);
+            if (attr.type == cudaMemoryTypeDevice && attr.device >= 0) {
+                ggml_cuda_set_device(attr.device);
+                CUDA_CHECK(cudaFree(*ptr));
+            } else {
+                ggml_cuda_set_device(device_id);
+                CUDA_CHECK(cudaFree(*ptr));
+            }
+            *ptr = new_ptr;
+            fprintf(stderr, "[ggml-dlcu] migrated GPTQ buffer %s for tensor '%s' to device %d\n",
+                    label, tensor->name ? tensor->name : "(null)", device_id);
+        }
+    };
+
+    ensure_ptr(&data->qweight, data->qweight_size, "qweight");
+    ensure_ptr(&data->qzeros,  data->qzeros_size,  "qzeros");
+    ensure_ptr(&data->scales,  data->scales_size,  "scales");
 }
 
 static void ggml_cuda_gptq_clear_weights() {
@@ -338,7 +500,10 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
 
     int num_groups = (K + group_size - 1) / group_size;
 
-    int id = ggml_cuda_get_device();
+    const int id = ctx.device;
+    ggml_cuda_set_device(id);
+    fprintf(stderr, "[ggml-dlcu] quantizing tensor '%s' on device %d with %d-bit GPTQ\n",
+            src0->name ? src0->name : "(null)", id, bits);
 
     // 3. create gptq_data and allocate persistent GPU memory directly
     ggml_gptq_data* gptq_data = new ggml_gptq_data;
@@ -422,7 +587,7 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     gptq_data->qzeros_size = M * num_groups * sizeof(half);
     gptq_data->scales_size = M * num_groups * sizeof(half);
     // DL: store it to the mapping table
-    ggml_cuda_gptq_store_weight(src0, gptq_data);
+    ggml_cuda_gptq_store_weight(src0, gptq_data, id);
 }
 
 static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, const ggml_tensor * src0) {
@@ -548,6 +713,35 @@ static void ggml_cuda_debug_verify_dequant(const ggml_gptq_data & gptq_data, con
     printf("[dequant-verify] samples=%zu, avg_abs_err=%e, max_abs_err=%e\n", max_check, avg_err, max_err);
 }
 
+static ggml_gptq_data* ggml_cuda_gptq_get_or_create_weight(
+    ggml_backend_cuda_context & ctx,
+    const ggml_tensor* tensor,
+    int device_id) {
+
+    ggml_gptq_data* gptq_weight = ggml_cuda_gptq_get_weight(tensor, device_id);
+    if (gptq_weight) {
+        return gptq_weight;
+    }
+
+    int existing_device = -1;
+    ggml_gptq_data* existing_weight = ggml_cuda_gptq_get_weight_any(tensor, &existing_device);
+    if (existing_weight) {
+        gptq_weight = ggml_cuda_gptq_clone_weight(tensor, existing_weight, existing_device, device_id);
+    } else {
+        const int bits = ggml_cuda_gptq_default_bits();
+        fprintf(stderr, "[ggml-dlcu] device %d missing GPTQ weight for '%s', re-quantizing (%d-bit)\n",
+                device_id, tensor->name ? tensor->name : "(null)", bits);
+        ggml_cuda_gptq_quantize_and_store(ctx, tensor->data, tensor, bits);
+        gptq_weight = ggml_cuda_gptq_get_weight(tensor, device_id);
+    }
+
+    if (gptq_weight) {
+        ggml_cuda_gptq_ensure_on_device(tensor, gptq_weight, device_id);
+    }
+
+    return gptq_weight;
+}
+
 // DL: used to quantize the weight tensor from CPU, and then store it to the mapping table.
 void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor) {
     CUDA_CHECK(cudaSetDevice(device_id));
@@ -559,11 +753,11 @@ void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(int device_id, const ggm
     int bits = GGML_QUANT_BITS ? atoi(GGML_QUANT_BITS) : 4; // default to 4-bit
 
     // ensure base mapping exists for reuse scenario
-    if (!ggml_cuda_gptq_has_weight(base)) {
+    if (!ggml_cuda_gptq_has_weight(base, device_id)) {
         ggml_cuda_gptq_quantize_and_store(ctx, base->data, base, bits);
     }
 
-    GGML_ASSERT(ggml_cuda_gptq_has_weight(base) && "ggml_cuda_gptq_quantize_and_store unified the base and view quantization, so we can just return here.");
+    GGML_ASSERT(ggml_cuda_gptq_has_weight(base, device_id) && "ggml_cuda_gptq_quantize_and_store unified the base and view quantization, so we can just return here.");
 }
 
 // ============================================================================
@@ -668,6 +862,8 @@ static void ggml_cuda_dlblas_gemmex(
 static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     // In unit tests. TODO: Refactor : Others that do not go through llama_model::load_tensors are theoretically needed
     static const bool is_test_mode = getenv("GGML_TEST_MODE") != nullptr;
+    const int id = ggml_cuda_get_device();
+    ggml_cuda_set_device(id);
     if (is_test_mode) {
         // GGML_LOG_DEBUG("DL: [%s] GGML_TEST_MODE=1\n", __FUNCTION__);
         const ggml_tensor * base = ggml_cuda_get_base_tensor(src0);
@@ -677,23 +873,36 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
 
         // quantize the base tensor anyway.
         ggml_cuda_gptq_quantize_and_store(ctx, base->data, base, bits);
-        GGML_ASSERT(ggml_cuda_gptq_has_weight(base) && "DL: [GGML_TEST_MODE] ggml_cuda_gptq_quantize_and_store failed");
+        GGML_ASSERT(ggml_cuda_gptq_has_weight(base, id) && "DL: [GGML_TEST_MODE] ggml_cuda_gptq_quantize_and_store failed");
     }
 
-    // DL: check if the weight tensor has been quantized
-    ggml_gptq_data* gptq_weight = ggml_cuda_gptq_get_weight(src0);
-
+    // DL: ensure weight tensor is available on this device
+    ggml_gptq_data* gptq_weight = ggml_cuda_gptq_get_or_create_weight(ctx, src0, id);
     if (!gptq_weight) {
         printf("src0->name: %s, src0->type: %s\n", src0->name, ggml_type_name(src0->type));
-        GGML_ABORT("DL: [%s] gptq_data is nullptr", __FUNCTION__);
+        GGML_ABORT("DL: [%s] failed to prepare gptq_data", __FUNCTION__);
+    }
+
+    cudaStream_t stream = ctx.stream();
+    const int64_t ne10 = src1->ne[0];
+    const int64_t ne11 = src1->ne[1];
+    const size_t ne_dst = (size_t) ggml_nelements(dst);
+
+    // Stage src1 on device if needed
+    const bool src1_on_host = ggml_backend_buffer_is_host(src1->buffer);
+    ggml_cuda_pool_alloc<char> src1_device_storage(ctx.pool(id));
+    const void * src1_device_ptr = nullptr;
+    if (src1_on_host) {
+        size_t bytes = ggml_nbytes(src1);
+        char * staging = src1_device_storage.alloc(bytes);
+        CUDA_CHECK(cudaMemcpyAsync(staging, src1->data, bytes, cudaMemcpyHostToDevice, stream));
+        src1_device_ptr = staging;
+    } else {
+        src1_device_ptr = src1->data;
     }
 
     // Prepare src1 pointer/type conversion (fp16 path preferred)
     const void * src1_ptr = nullptr;
-    const int64_t ne10 = src1->ne[0];
-    const int64_t ne11 = src1->ne[1];
-    int id = ggml_cuda_get_device();
-    cudaStream_t stream = ctx.stream();
     ggml_type src1_type = src1->type;
     ggml_cuda_pool_alloc<half> src1_as_f16(ctx.pool(id));
     ggml_cuda_pool_alloc<nv_bfloat16> src1_as_bf16(ctx.pool(id));
@@ -703,9 +912,11 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
             GGML_ASSERT(to_fp16_cuda != nullptr);
             size_t ne = ne10*ne11;
             src1_as_f16.alloc(ne);
-            to_fp16_cuda(src1->data, src1_as_f16.get(), ne, stream);
+            to_fp16_cuda(src1_device_ptr, src1_as_f16.get(), ne, stream);
+            src1_ptr = src1_as_f16.get();
+        } else {
+            src1_ptr = src1_device_ptr;
         }
-        src1_ptr = src1->type == GGML_TYPE_F16 ? (const half *) src1->data : src1_as_f16.get();
         src1_type = GGML_TYPE_F16;
     } else {
         GGML_ABORT("DL: do not support other types for now. src1->type: %s", ggml_type_name(src1->type));
@@ -713,7 +924,7 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
         GGML_ASSERT(to_bf16_cuda != nullptr);
         size_t ne = ne10*ne11;
         src1_as_bf16.alloc(ne);
-        to_bf16_cuda(src1->data, src1_as_bf16.get(), ne, stream);
+        to_bf16_cuda(src1_device_ptr, src1_as_bf16.get(), ne, stream);
         src1_ptr = src1_as_bf16.get();
         src1_type = GGML_TYPE_BF16;
     }
@@ -721,17 +932,55 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
     if (DEVIT) {
         ggml_cuda_debug_verify_dequant(*gptq_weight, src0);
     }
-    if (dst->type == GGML_TYPE_F32) {
-        ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F32);
-    } else if (dst->type == GGML_TYPE_F16) {
-        ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst->data, GGML_TYPE_F16);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Allocate destination buffer on device (compute in FP32)
+    const bool dst_on_host = ggml_backend_buffer_is_host(dst->buffer);
+    ggml_cuda_pool_alloc<float> dst_fp32_storage(ctx.pool(id));
+    float * dst_device_fp32 = nullptr;
+    bool needs_write_back = true;
+
+    if (!dst_on_host && dst->type == GGML_TYPE_F32) {
+        dst_device_fp32 = (float *) dst->data;
+        needs_write_back = false;
     } else {
-        ggml_type dst_type = GGML_TYPE_F16;
-        ggml_cuda_pool_alloc<half> dst_fp16(ctx.pool(id), dst->ne[0]*dst->ne[1]);
-        ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst_fp16.get(), dst_type);
-        const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
-        to_fp32_cuda(dst_fp16.get(), (float*)dst->data, dst->ne[0]*dst->ne[1], stream);
+        dst_device_fp32 = dst_fp32_storage.alloc(ne_dst);
     }
+
+    ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst_device_fp32, GGML_TYPE_F32);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Write back results to destination tensor
+    if (!needs_write_back) {
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        return;
+    }
+
+    if (dst->type == GGML_TYPE_F32) {
+        size_t bytes = ne_dst * sizeof(float);
+        if (dst_on_host) {
+            CUDA_CHECK(cudaMemcpyAsync(dst->data, dst_device_fp32, bytes, cudaMemcpyDeviceToHost, stream));
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(dst->data, dst_device_fp32, bytes, cudaMemcpyDeviceToDevice, stream));
+        }
+    } else if (dst->type == GGML_TYPE_F16) {
+        ggml_cuda_pool_alloc<half> dst_fp16(ctx.pool(id));
+        half * dst_device_fp16 = dst_fp16.alloc(ne_dst);
+        const to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(GGML_TYPE_F32);
+        GGML_ASSERT(to_fp16 != nullptr);
+        to_fp16(dst_device_fp32, dst_device_fp16, ne_dst, stream);
+        size_t bytes = ne_dst * sizeof(half);
+        if (dst_on_host) {
+            CUDA_CHECK(cudaMemcpyAsync(dst->data, dst_device_fp16, bytes, cudaMemcpyDeviceToHost, stream));
+        } else {
+            CUDA_CHECK(cudaMemcpyAsync(dst->data, dst_device_fp16, bytes, cudaMemcpyDeviceToDevice, stream));
+        }
+    } else {
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        GGML_ABORT("DL: [%s] unsupported dst type %s", __FUNCTION__, ggml_type_name(dst->type));
+    }
+
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     return;
 
     // should not reach here
@@ -792,7 +1041,8 @@ static const ggml_tensor* ggml_dl_get_base_tensor(const ggml_tensor* t) {
 
 // GPTQ Weight Management (exposing static functions)
 gptq_weight_data* get_gptq_weight(const ggml_tensor* tensor) {
-    ggml_gptq_data* gptq = ggml_cuda_gptq_get_weight(tensor);
+    const int device_id = ggml_cuda_get_device();
+    ggml_gptq_data* gptq = ggml_cuda_gptq_get_weight(tensor, device_id);
     if (!gptq) return nullptr;
 
     // Convert to plugin interface type
@@ -830,7 +1080,8 @@ void store_gptq_weight(const ggml_tensor* tensor, gptq_weight_data* data) {
     gptq->scales_type = data->scales_type;
     gptq->num_groups = (data->K + data->group_size - 1) / data->group_size;
 
-    ggml_cuda_gptq_store_weight(tensor, gptq);
+    const int device_id = ggml_cuda_get_device();
+    ggml_cuda_gptq_store_weight(tensor, gptq, device_id);
 }
 
 void quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor) {
@@ -848,12 +1099,16 @@ void mul_mat_dlblas(
 }
 
 bool should_use_dlblas(
+    ggml_backend_cuda_context& ctx,
     const ggml_tensor* src0,
     const ggml_tensor* src1,
     const ggml_tensor* dst) {
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(src1);
+    GGML_UNUSED(dst);
 
-    // Check if GPTQ weight exists
-    return ggml_cuda_gptq_has_weight(src0);
+    const int device_id = ggml_cuda_get_device();
+    return ggml_cuda_gptq_has_weight(src0, device_id) || ggml_cuda_gptq_has_any_weight(src0);
 }
 
 // Debug utilities

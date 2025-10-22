@@ -2051,14 +2051,6 @@ static void ggml_cuda_mul_mat_batched_cublas(ggml_backend_cuda_context & ctx, co
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
 
-#ifdef GGML_USE_DLCU
-    // Try DL plugin first
-    if (ggml_dl::should_use_dlblas(src0, src1, dst)) {
-        ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
-        return;
-    }
-#endif
-
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
@@ -2160,6 +2152,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     // only support single batch,  TODO: support batch broadcast
     // use a quantitative version cublasGemmBatchedEx api. dlblasGemmBatchedEx ?
     dlblas_available = dlblas_available && single_batch;
+
+#ifdef GGML_USE_DLCU
+    if (dlblas_available) {
+        dlblas_available = ggml_dl::should_use_dlblas(ctx, src0, src1, dst);
+    }
+#endif
 
     // Default is false, can be enabled by setting GGML_DLBLAS_CONSISTENT=1 | bugid : 15564
     bool use_consistent_path = (env_dlblas_consistent != nullptr && env_dlblas_consistent[0] == '1');

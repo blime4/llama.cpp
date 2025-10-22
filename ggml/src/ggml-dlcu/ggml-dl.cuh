@@ -134,6 +134,7 @@ void mul_mat_dlblas(
  * @return true if dlblas can handle this operation
  */
 bool should_use_dlblas(
+    ggml_backend_cuda_context& ctx,
     const ggml_tensor* src0,
     const ggml_tensor* src1,
     const ggml_tensor* dst);
