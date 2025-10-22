@@ -97,7 +97,6 @@ Options:
   --big                   Use big model for testing (e.g., Qwen3-30B instead of Qwen2.5-1.5B)
   --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
-  --no-fa                 Disable Flash Attention (do not use -fa flag)
                           Device check uses standalone script: .dlci/check_device_status.sh
   --dlpti "OPTIONS"       Enable dlPTI profiling with specified options
                           Example: --dlpti "--activity-mask cmd,cu,curt --data-file profile.db"
@@ -728,8 +727,8 @@ compile_llama_cpp() {
         -DGGML_CUDA_GRAPHS=OFF
         -DLLAMA_CURL=OFF
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-        -DGGML_CUDA_FA=OFF
-        -DGGML_CUDA_FA_ALL_QUANTS=OFF
+        -DGGML_CUDA_FA=ON
+        -DGGML_CUDA_FA_ALL_QUANTS=ON
         -DSDK_DIR="$sdk_path"
     )
 
@@ -853,11 +852,10 @@ run_tests_with_repeat() {
     local repeat_count="${6:-1}"
     local enable_dlpti="${7:-false}"
     local dlpti_options="${8:-}"
-    local no_fa="${9:-false}"
 
     if [ "$repeat_count" -eq 1 ]; then
         # Single run
-        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" "$no_fa"
+        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options"
         return $?
     fi
 
@@ -878,7 +876,7 @@ run_tests_with_repeat() {
         # Print progress on same line
         printf "\r${BLUE}[INFO]${NC} Progress: [%d/%d] " "$i" "$repeat_count"
 
-        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" "$no_fa" >/dev/null 2>&1; then
+        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" >/dev/null 2>&1; then
             passed_runs=$((passed_runs + 1))
             printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d" "$passed_runs" "$failed_runs"
         else
@@ -952,7 +950,6 @@ run_tests() {
     local simple_model="${5:-false}"
     local enable_dlpti="${6:-false}"
     local dlpti_options="${7:-}"
-    local no_fa="${8:-false}"
 
     log_info "Starting test execution (platform: $platform)"
     local test_start_time=$(date +%s)
@@ -1045,10 +1042,6 @@ run_tests() {
         test_script_args="$test_script_args --big"
         log_info "Big model mode enabled"
     fi
-    if [ "$no_fa" = "true" ]; then
-        test_script_args="$test_script_args --no-fa"
-        log_info "Flash Attention disabled (--no-fa)"
-    fi
 
     # Check if the comprehensive test script exists
     local test_script="${REPO_PATH}/.dlci/test_llama_cpp.sh"
@@ -1130,7 +1123,7 @@ run_tests() {
                 bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE" &
             fi
         else
-            log_info "Output will be saved to $MAIN_LOG_FILE"
+            log_info "Output will be saved to main log file"
             if [ "$enable_dlpti" = "true" ]; then
                 env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
                 $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
@@ -1184,7 +1177,7 @@ run_tests() {
                 ret=${PIPESTATUS[0]}
             fi
         else
-            log_info "Output will be saved to $MAIN_LOG_FILE"
+            log_info "Output will be saved to main log file"
             if [ "$enable_dlpti" = "true" ]; then
                 env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
                 $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
@@ -1335,7 +1328,6 @@ main() {
     local repeat_test=1
     local enable_dlpti=false
     local dlpti_options=""
-    local no_fa=false
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -1404,10 +1396,6 @@ main() {
                 enable_dlpti=true
                 dlpti_options="$2"
                 shift 2
-                ;;
-            --no-fa)
-                no_fa=true
-                shift
                 ;;
             --help|-h)
                 show_usage
@@ -1509,9 +1497,6 @@ main() {
         log_info "dlPTI profiling: ENABLED"
         log_info "dlPTI options: $dlpti_options"
     fi
-    if [ "$no_fa" = "true" ]; then
-        log_info "Flash Attention: DISABLED (--no-fa)"
-    fi
     echo ""
 
     # Configure platform parameters
@@ -1555,7 +1540,7 @@ main() {
                     log_warn "Device status check skipped by user request"
                 fi
 
-                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$repeat_test" "$enable_dlpti" "$dlpti_options" "$no_fa"
+                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$repeat_test" "$enable_dlpti" "$dlpti_options"
 
                 if [ "$action" = "test" ]; then
                     log_success "Testing completed"
