@@ -713,6 +713,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
 
     const int32_t n_pos_cur = batch.embd ? n_pos_per_embd : 1;
     #ifdef GGML_USE_DLFA
+    // DL-TODO: check the llama: fix ASAN error with M-RoPE (#16848)
     const uint32_t padding_size = get_cuda_graph_padding(n_tokens);
     const int64_t n_embd_all = batch.embd ? (int64_t) padding_size*n_embd : 0;
     const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_cur;
@@ -728,7 +729,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     udata->real_n_tokens = n_tokens;
     #else
     const int64_t n_embd_all = batch.embd ? (int64_t) n_tokens*n_embd : 0;
-    const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_cur;
+    const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_per_embd;
 
     udata->token     .resize(n_tokens);
     udata->embd      .resize(n_embd_all);
@@ -751,8 +752,13 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
             memcpy(udata->embd.data() + i*n_embd, batch.embd + (int64_t) idxs[i]*n_embd, n_embd*sizeof(float));
         }
 
-        for (int j = 0; j < n_pos_cur; ++j) {
-            udata->pos[j*n_tokens + i] = batch.pos[j*batch.n_tokens + idxs[i]];
+        for (size_t j = 0; j < (size_t)n_pos_per_embd; ++j) {
+            // if we are using M-RoPE
+            //     if the current batch is text, we need to broadcast the same position across all RoPE sections
+            //     otherwise, the input batch is image embeddings, we copy the positions as-is
+            // if we are not using M-RoPE, there is only one position per token (this loop runs only once)
+            size_t src_off = batch.token ? 0 : j*batch.n_tokens;
+            udata->pos[j*n_tokens + i] = batch.pos[src_off + idxs[i]];
         }
 
         udata->n_seq_id[i] = batch.n_seq_id[idxs[i]];
@@ -790,7 +796,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         /*.n_seq_tokens =*/ n_tokens/n_seqs,
         /*.n_seqs       =*/ n_seqs,
         /*.n_seqs_unq   =*/ (uint32_t) udata->seq_id_unq.size(),
-
+        /*.n_pos        =*/ n_pos_per_embd,
         /*.token        =*/ batch.token ? udata->token.data() : nullptr,
         /*.embd         =*/ batch.embd ? udata->embd.data() : nullptr,
         /*.pos          =*/ udata->pos.data(),
