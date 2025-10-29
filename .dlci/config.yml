@@ -10,8 +10,8 @@ docker_images:
     image: "c-25:manylinux_2_28-gcc12-aarch64-20250702"
     dev_image: "c-25:manylinux_2_28-gcc12-aarch64-20250702-dev"
   riscv64:
-    image: "c-37:ubuntu22.04-riscv-20250822"
-    dev_image: "c-37:ubuntu22.04-riscv-20250822-dev"
+    image: "c-40:manylinux_2_39-riscv64-20250911"
+    dev_image: "c-40:manylinux_2_39-riscv64-20250911"
   loongarch64:
     image: "c-41:manylinux_2_38-loongarch64-20250910"
     dev_image: "c-41:manylinux_2_38-loongarch64-20250910"
@@ -22,14 +22,18 @@ docker_images:
 platform_suffixes:
   x86_64: "manylinux_2_28-x86_64"
   aarch64: "manylinux_2_28-aarch64"
-  riscv64: "linux-riscv64"
+  riscv64: "manylinux_2_39-riscv64"
   loongarch64: "manylinux_2_38-loongarch64"
   android: "android-arm64-v8a-api25"
 
 build:
   sdk:
     tag: "V2_SOFTWARE_master_202510172141"
+<<<<<<< HEAD
+    workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
+=======
     workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
+>>>>>>> dl-main
     docker_repo_path: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
     # SDK download configuration
@@ -45,7 +49,7 @@ build:
       riscv64:
         repository: "ai-sw-sdk-v2-test"
         filename_pattern: "*-riscv64.tar.bz2"
-        extract_dir: "sdk_riscv64"
+        extract_dir: "sdk"
       loongarch64:
         repository: "ai-sw-sdk-v2-test"
         filename_pattern: "*-loongarch.tar.bz2"

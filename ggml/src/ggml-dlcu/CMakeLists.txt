@@ -99,6 +99,39 @@ endif()
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# Detect GCC version and set C++ include paths for CUDA compilation
+find_program(GCC_EXECUTABLE gcc)
+if(GCC_EXECUTABLE)
+    execute_process(
+        COMMAND ${GCC_EXECUTABLE} -dumpversion
+        OUTPUT_VARIABLE GCC_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    string(REGEX REPLACE "([0-9]+).*" "\\1" GCC_MAJOR_VERSION ${GCC_VERSION})
+    message("-- Detected GCC version: ${GCC_VERSION} (major: ${GCC_MAJOR_VERSION})")
+
+    # Detect target triple for C++ includes
+    execute_process(
+        COMMAND ${GCC_EXECUTABLE} -dumpmachine
+        OUTPUT_VARIABLE GCC_TARGET_TRIPLE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message("-- GCC target triple: ${GCC_TARGET_TRIPLE}")
+
+    # For target_compile_options (list format)
+    set(CXX_STDLIB_PATHS_LIST
+        "-cxx-isystem" "/usr/include/c++/${GCC_MAJOR_VERSION}"
+        "-cxx-isystem" "/usr/include/c++/${GCC_MAJOR_VERSION}/${GCC_TARGET_TRIPLE}"
+    )
+
+    # For COMPILE_FLAGS (string format with spaces)
+    set(CXX_STDLIB_PATHS_STRING "-cxx-isystem /usr/include/c++/${GCC_MAJOR_VERSION} -cxx-isystem /usr/include/c++/${GCC_MAJOR_VERSION}/${GCC_TARGET_TRIPLE}")
+else()
+    message(WARNING "GCC not found, C++ stdlib paths may not be set correctly")
+    set(CXX_STDLIB_PATHS_LIST "")
+    set(CXX_STDLIB_PATHS_STRING "")
+endif()
+
 set_source_files_properties(${GGML_SOURCES_CUDA} PROPERTIES LANGUAGE CXX)
 
 ggml_add_backend_library(ggml-dlcu
@@ -178,30 +211,16 @@ endif()
 
 
 # Set base compile options for DLCU
-if(ANDROID)
-    set(DLCU_COMPILE_OPTIONS
-        -I${SDK_DIR}/include
-        -L${SDK_DIR}/lib
-        -use_fast_math
-        -mllvm
-        -dlgpu-lower-xtpvn=true
-        --save-temps=.
-        -fPIC
-        --cuda-gpu-arch=dlgput64
-    )
-    message(STATUS "Android: Including SDK with compat layer override")
-else()
-    set(DLCU_COMPILE_OPTIONS
-        -I${SDK_DIR}/include
-        -L${SDK_DIR}/lib
-        -use_fast_math
-        -mllvm
-        -dlgpu-lower-xtpvn=true
-        --save-temps=.
-        -fPIC
-        --cuda-gpu-arch=dlgput64
-    )
-endif()
+set(DLCU_COMPILE_OPTIONS
+    -I${SDK_DIR}/include
+    -L${SDK_DIR}/lib
+    -use_fast_math
+    -mllvm
+    -dlgpu-lower-xtpvn=true
+    --save-temps=.
+    -fPIC
+    --cuda-gpu-arch=dlgput64
+)
 
 # Add common CUDA options
 list(APPEND DLCU_COMPILE_OPTIONS

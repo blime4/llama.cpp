@@ -52,6 +52,23 @@ fi
 timestamp=$(date +%Y%m%d_%H%M%S)
 compile_log="${logs_dir}/compile_${timestamp}.log"
 
+# Function to output log content on error
+output_log_on_error() {
+    echo "==================== ERROR LOG CONTENT ====================" >&2
+    echo "[DEBUG] Log file path: $compile_log" >&2
+    if [ -f "$compile_log" ]; then
+        echo "[DEBUG] Log file exists, size: $(du -h "$compile_log" | cut -f1)" >&2
+        echo "[DEBUG] Outputting log content:" >&2
+        cat "$compile_log"
+    else
+        echo "[ERROR] Log file not found: $compile_log" >&2
+        echo "[DEBUG] Current directory: $(pwd)" >&2
+        echo "[DEBUG] Available files in logs directory:" >&2
+        ls -la "$(dirname "$compile_log")" 2>/dev/null || echo "Directory not found"
+    fi
+    echo "=============================================================" >&2
+}
+
 # Function to execute command with logging
 exec_with_log() {
     local cmd="$1"
@@ -65,6 +82,7 @@ echo "[INFO] Logs will be saved to: $compile_log"
 # Ensure sdk_path is set and valid
 if [ -z "$sdk_path" ] || [ ! -d "$sdk_path" ]; then
   echo "[ERROR] sdk_path is not set or is not a valid directory. Current value: '$sdk_path'" | tee -a "$compile_log"
+  output_log_on_error
   exit 1
 fi
 
@@ -138,6 +156,7 @@ echo "[INFO] Setting up custom CUDA compiler wrapper..." | tee -a "$compile_log"
 # Create the custom bin directory if it doesn't exist.
 mkdir -p "$CUSTOM_BIN_DIR" || {
     echo "[ERROR] Failed to create custom bin directory at $CUSTOM_BIN_DIR." | tee -a "$compile_log"
+    output_log_on_error
     exit 1
 }
 
@@ -258,6 +277,12 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         ${cmake_ccache_option}"
 
     exec_with_log "$cmake_cmd"
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] CMake configuration failed for ARM platform" | tee -a "$compile_log"
+        echo "[ERROR] Check cmake logs for details: $compile_log" | tee -a "$compile_log"
+        output_log_on_error
+        exit 1
+    fi
 elif [ "$ARCH" = "loongarch64" ]; then
     echo "[INFO] Detected LoongArch64 platform" | tee -a "$compile_log"
 
@@ -296,7 +321,7 @@ elif [ "$ARCH" = "riscv64" ]; then
     echo "[INFO] Detected RISC-V 64-bit platform" | tee -a "$compile_log"
 
     # Execute CMake with logging
-    cmake_cmd="cmake -G Ninja -B ${build_dir} \
+    cmake_cmd="/usr/local/bin/cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DCMAKE_BUILD_TYPE=Release \
@@ -317,6 +342,7 @@ elif [ "$ARCH" = "riscv64" ]; then
     if [ $? -ne 0 ]; then
         echo "[ERROR] CMake configuration failed for RISC-V 64-bit platform" | tee -a "$compile_log"
         echo "[ERROR] Check cmake logs for details: $compile_log" | tee -a "$compile_log"
+        output_log_on_error
         exit 1
     fi
     echo "[INFO] CMake configuration completed successfully for RISC-V 64-bit" | tee -a "$compile_log"
@@ -340,14 +366,14 @@ else
         ${cmake_ccache_option}"
 
     exec_with_log "$cmake_cmd"
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] CMake configuration failed for x86_64 platform" | tee -a "$compile_log"
+        echo "[ERROR] Check cmake logs for details: $compile_log" | tee -a "$compile_log"
+        output_log_on_error
+        exit 1
+    fi
 fi
 
-cmake_exit_code=$?
-if [ $cmake_exit_code -ne 0 ]; then
-    echo "[ERROR] CMake configuration failed with exit code: $cmake_exit_code" | tee -a "$compile_log"
-    echo "[ERROR] Check detailed logs in: $compile_log" | tee -a "$compile_log"
-    exit 1
-fi
 echo "[INFO] CMake configuration completed successfully" | tee -a "$compile_log"
 
 echo "[INFO] Checking ccache stats before build..." | tee -a "$compile_log"
@@ -397,5 +423,8 @@ ccache --show-stats >> "$compile_log" 2>&1
 compile_log_size=$(du -h "$compile_log" | cut -f1)
 echo "[INFO] Log file created:" | tee -a "$compile_log"
 echo "[INFO]   Compile log: $compile_log ($compile_log_size)" | tee -a "$compile_log"
+
+# Clear global error trap on successful completion
+trap - ERR EXIT
 
 echo "<> compile succeed ... <>" | tee -a "$compile_log"

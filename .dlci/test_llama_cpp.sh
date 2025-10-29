@@ -205,8 +205,8 @@ if [ "$SIMPLE_TEST" = true ]; then
     # To remove a test, comment out or delete the line
     # ============================================================
     declare -a SIMPLE_TEST_LIST=(
-        # "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|NONE"
-        "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
+        "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_GPTQ_USE_POOL=1"
+        # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
         # "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
         # "ADD|${build_dir_bin}/test-backend-ops -o ADD|NONE"  # Example: Add more tests here
         # "MUL|${build_dir_bin}/test-backend-ops -o MUL|NONE"  # Example

@@ -138,7 +138,7 @@ get_latest_release_tag() {
     local sdk_tag="$2"
     local platform_suffix=$(get_platform_suffix "$platform")
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202510082141 to sdk202509180241
+    # Transform SDK_TAG from V2_SOFTWARE_master_202510172141 to sdk202509180241
     local sdk_tag_transformed=""
     if [[ "$sdk_tag" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
@@ -428,7 +428,7 @@ main() {
     # Inline download and extract logic
     local platform_suffix=$(get_platform_suffix "$DOCKER_PLATFORM")
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202510082141 to sdk202509180241
+    # Transform SDK_TAG from V2_SOFTWARE_master_202510172141 to sdk202509180241
     local sdk_tag_transformed=""
     if [[ "$DEFAULT_SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
