@@ -403,10 +403,18 @@ setup_ccache() {
 
     log_info "Configuring ccache..."
 
-    local ccache_dir="/LocalRun/$(whoami)/cache/llama_cpp_ccache"
+    local ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
     ccache --set-config cache_dir="$ccache_dir"
-    ccache --set-config max_size=20G
+    local ccache_max_size="${CCACHE_MAXSIZE:-20G}"
+    ccache --set-config max_size="$ccache_max_size"
+    if [ -n "${CCACHE_BASEDIR:-}" ]; then
+        ccache --set-config base_dir="$CCACHE_BASEDIR"
+    fi
     ccache --zero-stats
+
+    if [ -z "${CCACHE_LOGFILE:-}" ]; then
+        export CCACHE_LOGFILE="/LocalRun/$(whoami)/cache/ccache.log"
+    fi
 
     # Create custom bin directory for ccache wrappers
     local custom_bin_dir="$sdk_path/custom_bin"
@@ -740,24 +748,38 @@ compile_llama_cpp() {
     if [ "$platform" = "android" ]; then
         log_info "Setting up Android NDK toolchain for cross-compilation..."
 
-        # Android NDK toolchain path
-        local android_ndk_root="/opt/android-sdk-linux/ndk/25.2.9519653"
-        local android_toolchain_file="${android_ndk_root}/build/cmake/android.toolchain.cmake"
+        local android_ndk_root="${ANDROID_NDK_ROOT:-${NDK_ROOT:-/opt/android-sdk-linux/ndk/25.2.9519653}}"
+        local android_toolchain_file="${ANDROID_TOOLCHAIN_FILE:-${tool_chain_cmake:-${android_ndk_root}/build/cmake/android.toolchain.cmake}}"
+
+        # Support: ANDROID_API_LEVEL, ANDROID_PLATFORM, android_api_level, API
+        local android_api_candidate="${ANDROID_API_LEVEL:-${ANDROID_PLATFORM:-${android_api_level:-${API:-25}}}}"
+        if [[ "$android_api_candidate" =~ ^android- ]]; then
+            android_api_candidate="${android_api_candidate#android-}"
+        fi
+        local android_api_level="$android_api_candidate"
+        local android_platform="android-${android_api_level}"
+
+        # Allow overriding ABI/target triple
+        local android_abi="${ANDROID_ABI:-arm64-v8a}"
+        local android_target="${ANDROID_CLANG_TRIPLE:-${ANDROID_TARGET:-${TARGET:-aarch64-linux-android}}}"
 
         # Validate Android NDK exists
         if [ ! -f "$android_toolchain_file" ]; then
             log_error "Android NDK toolchain not found: $android_toolchain_file"
-            log_error "Please ensure Android NDK 25.2.9519653 is installed in /opt/android-sdk-linux/ndk/"
+            log_error "Set NDK path via ANDROID_NDK_ROOT or tool_chain_cmake"
             return 1
         fi
 
         log_info "Using Android NDK: $android_ndk_root"
         log_info "Using Android toolchain: $android_toolchain_file"
+        log_info "Android ABI: $android_abi"
+        log_info "Android API level: $android_api_level"
+        log_info "Android target triple: $android_target"
         log_info "CUDA compiler (dlcc): $CUDA_NVCC_EXECUTABLE"
 
         # Set explicit Android compilers
-        local android_c_compiler="${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
-        local android_cxx_compiler="${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
+        local android_c_compiler="${ANDROID_CC:-${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin/${android_target}${android_api_level}-clang}"
+        local android_cxx_compiler="${ANDROID_CXX:-${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/bin/${android_target}${android_api_level}-clang++}"
         log_info "Android C compiler: $android_c_compiler"
         log_info "Android C++ compiler: $android_cxx_compiler"
 
@@ -769,26 +791,31 @@ compile_llama_cpp() {
         fi
 
         # Android-specific library paths and flags
-        local android_sysroot="${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-        local android_lib_path="${android_sysroot}/usr/lib/aarch64-linux-android/28"
+        local android_sysroot="${ANDROID_SYSROOT:-${android_ndk_root}/toolchains/llvm/prebuilt/linux-x86_64/sysroot}"
+        local android_lib_path="${android_sysroot}/usr/lib/${android_target}/${android_api_level}"
+        local default_linker_flags="-L${android_lib_path} -latomic"
+        local android_linker_flags="${ANDROID_LINKER_FLAGS:-$default_linker_flags}"
+        local android_shared_linker_flags="${ANDROID_SHARED_LINKER_FLAGS:-$android_linker_flags}"
+        local android_c_flags="${ANDROID_C_FLAGS:--march=armv8-a}"
+        local android_cxx_flags="${ANDROID_CXX_FLAGS:--march=armv8-a}"
 
         log_info "Android sysroot: $android_sysroot"
         log_info "Android lib path: $android_lib_path"
 
-        # Add Android-specific CMake arguments (following official android.md recommendations)
         cmake_common_args+=(
             "-DCMAKE_TOOLCHAIN_FILE=$android_toolchain_file"
-            "-DANDROID_ABI=arm64-v8a"
-            "-DANDROID_PLATFORM=android-28"
+            "-DANDROID_ABI=$android_abi"
+            "-DANDROID_PLATFORM=$android_platform"
             "-DANDROID_NDK=$android_ndk_root"
             "-DCMAKE_C_COMPILER=$android_c_compiler"
             "-DCMAKE_CXX_COMPILER=$android_cxx_compiler"
-            "-DCMAKE_C_FLAGS=-march=armv8.7a"
-            "-DCMAKE_CXX_FLAGS=-march=armv8.7a"
-            "-DCMAKE_EXE_LINKER_FLAGS=-L${android_lib_path} -latomic"
-            "-DCMAKE_SHARED_LINKER_FLAGS=-L${android_lib_path} -latomic"
+            "-DCMAKE_C_FLAGS=$android_c_flags"
+            "-DCMAKE_CXX_FLAGS=$android_cxx_flags"
+            "-DCMAKE_EXE_LINKER_FLAGS=$android_linker_flags"
+            "-DCMAKE_SHARED_LINKER_FLAGS=$android_shared_linker_flags"
             "-DGGML_OPENMP=OFF"
             "-DGGML_LLAMAFILE=OFF"
+            "-DGGML_INTERNAL_MATMUL_INT8=OFF"
             "-DCUDA_NVCC_EXECUTABLE=$CUDA_NVCC_EXECUTABLE"
             "-DCMAKE_CUDA_COMPILER=$CUDA_NVCC_EXECUTABLE"
             "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH"
@@ -1123,7 +1150,7 @@ run_tests() {
                 bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE" &
             fi
         else
-            log_info "Output will be saved to main log file"
+            log_info "Output will be saved to $MAIN_LOG_FILE"
             if [ "$enable_dlpti" = "true" ]; then
                 env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
                 $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
@@ -1177,7 +1204,7 @@ run_tests() {
                 ret=${PIPESTATUS[0]}
             fi
         else
-            log_info "Output will be saved to main log file"
+            log_info "Output will be saved to $MAIN_LOG_FILE"
             if [ "$enable_dlpti" = "true" ]; then
                 env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
                 $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
@@ -1462,10 +1489,23 @@ main() {
         log_info "Using default LOCAL_MODEL_PATH from config: $LOCAL_MODEL_PATH"
     fi
 
+    # Map DLGPU_X86_SDK_PATH and llvm_devel_path to sdk_path if not already set
+    if [ -z "$sdk_path" ]; then
+        if [ -n "$DLGPU_X86_SDK_PATH" ]; then
+            export sdk_path="$DLGPU_X86_SDK_PATH"
+            log_info "Using DLGPU_X86_SDK_PATH as SDK path: $sdk_path"
+        elif [ -n "$llvm_devel_path" ]; then
+            export sdk_path="$llvm_devel_path"
+            log_info "Using llvm_devel_path as SDK path: $sdk_path"
+        fi
+    fi
+
     # Validate required parameters
     if [ -z "$sdk_path" ]; then
         log_error "SDK path not set, please use --sdk-path or set environment variable sdk_path"
+        log_error "Alternatively, set DLGPU_X86_SDK_PATH or llvm_devel_path"
         echo "Quick setup: export sdk_path=\"/path/to/your/sdk\""
+        echo "Or export llvm_devel_path=\"/path/to/your/sdk\""
         exit 1
     fi
 

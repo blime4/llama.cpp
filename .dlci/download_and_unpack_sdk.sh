@@ -41,11 +41,58 @@ get_sdk_download_config() {
     echo "$value"
 }
 
-# Get SDK download configuration for current platform
-REPOSITORY=$(get_sdk_download_config "$ARCH" "repository")
-FILENAME=$(get_sdk_download_config "$ARCH" "filename" 2>/dev/null || echo "")
-FILENAME_PATTERN=$(get_sdk_download_config "$ARCH" "filename_pattern" 2>/dev/null || echo "")
-EXTRACT_DIR=$(get_sdk_download_config "$ARCH" "extract_dir")
+# Initialize variables for dual SDK configuration (Android)
+X86_REPOSITORY=""
+X86_FILENAME_PATTERN=""
+X86_EXTRACT_DIR=""
+AARCH64_REPOSITORY=""
+AARCH64_FILENAME_PATTERN=""
+AARCH64_EXTRACT_DIR=""
+
+# Special handling for Android dual SDK configuration
+if [[ "$ARCH" == "android" ]]; then
+    echo "[INFO] Android platform detected - using dual SDK configuration"
+
+    # Get x86 SDK configuration for compilation
+    echo "[INFO] Configuring x86 SDK for compilation..."
+    X86_REPOSITORY=$(get_config_value ".build.sdk.download.${ARCH}.x86_sdk.repository")
+    X86_FILENAME_PATTERN=$(get_config_value ".build.sdk.download.${ARCH}.x86_sdk.filename_pattern")
+    X86_EXTRACT_DIR=$(get_config_value ".build.sdk.download.${ARCH}.x86_sdk.extract_dir")
+
+    # Get aarch64 SDK configuration for linking
+    echo "[INFO] Configuring aarch64 SDK for linking..."
+    AARCH64_REPOSITORY=$(get_config_value ".build.sdk.download.${ARCH}.aarch64_sdk.repository")
+    AARCH64_FILENAME_PATTERN=$(get_config_value ".build.sdk.download.${ARCH}.aarch64_sdk.filename_pattern")
+    AARCH64_EXTRACT_DIR=$(get_config_value ".build.sdk.download.${ARCH}.aarch64_sdk.extract_dir")
+
+    # Set primary SDK (x86) for backward compatibility
+    REPOSITORY="$X86_REPOSITORY"
+    FILENAME=""
+    FILENAME_PATTERN="$X86_FILENAME_PATTERN"
+    EXTRACT_DIR="$X86_EXTRACT_DIR"
+
+    echo "[INFO] x86 SDK: $X86_REPOSITORY -> $X86_EXTRACT_DIR"
+    echo "[INFO] aarch64 SDK: $AARCH64_REPOSITORY -> $AARCH64_EXTRACT_DIR"
+
+    # Validate Android dual SDK configuration
+    if [[ -z "$X86_REPOSITORY" || -z "$X86_FILENAME_PATTERN" || -z "$X86_EXTRACT_DIR" ]]; then
+        echo "[ERROR] Incomplete x86 SDK configuration for Android" >&2
+        echo "[ERROR] x86_repository: '$X86_REPOSITORY', x86_pattern: '$X86_FILENAME_PATTERN', x86_extract: '$X86_EXTRACT_DIR'" >&2
+        exit 1
+    fi
+
+    if [[ -z "$AARCH64_REPOSITORY" || -z "$AARCH64_FILENAME_PATTERN" || -z "$AARCH64_EXTRACT_DIR" ]]; then
+        echo "[ERROR] Incomplete aarch64 SDK configuration for Android" >&2
+        echo "[ERROR] aarch64_repository: '$AARCH64_REPOSITORY', aarch64_pattern: '$AARCH64_FILENAME_PATTERN', aarch64_extract: '$AARCH64_EXTRACT_DIR'" >&2
+        exit 1
+    fi
+else
+    # Standard single SDK configuration for other platforms
+    REPOSITORY=$(get_sdk_download_config "$ARCH" "repository")
+    FILENAME=$(get_sdk_download_config "$ARCH" "filename" 2>/dev/null || echo "")
+    FILENAME_PATTERN=$(get_sdk_download_config "$ARCH" "filename_pattern" 2>/dev/null || echo "")
+    EXTRACT_DIR=$(get_sdk_download_config "$ARCH" "extract_dir")
+fi
 
 # Determine the actual filename to use
 if [[ -n "$FILENAME" ]]; then
@@ -102,10 +149,28 @@ download_sdk_archive() {
     return 0
 }
 
-# Download the SDK archive
+# Download the SDK archive(s)
 if ! download_sdk_archive "$ARCH" "$REPOSITORY" "$DOWNLOAD_PATTERN" "$SDK_TAG"; then
-    echo "[ERROR] Failed to download SDK archive"
+    echo "[ERROR] Failed to download x86 SDK archive"
     exit 1
+fi
+
+# For Android, also download aarch64 SDK
+if [[ "$ARCH" == "android" ]]; then
+    echo "[INFO] Downloading aarch64 SDK for Android linking..."
+
+    # Determine aarch64 download pattern
+    if [[ -n "$AARCH64_FILENAME_PATTERN" ]]; then
+        AARCH64_DOWNLOAD_PATTERN="$AARCH64_FILENAME_PATTERN"
+    else
+        echo "[ERROR] aarch64 filename_pattern not configured for Android" >&2
+        exit 1
+    fi
+
+    if ! download_sdk_archive "android-aarch64" "$AARCH64_REPOSITORY" "$AARCH64_DOWNLOAD_PATTERN" "$SDK_TAG"; then
+        echo "[ERROR] Failed to download aarch64 SDK archive"
+        exit 1
+    fi
 fi
 
 # Step 2: Extract SDK archive
@@ -140,36 +205,51 @@ extract_sdk_archive() {
 
     echo "[INFO] Extracting SDK archive for $platform: $file_to_extract"
 
-    if ! tar xf "$file_to_extract"; then
-        echo "[ERROR] Failed to extract SDK archive: $file_to_extract" >&2
-        return 1
-    fi
+    # Handle special extraction for Android aarch64 SDK
+    if [[ "$platform" == "android-aarch64" ]]; then
+        echo "[INFO] Extracting aarch64 SDK with special handling..."
+        mkdir -p "$extract_dir"
+        if ! tar xf "$file_to_extract" -C "$extract_dir" --strip-components=1; then
+            echo "[ERROR] Failed to extract aarch64 SDK archive: $file_to_extract" >&2
+            return 1
+        fi
+    else
+        # Standard extraction
+        if ! tar xf "$file_to_extract"; then
+            echo "[ERROR] Failed to extract SDK archive: $file_to_extract" >&2
+            return 1
+        fi
 
-    # Handle special cases for different platforms
-    case "$platform" in
-        "riscv64")
-            # RISC-V needs to rename the extracted directory
-            if [[ -d "sdk" && "$extract_dir" != "sdk" ]]; then
-                echo "[INFO] Renaming sdk directory to $extract_dir for $platform"
-                mv sdk "$extract_dir"
-            fi
-            ;;
-    esac
-
-    # Fix ownership for non-x86_64 platforms
-    if [[ "$platform" != "x86_64" ]]; then
-        echo "[INFO] Fixing ownership for $platform"
-        sudo chown -R $(id -u):$(id -g) "${SDK_WORKSPACE}"
+        # Handle special cases for different platforms
+        case "$platform" in
+            "riscv64")
+                # RISC-V needs to rename the extracted directory
+                if [[ -d "sdk" && "$extract_dir" != "sdk" ]]; then
+                    echo "[INFO] Renaming sdk directory to $extract_dir for $platform"
+                    mv sdk "$extract_dir"
+                fi
+                ;;
+        esac
     fi
 
     echo "[INFO] SDK extracted successfully to: $extract_dir"
     return 0
 }
 
-# Extract the SDK archive
+# Extract the SDK archive(s)
 if ! extract_sdk_archive "$ARCH" "$EXTRACT_DIR" "$DOWNLOAD_PATTERN"; then
-    echo "[ERROR] Failed to extract SDK archive"
+    echo "[ERROR] Failed to extract x86 SDK archive"
     exit 1
+fi
+
+# For Android, also extract aarch64 SDK
+if [[ "$ARCH" == "android" ]]; then
+    echo "[INFO] Extracting aarch64 SDK for Android linking..."
+
+    if ! extract_sdk_archive "android-aarch64" "$AARCH64_EXTRACT_DIR" "$AARCH64_DOWNLOAD_PATTERN"; then
+        echo "[ERROR] Failed to extract aarch64 SDK archive"
+        exit 1
+    fi
 fi
 
 # Step 3: Setup Docker repository
@@ -185,4 +265,11 @@ fi
 
 echo "[INFO] SDK download and extraction completed successfully"
 echo "[INFO] SDK workspace: $SDK_WORKSPACE"
-echo "[INFO] Extracted directory: $EXTRACT_DIR"
+
+if [[ "$ARCH" == "android" ]]; then
+    echo "[INFO] Android dual SDK configuration:"
+    echo "[INFO]   x86 SDK (compile): $EXTRACT_DIR"
+    echo "[INFO]   aarch64 SDK (link): $AARCH64_EXTRACT_DIR"
+else
+    echo "[INFO] Extracted directory: $EXTRACT_DIR"
+fi

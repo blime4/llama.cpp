@@ -28,9 +28,14 @@ alias gba="git branch -a"
 alias grv="git remote -v"
 alias gl="git log"
 alias gsb="git submodule sync && git submodule update --init --recursive"
-git config --global --add safe.directory "*"
-git config --global user.email $git_email
-git config --global user.name $git_name
+# Configure git safely with error handling
+if [ -w "$HOME" ] || [ -w "/" ]; then
+    git config --global --add safe.directory "*" 2>/dev/null || echo "[WARNING] Could not set git safe.directory"
+    git config --global user.email "$git_email" 2>/dev/null || echo "[WARNING] Could not set git user.email"
+    git config --global user.name "$git_name" 2>/dev/null || echo "[WARNING] Could not set git user.name"
+else
+    echo "[WARNING] No write permission for git config, skipping git configuration"
+fi
 
 # common
 alias rr="rm -rf"

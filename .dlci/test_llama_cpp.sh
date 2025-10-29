@@ -1229,9 +1229,18 @@ validate_qwen_output() {
     # Use temporary file for output
     local output_file=$(mktemp)
 
+    # Set ngl parameter based on model type
+    local ngl_value=999
+    if [[ "$model_name" == *"Qwen3"* ]]; then
+        ngl_value=20
+        echo "[INFO] Using ngl=20 for Qwen3 model: $model_name"
+    fi
+
+    set -x
     # Run inference with fixed parameters for deterministic output
-    ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -p "$prompt" > "$output_file" 2>&1
+    ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p "$prompt" > "$output_file" 2>&1
     local cmd_result=$?
+    set +x
 
     if [ $cmd_result -ne 0 ]; then
         echo "[FAIL] llama-cli command failed with exit code $cmd_result"

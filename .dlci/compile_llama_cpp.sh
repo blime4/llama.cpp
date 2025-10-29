@@ -2,6 +2,37 @@
 
 set -e
 
+# Source Android compilation utilities
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/android_compile_utils.sh"
+
+# Function to clear ccache if compilation fails
+clear_ccache_on_failure() {
+    local arch="$1"
+    local compile_log="$2"
+
+    if [ "$arch" = "android" ]; then
+        echo "[WARNING] Android compilation failed, clearing ccache cache..." | tee -a "$compile_log"
+        ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
+
+        if [ -d "$ccache_dir" ]; then
+            echo "[INFO] Removing ccache directory: $ccache_dir" | tee -a "$compile_log"
+            rm -rf "$ccache_dir"
+            mkdir -p "$ccache_dir"
+            echo "[INFO] ccache cache cleared successfully" | tee -a "$compile_log"
+        else
+            echo "[INFO] ccache directory does not exist: $ccache_dir" | tee -a "$compile_log"
+        fi
+
+        # Also try clearing via ccache command if available
+        if command -v ccache &> /dev/null; then
+            echo "[INFO] Clearing ccache via ccache --clear..." | tee -a "$compile_log"
+            ccache --clear >> "$compile_log" 2>&1 || true
+            echo "[INFO] ccache command executed" | tee -a "$compile_log"
+        fi
+    fi
+}
+
 # Record start time for overall compilation timing
 compile_start_time=$(date +%s)
 
@@ -37,20 +68,36 @@ if [ -z "$sdk_path" ] || [ ! -d "$sdk_path" ]; then
   exit 1
 fi
 
+# Normalize SDK path to avoid double slashes and path issues
+sdk_path=$(readlink -f "$sdk_path")
+echo "[INFO] Normalized SDK path: $sdk_path" | tee -a "$compile_log"
+
 echo "[INFO] Environment setup..." | tee -a "$compile_log"
 env >> "$compile_log" 2>&1
+
+# Ensure critical environment variables are set for Android cross-compilation
+if [ "$ARCH" = "android" ]; then
+    echo "[INFO] Setting up Android cross-compilation environment..." | tee -a "$compile_log"
+    export ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-/opt/android-sdk-linux/ndk/25.2.9519653}"
+    export ANDROID_API_LEVEL="${ANDROID_API_LEVEL:-25}"
+    export ANDROID_ABI="${ANDROID_ABI:-arm64-v8a}"
+    # Set additional environment variables to match local environment
+    export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk-linux}"
+    export NDK_ROOT="${NDK_ROOT:-$ANDROID_NDK_ROOT}"
+    echo "[INFO] ANDROID_NDK_ROOT: $ANDROID_NDK_ROOT" | tee -a "$compile_log"
+    echo "[INFO] ANDROID_API_LEVEL: $ANDROID_API_LEVEL" | tee -a "$compile_log"
+    echo "[INFO] ANDROID_ABI: $ANDROID_ABI" | tee -a "$compile_log"
+    echo "[INFO] ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT" | tee -a "$compile_log"
+fi
+
 source ${sdk_path}/env.sh >> "$compile_log" 2>&1
 # Set LIBRARY_PATH for dlcc compiler
 export LIBRARY_PATH="${sdk_path}/lib:${LIBRARY_PATH}"
+# Also set LD_LIBRARY_PATH to match local environment
+export LD_LIBRARY_PATH="${sdk_path}/lib:${LD_LIBRARY_PATH}"
 echo "LIBRARY_PATH set to: $LIBRARY_PATH" | tee -a "$compile_log"
+echo "LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH" | tee -a "$compile_log"
 env >> "$compile_log" 2>&1
-
-echo "[INFO] Setting up ccache..." | tee -a "$compile_log"
-ccache --set-config cache_dir=/LocalRun/$(whoami)/cache/llama_cpp_ccache >> "$compile_log" 2>&1
-ccache --set-config max_size=20G >> "$compile_log" 2>&1
-ccache --zero-stats >> "$compile_log" 2>&1
-
-export CCACHE_LOGFILE=/LocalRun/$(whoami)/cache/ccache.log
 
 # Get the latest tag (if any), otherwise empty
 # --exact returns tag only if HEAD is exactly at a tag, otherwise non-zero exit
@@ -94,28 +141,48 @@ mkdir -p "$CUSTOM_BIN_DIR" || {
     exit 1
 }
 
-# Create a symlink named 'dlcc' in the custom bin directory, pointing to ccache.
-# This allows us to use ccache for CUDA compilation by setting CUDA_NVCC_EXECUTABLE to this symlink.
-ln -sf /usr/bin/ccache "$CUSTOM_BIN_DIR/dlcc" || {
-  echo "[ERROR] Failed to create symlink for ccache at $CUSTOM_BIN_DIR/dlcc." | tee -a "$compile_log"
-  exit 1
-}
+# Setup compiler wrapper based on DISABLE_CCACHE flag
+if [ "$DISABLE_CCACHE" != "true" ]; then
+    # Create a symlink named 'dlcc' in the custom bin directory, pointing to ccache.
+    # This allows us to use ccache for CUDA compilation by setting CUDA_NVCC_EXECUTABLE to this symlink.
+    ln -sf /usr/bin/ccache "$CUSTOM_BIN_DIR/dlcc" || {
+      echo "[ERROR] Failed to create symlink for ccache at $CUSTOM_BIN_DIR/dlcc." | tee -a "$compile_log"
+      exit 1
+    }
+    echo "[INFO] Using ccache wrapper for CUDA compilation" | tee -a "$compile_log"
+else
+    # When ccache is disabled, create a direct symlink to the SDK compiler
+    # Find the actual dlcc path from the SDK
+    ACTUAL_DLCC="$sdk_path/bin/dlcc"
+    if [ ! -f "$ACTUAL_DLCC" ]; then
+        # Fall back to clang++
+        ACTUAL_DLCC="$sdk_path/bin/clang++"
+    fi
+    ln -sf "$ACTUAL_DLCC" "$CUSTOM_BIN_DIR/dlcc" || {
+      echo "[ERROR] Failed to create symlink for direct compiler at $CUSTOM_BIN_DIR/dlcc." | tee -a "$compile_log"
+      exit 1
+    }
+    echo "[INFO] Using direct compiler wrapper (ccache disabled) at $ACTUAL_DLCC" | tee -a "$compile_log"
+fi
 
 # Add the custom bin directory to the PATH.
 # This makes 'dlcc' (and any other tools placed here) accessible if needed directly from the shell,
 # though CUDA_NVCC_EXECUTABLE uses an absolute path.
 export PATH="$CUSTOM_BIN_DIR:$PATH"
 
-# correct ccache path in PATH.
-export PATH=$(echo "$PATH" | tr ':' '\n' | awk '/ccache/{ccache=$0; next} {print} END{if(ccache) print ccache}' | paste -sd:)
-echo "[INFO] which ccache: $(which ccache)" | tee -a "$compile_log"
+# correct ccache path in PATH (only if ccache is enabled).
+if [ "$DISABLE_CCACHE" != "true" ]; then
+    export PATH=$(echo "$PATH" | tr ':' '\n' | awk '/ccache/{ccache=$0; next} {print} END{if(ccache) print ccache}' | paste -sd:)
+    echo "[INFO] which ccache: $(which ccache)" | tee -a "$compile_log"
+fi
 echo "[INFO] PATH: $PATH" | tee -a "$compile_log"
 
-# Set CUDA_NVCC_EXECUTABLE to use the ccache symlink (absolute path).
-# This tells nvcc (NVIDIA CUDA Compiler) to use our ccache-enabled wrapper.
+# Set CUDA_NVCC_EXECUTABLE to use the custom wrapper (absolute path).
+# This tells nvcc (NVIDIA CUDA Compiler) to use our wrapper (ccache or direct compiler).
 export CUDA_NVCC_EXECUTABLE="$CUSTOM_BIN_DIR/dlcc"
 
 echo "[INFO] CUDA_NVCC_EXECUTABLE is set to: $CUDA_NVCC_EXECUTABLE" | tee -a "$compile_log"
+echo "[INFO] DISABLE_CCACHE: $DISABLE_CCACHE" | tee -a "$compile_log"
 echo "[INFO] Custom bin directory '$CUSTOM_BIN_DIR' added to PATH." >> "$compile_log"
 # --- End of improved ccache setup ---
 
@@ -130,8 +197,46 @@ build_dir=${REPO_PATH}/build_${ARCH}
 echo "[INFO] ARCH value: '$ARCH'" | tee -a "$compile_log"
 echo "[INFO] Build directory: $build_dir" | tee -a "$compile_log"
 
+# Check if ccache should be disabled for Android
+# This must be done AFTER ARCH is set
+DISABLE_CCACHE=false
+if [ "$ARCH" = "android" ] && [ "$DISABLE_CCACHE_ANDROID" = "true" ]; then
+    echo "[INFO] DISABLE_CCACHE_ANDROID=true detected, disabling ccache" | tee -a "$compile_log"
+    DISABLE_CCACHE=true
+fi
+
+# Setup ccache if not disabled
+if [ "$DISABLE_CCACHE" != "true" ]; then
+    echo "[INFO] Setting up ccache..." | tee -a "$compile_log"
+    ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
+    ccache_max_size="${CCACHE_MAXSIZE:-20G}"
+    ccache --set-config cache_dir="$ccache_dir" >> "$compile_log" 2>&1
+    ccache --set-config max_size="$ccache_max_size" >> "$compile_log" 2>&1
+    if [ -n "${CCACHE_BASEDIR:-}" ]; then
+        ccache --set-config base_dir="$CCACHE_BASEDIR" >> "$compile_log" 2>&1
+    fi
+    ccache --zero-stats >> "$compile_log" 2>&1
+
+    if [ -z "${CCACHE_LOGFILE:-}" ]; then
+        export CCACHE_LOGFILE="/LocalRun/$(whoami)/cache/ccache.log"
+    fi
+else
+    echo "[INFO] ccache is disabled" | tee -a "$compile_log"
+fi
+
+# Export the flag for child processes
+export DISABLE_CCACHE
+
 # Check if running on ARM platform
 echo "[INFO] Configuring cmake for $ARCH platform..." | tee -a "$compile_log"
+
+# Prepare ccache option for CMake
+cmake_ccache_option="-DGGML_CCACHE=ON"
+if [ "$DISABLE_CCACHE" = "true" ]; then
+    cmake_ccache_option="-DGGML_CCACHE=OFF"
+    echo "[INFO] CMake: Disabling GGML_CCACHE" | tee -a "$compile_log"
+fi
+
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a" | tee -a "$compile_log"
 
@@ -149,7 +254,8 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         -DGGML_RVV=OFF \
         -DGGML_CPU_ARM_ARCH=armv8-a \
         -DGGML_NATIVE=OFF \
-        -DSDK_DIR=${sdk}"
+        -DSDK_DIR=${sdk} \
+        ${cmake_ccache_option}"
 
     exec_with_log "$cmake_cmd"
 elif [ "$ARCH" = "loongarch64" ]; then
@@ -168,98 +274,24 @@ elif [ "$ARCH" = "loongarch64" ]; then
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
-        -DSDK_DIR=${sdk}"
+        -DSDK_DIR=${sdk} \
+        ${cmake_ccache_option}"
 
     exec_with_log "$cmake_cmd"
 elif [ "$ARCH" = "android" ]; then
-    echo "[INFO] Detected Android platform (cross-compilation)" | tee -a "$compile_log"
+    echo "[INFO] Using proven local_dev.sh Android compilation method" | tee -a "$compile_log"
 
-    # Android NDK toolchain path
-    ANDROID_NDK_ROOT="/opt/android-sdk-linux/ndk/25.2.9519653"
-    ANDROID_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake"
-
-    # Validate Android NDK exists
-    if [ ! -f "$ANDROID_TOOLCHAIN_FILE" ]; then
-        echo "[ERROR] Android NDK toolchain not found: $ANDROID_TOOLCHAIN_FILE" | tee -a "$compile_log"
-        echo "[ERROR] Please ensure Android NDK 25.2.9519653 is installed in /opt/android-sdk-linux/ndk/" | tee -a "$compile_log"
+    # Use the shared Android compilation function (extracted from successful local_dev.sh)
+    if run_android_compilation "$sdk" "$REPO_PATH" "$ARCH" "$compile_log"; then
+        echo "[INFO] Android compilation completed successfully using local_dev.sh method" | tee -a "$compile_log"
+        # Skip the normal ninja build since it's already done in the function
+        ninja_exit_code=0
+    else
+        echo "[ERROR] Android compilation failed using local_dev.sh method" | tee -a "$compile_log"
+        # Clear ccache cache on failure
+        clear_ccache_on_failure "$ARCH" "$compile_log"
         exit 1
     fi
-
-    echo "[INFO] Using Android NDK: $ANDROID_NDK_ROOT" | tee -a "$compile_log"
-    echo "[INFO] Using Android toolchain: $ANDROID_TOOLCHAIN_FILE" | tee -a "$compile_log"
-    echo "[INFO] CUDA compiler (dlcc): $CUDA_NVCC_EXECUTABLE" | tee -a "$compile_log"
-
-    # Ensure CUDA compilation uses dlcc from SDK, not Android NDK
-    if [ ! -f "$CUDA_NVCC_EXECUTABLE" ]; then
-        echo "[ERROR] CUDA compiler (dlcc) not found: $CUDA_NVCC_EXECUTABLE" | tee -a "$compile_log"
-        echo "[ERROR] Please ensure SDK environment is properly set up" | tee -a "$compile_log"
-        exit 1
-    fi
-
-    # Set Android-specific environment variables for cross-compilation
-    export ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT"
-    export ANDROID_ABI="arm64-v8a"
-    export ANDROID_PLATFORM="android-28"
-    echo "[INFO] Android cross-compilation environment configured" | tee -a "$compile_log"
-
-    # Execute CMake with Android toolchain (following official android.md recommendations)
-    # Explicitly set Android compilers to avoid detection issues
-    ANDROID_C_COMPILER="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
-    ANDROID_CXX_COMPILER="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++"
-
-    echo "[INFO] Android C compiler: $ANDROID_C_COMPILER" | tee -a "$compile_log"
-    echo "[INFO] Android C++ compiler: $ANDROID_CXX_COMPILER" | tee -a "$compile_log"
-
-    # Android-specific library paths and flags
-    ANDROID_SYSROOT="${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-    ANDROID_LIB_PATH="${ANDROID_SYSROOT}/usr/lib/aarch64-linux-android/28"
-
-    echo "[INFO] Android sysroot: $ANDROID_SYSROOT" | tee -a "$compile_log"
-    echo "[INFO] Android lib path: $ANDROID_LIB_PATH" | tee -a "$compile_log"
-
-    # TODO: Remove this (-allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all)
-    # after Android SDK libraries are ready.
-
-    cmake_cmd="cmake -G Ninja -B ${build_dir} \
-        -DCMAKE_TOOLCHAIN_FILE=${ANDROID_TOOLCHAIN_FILE} \
-        -DANDROID_ABI=arm64-v8a \
-        -DANDROID_PLATFORM=android-28 \
-        -DANDROID_NDK=${ANDROID_NDK_ROOT} \
-        -DCMAKE_C_COMPILER=${ANDROID_C_COMPILER} \
-        -DCMAKE_CXX_COMPILER=${ANDROID_CXX_COMPILER} \
-        -DCMAKE_C_FLAGS=\"-march=armv8.7a\" \
-        -DCMAKE_CXX_FLAGS=\"-march=armv8.7a\" \
-        -DCMAKE_EXE_LINKER_FLAGS=\"-L${ANDROID_LIB_PATH} -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all\" \
-        -DCMAKE_SHARED_LINKER_FLAGS=\"-L${ANDROID_LIB_PATH} -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all\" \
-        -DGGML_DLCU=ON \
-        -DCMAKE_VERBOSE_MAKEFILE=ON \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_BACKEND_DL=ON \
-        -DGGML_CPU_ALL_VARIANTS=OFF \
-        -DGGML_OPENMP=OFF \
-        -DGGML_LLAMAFILE=OFF \
-        -DGGML_CUDA_GRAPHS=OFF \
-        -DLLAMA_CURL=OFF \
-        -DCURL_FOUND=FALSE \
-        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        -DGGML_CUDA_FA=ON \
-        -DGGML_CUDA_FA_ALL_QUANTS=ON \
-        -DGGML_RVV=OFF \
-        -DGGML_NATIVE=OFF \
-        -DSDK_DIR=${sdk} \
-        -DCUDA_NVCC_EXECUTABLE=${CUDA_NVCC_EXECUTABLE} \
-        -DCMAKE_CUDA_COMPILER=${CUDA_NVCC_EXECUTABLE} \
-        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
-        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH"
-
-    exec_with_log "$cmake_cmd"
-
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] CMake configuration failed for Android platform" | tee -a "$compile_log"
-        echo "[ERROR] Check cmake logs for details: $compile_log" | tee -a "$compile_log"
-        exit 1
-    fi
-    echo "[INFO] CMake configuration completed successfully for Android" | tee -a "$compile_log"
 elif [ "$ARCH" = "riscv64" ]; then
     echo "[INFO] Detected RISC-V 64-bit platform" | tee -a "$compile_log"
 
@@ -277,7 +309,8 @@ elif [ "$ARCH" = "riscv64" ]; then
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=ON \
         -DGGML_NATIVE=OFF \
-        -DSDK_DIR=${sdk}"
+        -DSDK_DIR=${sdk} \
+        ${cmake_ccache_option}"
 
     exec_with_log "$cmake_cmd"
 
@@ -303,7 +336,8 @@ else
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
-        -DSDK_DIR=${sdk}"
+        -DSDK_DIR=${sdk} \
+        ${cmake_ccache_option}"
 
     exec_with_log "$cmake_cmd"
 fi
@@ -319,19 +353,25 @@ echo "[INFO] CMake configuration completed successfully" | tee -a "$compile_log"
 echo "[INFO] Checking ccache stats before build..." | tee -a "$compile_log"
 ccache --show-stats >> "$compile_log" 2>&1
 
-#cmake --build $build_dir --config Release -j 12
-cd $build_dir
+# Skip ninja build for Android (already done in shared function)
+if [ "$ARCH" != "android" ]; then
+    #cmake --build $build_dir --config Release -j 12
+    cd $build_dir
 
-echo "[INFO] Starting ninja build with 12 parallel jobs..." | tee -a "$compile_log"
-exec_with_log "ninja -j 12"
+    echo "[INFO] Starting ninja build with 12 parallel jobs..." | tee -a "$compile_log"
+    echo "[INFO] Compile log: $compile_log"
+    exec_with_log "ninja -v -j 12"
 
-ninja_exit_code=$?
-if [ $ninja_exit_code -ne 0 ]; then
-    echo "[ERROR] Ninja build failed with exit code: $ninja_exit_code" | tee -a "$compile_log"
-    echo "[ERROR] Check detailed logs in: $compile_log" | tee -a "$compile_log"
-    exit 1
+    ninja_exit_code=$?
+    if [ $ninja_exit_code -ne 0 ]; then
+        echo "[ERROR] Outputting full compile log($compile_log) below:"
+        cat "$compile_log"
+        exit 1
+    fi
+    echo "[INFO] Ninja build completed successfully" | tee -a "$compile_log"
+else
+    echo "[INFO] Android build already completed in shared function" | tee -a "$compile_log"
 fi
-echo "[INFO] Ninja build completed successfully" | tee -a "$compile_log"
 
 # Record end time and calculate total compilation duration
 compile_end_time=$(date +%s)

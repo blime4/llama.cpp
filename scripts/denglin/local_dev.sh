@@ -22,6 +22,8 @@ show_help() {
     echo "  $0                                    # Enter docker with default SDK_TAG"
     echo "  $0 -t V2_SOFTWARE_master_202508201444 # Specify SDK_TAG"
     echo "  $0 -c                                 # Compile first, then enter docker"
+    echo "  $0 -p android                         # Android cross-compilation environment"
+    echo "  $0 -p android -c                      # Android cross-compilation with compile"
     echo "  $0 -t V2_SOFTWARE_master_202508201444 -c # Specify SDK_TAG and compile"
 }
 
@@ -154,7 +156,7 @@ echo "[Step 2] Downloading and unpacking SDK..."
 bash ../../.dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
 
 # Step 3: Set SDK path
-export sdk_path="${SDK_WORKSPACE}/sdk"
+export sdk_path="${SDK_WORKSPACE%/}/sdk"
 echo "[Step 3] SDK path set to: $sdk_path"
 
 # Check if SDK exists
@@ -172,6 +174,45 @@ while IFS='=' read -r key value; do
     DOCKER_ENVS+=(--env "${key}=${value}")
 done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH|git_|DOCKER_PLATFORM)')
 
+append_env_var() {
+    local var_name="$1"
+    if [ -n "${!var_name:-}" ]; then
+        DOCKER_ENVS+=(--env "${var_name}=${!var_name}")
+    fi
+}
+
+# Pass through optional ccache / Android overrides used by run_llama.sh
+append_env_var "CCACHE_DIR"
+append_env_var "CCACHE_BASEDIR"
+append_env_var "CCACHE_MAXSIZE"
+append_env_var "CCACHE_LOGFILE"
+
+# Android NDK configuration variables
+append_env_var "ANDROID_NDK_ROOT"
+append_env_var "NDK_ROOT"
+append_env_var "ANDROID_TOOLCHAIN_FILE"
+append_env_var "tool_chain_cmake"
+
+# Android API and platform configuration
+append_env_var "ANDROID_API_LEVEL"
+append_env_var "android_api_level"
+append_env_var "ANDROID_PLATFORM"
+append_env_var "API"
+append_env_var "ANDROID_ABI"
+append_env_var "TARGET"
+append_env_var "ANDROID_CLANG_TRIPLE"
+
+# Android compiler and linker flags
+append_env_var "ANDROID_LINKER_FLAGS"
+append_env_var "ANDROID_SHARED_LINKER_FLAGS"
+append_env_var "ANDROID_C_FLAGS"
+append_env_var "ANDROID_CXX_FLAGS"
+append_env_var "LLVM"
+
+# Support android-doc.md variable names for compatibility
+append_env_var "DLGPU_X86_SDK_PATH"
+append_env_var "llvm_devel_path"
+
 echo "Number of Docker environment variables: ${#DOCKER_ENVS[@]}"
 
 # Step 5: Compile if requested
@@ -180,7 +221,8 @@ if [ "$COMPILE_FIRST" = true ]; then
     if [ "$RE_COMPILE" = true ]; then
         echo "[Step 5] Cleaning local build cache..."
         rm -rf "${build_dir}"
-        rm -rf /LocalRun/$(whoami)/cache/llama_cpp_ccache
+        ccache_dir_cleanup="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
+        rm -rf "${ccache_dir_cleanup}"
     fi
 
     if [ ! -f "../../.dlci/compile_llama_cpp.sh" ]; then
@@ -193,10 +235,15 @@ if [ "$COMPILE_FIRST" = true ]; then
     if [ ! -f "${DOCKER_REPO_PATH}/bash.sh" ]; then
         echo "[WARNING] Cannot find docker script: ${DOCKER_REPO_PATH}/bash.sh"
         echo "Trying to run compile script directly..."
-        bash .dlci/compile_llama_cpp.sh
+        DISABLE_CCACHE_ANDROID="${DISABLE_CCACHE_ANDROID:-}" bash .dlci/compile_llama_cpp.sh
     else
         echo "Running compilation in docker..."
-        ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+        # Pass DISABLE_CCACHE_ANDROID to docker environment
+        if [ -n "${DISABLE_CCACHE_ANDROID}" ]; then
+            ${DOCKER_REPO_PATH}/bash.sh --env DISABLE_CCACHE_ANDROID="${DISABLE_CCACHE_ANDROID}" "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+        else
+            ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+        fi
     fi
     cd scripts/denglin
 fi
@@ -209,16 +256,28 @@ if [ "$DOCKER_PLATFORM" = "android" ]; then
     echo "You are entering an Android cross-compilation environment."
     echo "Generated binaries are for Android ARM64 and cannot run in this container."
     echo ""
-    echo "You need to source $sdk_path/env.sh to use the SDK."
+    echo "Setup commands:"
+    echo "  - source $sdk_path/env.sh  # Load SDK environment"
     echo ""
-    echo "Available development commands:"
-    echo "  - Compile: ninja -C build (after cmake configuration)"
-    echo "  - Check binaries: file build/bin/* (verify ARM64 architecture)"
-    echo "  - List binaries: ls -la build/bin/"
-    echo "  - Static analysis: readelf -d build/bin/llama-cli"
+    echo "Build commands (supports both variable styles):"
+    echo "  # New style:"
+    echo "  export sdk_path=\"$sdk_path\""
+    echo "  ./run_llama.sh --platform android"
     echo ""
-    echo "To test on Android device:"
-    echo "  - adb push build/bin/* /data/local/tmp/llama/"
+    echo "  # android-doc.md compatible style:"
+    echo "  export llvm_devel_path=\"$sdk_path\""
+    echo "  export android_api_level=25"
+    echo "  export tool_chain_cmake=\"/opt/android-sdk-linux/ndk/25.2.9519653/build/cmake/android.toolchain.cmake\""
+    echo "  ./run_llama.sh --platform android"
+    echo ""
+    echo "Development commands:"
+    echo "  - Check binaries: file build_android/bin/* (verify ARM64 architecture)"
+    echo "  - List binaries: ls -la build_android/bin/"
+    echo "  - Static analysis: readelf -d build_android/bin/llama-cli"
+    echo ""
+    echo "Deploy to Android device:"
+    echo "  - adb push build_android/bin/* /data/local/tmp/llama/"
+    echo "  - adb push $sdk_path/lib/*.so /data/local/tmp/llama/"
     echo "  - adb shell 'cd /data/local/tmp/llama && LD_LIBRARY_PATH=. ./llama-cli --help'"
     echo ""
     echo "Note: test-backend-ops and direct binary execution will NOT work (cross-compilation)"
@@ -249,7 +308,7 @@ echo "Using direct docker run to ensure interactive session..."
 if [ "$DOCKER_PLATFORM" = "android" ]; then
     echo "Configuring Docker for Android cross-compilation environment..."
     # Android cross-compilation doesn't need GPU runtime, but needs access to Android NDK
-    # Add user mapping to fix permission issues
+    # Add user mapping to fix permission issues and ensure HOME directory is writable
     exec docker run --rm -it                                   \
         --user $(id -u):$(id -g)                               \
         -v "$(pwd):/workspace"                                 \
@@ -257,6 +316,7 @@ if [ "$DOCKER_PLATFORM" = "android" ]; then
         -v "$(get_model_path):/models"                         \
         -w /workspace                                          \
         -v "${build_dir}:/workspace/build"                     \
+        -e HOME=/workspace                                     \
         --network host                                         \
         "${DOCKER_ENVS[@]}"                                    \
         "${DOCKER_IMAGE_COMPILE}"                              \

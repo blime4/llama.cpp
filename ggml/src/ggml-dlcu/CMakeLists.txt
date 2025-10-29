@@ -30,20 +30,64 @@ file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-vec*f16-f16.cu")
 list(APPEND GGML_SOURCES_CUDA ${SRCS})
 endif()
 
-set(SDK_DIR CACHE PATH "Path to the SDK diredctory")
+set(SDK_DIR CACHE PATH "Path to the SDK directory")
+set(SDK_AARCH64_DIR CACHE PATH "Path to the aarch64 SDK directory for Android linking")
 
 if(NOT DEFINED SDK_DIR)
-    if(DEFINED ENV{SDK DIR})
-	set(SDK_DIR $ENV{SDK_DIR}/)
+    if(DEFINED ENV{SDK_DIR})
+	set(SDK_DIR $ENV{SDK_DIR})
     else()
-	message(FATAL_ERROR "SDK_DIR must be set via -DSDK_DIR=or env variable")
+	message(FATAL_ERROR "SDK_DIR must be set via -DSDK_DIR= or env variable")
     endif()
-else()
-    set(SDK_DIR ${SDK_DIR}/)
 endif()
+
+# For Android, also check for aarch64 SDK directory
+if(ANDROID)
+    if(NOT DEFINED SDK_AARCH64_DIR)
+        if(DEFINED ENV{SDK_AARCH64_DIR})
+            set(SDK_AARCH64_DIR $ENV{SDK_AARCH64_DIR})
+        else()
+            # Default to SDK_DIR if not specified
+            set(SDK_AARCH64_DIR ${SDK_DIR})
+            message(STATUS "SDK_AARCH64_DIR not specified, using SDK_DIR: ${SDK_AARCH64_DIR}")
+        endif()
+    endif()
+
+    # Normalize the aarch64 SDK_DIR path
+    get_filename_component(SDK_AARCH64_DIR "${SDK_AARCH64_DIR}" ABSOLUTE)
+    message(STATUS "Using aarch64 SDK for linking: ${SDK_AARCH64_DIR}")
+endif()
+
+# Normalize the SDK_DIR path to avoid double slashes
+get_filename_component(SDK_DIR "${SDK_DIR}" ABSOLUTE)
+
+# Compiler configuration based on platform
 if(WIN32)
     set(CMAKE_CXX_COMPILER "clang-cl.exe")
+elseif(ANDROID)
+    # For Android cross-compilation:
+    # - C files will use NDK clang++ (set via CMAKE_C_COMPILER in run_llama.sh)
+    # - CXX files (.cu files) will use SDK clang++ (set here)
+    message(STATUS "Android cross-compilation detected")
+    message(STATUS "Using NDK compilers for C code, SDK clang++ for CXX/CUDA code")
+    message(STATUS "SDK_DIR: ${SDK_DIR}")
+    message(STATUS "ANDROID_NDK: ${ANDROID_NDK}")
+
+    # Override CXX compiler to use SDK clang++ for CUDA files
+    # This will affect all CXX files in this target, including .cu files
+    if(EXISTS "${SDK_DIR}/bin/clang++")
+        set(CMAKE_CXX_COMPILER "${SDK_DIR}/bin/clang++")
+        message(STATUS "Set CMAKE_CXX_COMPILER to: ${CMAKE_CXX_COMPILER}")
+    else()
+        message(WARNING "SDK clang++ not found at ${SDK_DIR}/bin/clang++")
+    endif()
+
+    # Set LIBRARY_PATH for SDK compiler when compiling CUDA code
+    set(ENV{LIBRARY_PATH} "${SDK_DIR}/lib:$ENV{LIBRARY_PATH}")
+    # Also add library path via linker flags
+    link_directories(${SDK_DIR}/lib)
 else()
+    # For non-Android platforms, use dlcc as the main compiler
     set(CMAKE_CXX_COMPILER ${SDK_DIR}/bin/dlcc)
     set(CMAKE_C_COMPILER ${SDK_DIR}/bin/dlcc)
     # Set LIBRARY_PATH for dlcc compiler
@@ -56,17 +100,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 
 set_source_files_properties(${GGML_SOURCES_CUDA} PROPERTIES LANGUAGE CXX)
-foreach(SOURCE ${GGML_SOURCES_CUDA})
-    #set(COMPILE_FLAGS "-I${SDK_DIR}/include -g3 -O3 -v --save-temps=.  -fPIC --offload-arch=dlgput64 -x cuda")
-    #set(COMPILE_FLAGS "-I${SDK_DIR}/include -g3 -O0  --save-temps=. -fPIC --offload-arch=dlgput64 -x cuda")
-    set(COMPILE_FLAGS "-I${SDK_DIR}/include -L${SDK_DIR}/lib -use_fast_math -mllvm -dlgpu-lower-xtpvn=true --save-temps=. -fPIC --offload-arch=dlgput64 -x cuda")
-    # Add resource-dir only for Android platform
-    if(ANDROID)
-        set(COMPILE_FLAGS "${COMPILE_FLAGS} -resource-dir=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7")
-    endif()
-    set_property(SOURCE ${SOURCE} PROPERTY COMPILE_FLAGS ${COMPILE_FLAGS})
-endforeach()
-
 
 ggml_add_backend_library(ggml-dlcu
                     ${GGML_HEADERS_CUDA}
@@ -144,67 +177,106 @@ list(APPEND CUDA_FLAGS -Xcompiler ${CUDA_CXX_FLAGS_JOINED})
 endif()
 
 
-# Set base compile options
-set(DLCU_COMPILE_OPTIONS -I${SDK_DIR}/include -L${SDK_DIR}/lib -fPIC --offload-arch=dlgput64 -x cuda)
-# Add resource-dir only for Android platform
+# Set base compile options for DLCU
 if(ANDROID)
-    list(APPEND DLCU_COMPILE_OPTIONS -resource-dir=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7)
+    set(DLCU_COMPILE_OPTIONS
+        -I${SDK_DIR}/include
+        -L${SDK_DIR}/lib
+        -use_fast_math
+        -mllvm
+        -dlgpu-lower-xtpvn=true
+        --save-temps=.
+        -fPIC
+        --cuda-gpu-arch=dlgput64
+    )
+    message(STATUS "Android: Including SDK with compat layer override")
+else()
+    set(DLCU_COMPILE_OPTIONS
+        -I${SDK_DIR}/include
+        -L${SDK_DIR}/lib
+        -use_fast_math
+        -mllvm
+        -dlgpu-lower-xtpvn=true
+        --save-temps=.
+        -fPIC
+        --cuda-gpu-arch=dlgput64
+    )
 endif()
-target_compile_options(ggml-dlcu PRIVATE ${DLCU_COMPILE_OPTIONS})
 
-# Android cross-compilation: SDK library architecture handling
+# Add common CUDA options
+list(APPEND DLCU_COMPILE_OPTIONS
+    -x
+    cuda
+)
+
+# Add Android-specific compile options
 if(ANDROID)
-    message(STATUS "Android cross-compilation: Checking SDK library architecture compatibility")
+    # Allow macro redefinition (from NDK and SDK)
+    list(APPEND DLCU_COMPILE_OPTIONS -Wno-macro-redefined)
 
-    # Check if aarch64 SDK libraries exist
-    if(EXISTS "${SDK_DIR}/lib/libcurt.so")
-        # Verify SDK library architecture
-        execute_process(
-            COMMAND file "${SDK_DIR}/lib/libcurt.so"
-            OUTPUT_VARIABLE SDK_LIB_ARCH
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
+    # Add cross-compilation options for Android when using NDK clang++ fallback
+    if(NOT EXISTS "${SDK_DIR}/bin/clang++")
+        # Determine Android API level from ANDROID_PLATFORM
+        message(STATUS "NOT EXISTS ${SDK_DIR}/bin/clang++")
+        message(STATUS "ANDROID_PLATFORM: ${ANDROID_PLATFORM}")
+        message(STATUS "ANDROID_API_NUM: ${ANDROID_API_NUM}")
+        string(REGEX REPLACE "android-" "" ANDROID_API_NUM "${ANDROID_PLATFORM}")
 
-        if(SDK_LIB_ARCH MATCHES "aarch64")
-            message(STATUS "Found aarch64 SDK libraries, enabling full DLCU support")
-            target_link_libraries(ggml-dlcu PRIVATE curt cublas cudnn)
-        else()
-            message(WARNING "SDK libraries are x86_64 (not ARM64), creating stub DLCU library")
-            message(STATUS "Note: Using x86_64 SDK with amd64 Docker image for cross-compilation")
-            message(STATUS "DLCU will run in CPU fallback mode on Android")
-            message(STATUS "Detected SDK library architecture: ${SDK_LIB_ARCH}")
-            target_compile_definitions(ggml-dlcu PRIVATE
-                GGML_DLCU_ANDROID_STUB=1
-                GGML_DLCU_NO_CUDA=1
-            )
-            target_link_libraries(ggml-dlcu PRIVATE log m)
-        endif()
+        # Add cross-compilation options for Android (fallback when SDK clang++ not available)
+        list(APPEND DLCU_COMPILE_OPTIONS --target=aarch64-none-linux-android${ANDROID_API_NUM})
+        list(APPEND DLCU_COMPILE_OPTIONS --sysroot=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot)
+        list(APPEND DLCU_COMPILE_OPTIONS --gcc-toolchain=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64)
+        list(APPEND DLCU_COMPILE_OPTIONS -resource-dir=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7)
+        list(APPEND DLCU_COMPILE_OPTIONS -Wno-unused-command-line-argument)
     else()
-        message(WARNING "SDK CUDA libraries not found, creating stub DLCU library")
-        target_compile_definitions(ggml-dlcu PRIVATE
-            GGML_DLCU_ANDROID_STUB=1
-            GGML_DLCU_NO_CUDA=1
-        )
-        target_link_libraries(ggml-dlcu PRIVATE log m)
+        message(STATUS "EXISTS ${SDK_DIR}/bin/clang++")
     endif()
 
-    # TODO: Remove this after Android SDK libraries are ready.
-    # Set Android-specific linker flags to handle missing runtime libraries
+    message(STATUS "Added Android cross-compilation options to DLCU_COMPILE_OPTIONS")
+endif()
+
+target_compile_options(ggml-dlcu PRIVATE ${DLCU_COMPILE_OPTIONS})
+
+# Android cross-compilation: Dual SDK configuration (x86 for compile, aarch64 for link)
+if(ANDROID)
+    message(STATUS "Android cross-compilation: Dual SDK configuration")
+    message(STATUS "Compile SDK (x86): ${SDK_DIR}")
+    message(STATUS "Link SDK (aarch64): ${SDK_AARCH64_DIR}")
+
+    # Check if aarch64 SDK libraries exist for linking
+    if(EXISTS "${SDK_AARCH64_DIR}/lib/libcurt.so")
+        message(STATUS "Found aarch64 SDK libraries for linking, enabling full DLCU support")
+
+        # Link with aarch64 SDK libraries
+        target_link_directories(ggml-dlcu PRIVATE ${SDK_AARCH64_DIR}/lib)
+        target_link_libraries(ggml-dlcu PRIVATE curt cublas cudnn)
+
+        # Add libLLVM-15.so from aarch64 SDK
+        if(EXISTS "${SDK_AARCH64_DIR}/lib/libLLVM-15.so")
+            target_link_libraries(ggml-dlcu PRIVATE ${SDK_AARCH64_DIR}/lib/libLLVM-15.so)
+            message(STATUS "Linked with aarch64 libLLVM-15.so: ${SDK_AARCH64_DIR}/lib/libLLVM-15.so")
+        else()
+            message(FATAL_ERROR "libLLVM-15.so not found in aarch64 SDK: ${SDK_AARCH64_DIR}/lib/")
+        endif()
+    else()
+        message(FATAL_ERROR "aarch64 SDK libraries do not exist for linking: ${SDK_AARCH64_DIR}/lib/libcurt.so not found")
+    endif()
+
+
+    # Set Android-specific linker flags with dual SDK support
     set_target_properties(ggml-dlcu PROPERTIES
-        LINK_FLAGS "-L${SDK_DIR}/lib -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all -Wl,--no-undefined-version -resource-dir=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7"
+        LINK_FLAGS "-L${SDK_AARCH64_DIR}/lib -L${SDK_DIR}/lib -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all -Wl,--no-undefined-version -resource-dir=${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/lib64/clang/14.0.7"
     )
 
-    # TODO: Remove this after Android SDK libraries are ready.
     # Remove problematic compiler flags for Android cross-compilation
     target_compile_options(ggml-dlcu PRIVATE
         -Wno-unused-command-line-argument
     )
 
-    message(STATUS "Android DLCU library configuration completed")
+    message(STATUS "Android DLCU dual SDK library configuration completed")
 else()
     # Standard configuration for non-Android platforms
     target_link_libraries(ggml-dlcu PRIVATE curt cublas cudnn)
 endif()
-
 
 set_target_properties(ggml-dlcu PROPERTIES LINKER_LANGUAGE CXX)

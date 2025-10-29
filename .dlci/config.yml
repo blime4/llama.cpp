@@ -16,20 +16,20 @@ docker_images:
     image: "c-41:manylinux_2_38-loongarch64-20250910"
     dev_image: "c-41:manylinux_2_38-loongarch64-20250910"
   android:
-    image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251020"
-    dev_image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251020"
+    image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251022"
+    dev_image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251022"
 
 platform_suffixes:
   x86_64: "manylinux_2_28-x86_64"
   aarch64: "manylinux_2_28-aarch64"
   riscv64: "linux-riscv64"
   loongarch64: "manylinux_2_38-loongarch64"
-  android: "android-arm64-v8a-api28"
+  android: "android-arm64-v8a-api25"
 
 build:
   sdk:
     tag: "V2_SOFTWARE_master_202510172141"
-    workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
+    workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
     docker_repo_path: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
     # SDK download configuration
@@ -51,14 +51,16 @@ build:
         filename_pattern: "*-loongarch.tar.bz2"
         extract_dir: "sdk"
       android:
-        # Android cross-compilation SDK configuration
-        # Note: Using aarch64 SDK for Android ARM64 target compatibility
-        # Docker image: ubuntu22.04-amd64-android-ndk (x86_64 host for cross-compilation)
-        # SDK: aarch64 libraries (compatible with Android ARM64 target)
-        # Target: Android ARM64 (cross-compiled output)
-        repository: "ai-sw-sdk-v2-test"
-        filename_pattern: "*manylinux_2_28-aarch64.tar.bz2"
-        extract_dir: "sdk"
+        # Android cross-compilation dual SDK configuration
+        # x86 SDK for compilation, aarch64 SDK for linking
+        x86_sdk:
+          repository: "ai-sw-sdk-v2-test"
+          filename_pattern: "*manylinux_2_28-x86_64.tar.bz2"
+          extract_dir: "sdk"
+        aarch64_sdk:
+          repository: "ai-sw-sdk-v2-test"
+          filename_pattern: "*manylinux_2_28-aarch64.tar.bz2"
+          extract_dir: "sdk_aarch64"
 
   model_path: "/mars/aebox/LLM/model"
 

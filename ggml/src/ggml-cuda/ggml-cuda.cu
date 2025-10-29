@@ -1980,6 +1980,7 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
     if (r2 == 1 && r3 == 1 && ggml_is_contiguous_2(src0) && ggml_is_contiguous_2(src1)) {
         // there is no broadcast and src0, src1 are contiguous across dims 2, 3
         // use cublasGemmStridedBatchedEx
+        // printf("for debug : cublasGemmStridedBatchedEx\n");
         CUBLAS_CHECK(
         cublasGemmStridedBatchedEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne10,
@@ -2012,6 +2013,7 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
 
         CUDA_CHECK(cudaGetLastError());
 
+        // printf("for debug : cublasGemmBatchedEx\n");
         CUBLAS_CHECK(
         cublasGemmBatchedEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne10,
@@ -2137,6 +2139,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool dlblas_available = !split &&
                             !(env_force_no_dlblas && env_force_no_dlblas[0] == '1');
 
+    // bugid: 16276 - [llama.cpp] dlblasGemmExV2 need to support batch broadcast. like cublasGemmBatchedEx, cublasGemmStridedBatchedEx
     bool single_batch = src0->ne[2] * src0->ne[3] == 1 && src1->ne[2] * src1->ne[3] == 1;
     if (!single_batch && env_debug_path_selection) {
         if (src0->ne[2] * src0->ne[3] != 1){
