@@ -89,7 +89,8 @@ Options:
   --model-path PATH       Model path (or use environment variable LOCAL_MODEL_PATH)
   --no-auto-install       Disable automatic installation of missing dependencies
   --interactive           Interactive setup
-  --debug                 Enable full debug mode (Debug build + verbose runtime output)
+  --debug[=0]             Enable full debug mode (Debug build + verbose runtime output) [DEFAULT]
+                          Use --debug=0 to disable debug mode (Release build)
   --simple-test           Run only backend-ops tests (MUL_MAT and DLFA tests)
   --simple-model          Run only Qwen2.5 model tests with GGML_DLFA_READY=1
   --simple-tp             Run tensor parallel tests with split-mode variations
@@ -97,6 +98,7 @@ Options:
   --big                   Use big model for testing (e.g., Qwen3-30B instead of Qwen2.5-1.5B)
   --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
+  --no-fa                 Disable Flash Attention (do not use -fa flag)
                           Device check uses standalone script: .dlci/check_device_status.sh
   --dlpti "OPTIONS"       Enable dlPTI profiling with specified options
                           Example: --dlpti "--activity-mask cmd,cu,curt --data-file profile.db"
@@ -114,11 +116,11 @@ Environment variables:
   LOCAL_MODEL_PATH       Model path (default: from config.yml)
 
 Examples:
-  # Auto-detect platform, full process
+  # Auto-detect platform, full process (debug mode by default)
   $0
 
-  # Specify LoongArch64 platform compilation
-  $0 --platform loongarch64 --action compile --sdk-path /opt/sdk
+  # Specify LoongArch64 platform compilation in release mode
+  $0 --platform loongarch64 --action compile --sdk-path /opt/sdk --debug=0
 
   # Android cross-compilation
   $0 --platform android --action compile --sdk-path /opt/sdk
@@ -736,7 +738,7 @@ compile_llama_cpp() {
         -DLLAMA_CURL=OFF
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         -DGGML_CUDA_FA=ON
-        -DGGML_CUDA_FA_ALL_QUANTS=ON
+        -DGGML_CUDA_FA_ALL_QUANTS=OFF
         -DSDK_DIR="$sdk_path"
     )
 
@@ -879,10 +881,11 @@ run_tests_with_repeat() {
     local repeat_count="${6:-1}"
     local enable_dlpti="${7:-false}"
     local dlpti_options="${8:-}"
+    local no_fa="${9:-false}"
 
     if [ "$repeat_count" -eq 1 ]; then
         # Single run
-        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options"
+        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" "$no_fa"
         return $?
     fi
 
@@ -903,7 +906,7 @@ run_tests_with_repeat() {
         # Print progress on same line
         printf "\r${BLUE}[INFO]${NC} Progress: [%d/%d] " "$i" "$repeat_count"
 
-        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" >/dev/null 2>&1; then
+        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" "$no_fa" >/dev/null 2>&1; then
             passed_runs=$((passed_runs + 1))
             printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d" "$passed_runs" "$failed_runs"
         else
@@ -977,6 +980,7 @@ run_tests() {
     local simple_model="${5:-false}"
     local enable_dlpti="${6:-false}"
     local dlpti_options="${7:-}"
+    local no_fa="${8:-false}"
 
     log_info "Starting test execution (platform: $platform)"
     local test_start_time=$(date +%s)
@@ -1068,6 +1072,10 @@ run_tests() {
     if [ "$big_model" = "true" ]; then
         test_script_args="$test_script_args --big"
         log_info "Big model mode enabled"
+    fi
+    if [ "$no_fa" = "true" ]; then
+        test_script_args="$test_script_args --no-fa"
+        log_info "Flash Attention disabled (--no-fa)"
     fi
 
     # Check if the comprehensive test script exists
@@ -1345,7 +1353,7 @@ main() {
     local model_path_arg=""
     local auto_install=true
     local interactive=false
-    local debug=false
+    local debug=true  # Default to debug mode unless --release is specified
     local simple_test=false
     local simple_model=false
     local simple_tp=false
@@ -1355,6 +1363,7 @@ main() {
     local repeat_test=1
     local enable_dlpti=false
     local dlpti_options=""
+    local no_fa=false
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -1391,6 +1400,15 @@ main() {
                 debug=true
                 shift
                 ;;
+            --debug=*)
+                debug_value="${1#*=}"
+                if [ "$debug_value" = "0" ]; then
+                    debug=false
+                else
+                    debug=true
+                fi
+                shift
+                ;;
             --simple-test)
                 simple_test=true
                 shift
@@ -1423,6 +1441,10 @@ main() {
                 enable_dlpti=true
                 dlpti_options="$2"
                 shift 2
+                ;;
+            --no-fa)
+                no_fa=true
+                shift
                 ;;
             --help|-h)
                 show_usage
@@ -1517,9 +1539,9 @@ main() {
     log_info "Repository path: $REPO_PATH"
     log_info "Model path: $LOCAL_MODEL_PATH"
     if [ "$debug" = "true" ]; then
-        log_info "Debug mode: ENABLED (Debug build + verbose output)"
+        log_info "Build mode: DEBUG (Debug build + verbose output) [DEFAULT]"
     else
-        log_info "Build type: Release (optimized, use --debug for debugging)"
+        log_info "Build mode: RELEASE (optimized, debug disabled with --debug=0)"
     fi
     if [ "$simple_test" = "true" ]; then
         log_info "Simple test mode: enabled"
@@ -1536,6 +1558,9 @@ main() {
     if [ "$enable_dlpti" = "true" ]; then
         log_info "dlPTI profiling: ENABLED"
         log_info "dlPTI options: $dlpti_options"
+    fi
+    if [ "$no_fa" = "true" ]; then
+        log_info "Flash Attention: DISABLED (--no-fa)"
     fi
     echo ""
 
@@ -1580,7 +1605,7 @@ main() {
                     log_warn "Device status check skipped by user request"
                 fi
 
-                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$repeat_test" "$enable_dlpti" "$dlpti_options"
+                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$repeat_test" "$enable_dlpti" "$dlpti_options" "$no_fa"
 
                 if [ "$action" = "test" ]; then
                     log_success "Testing completed"

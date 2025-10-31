@@ -29,11 +29,7 @@ platform_suffixes:
 build:
   sdk:
     tag: "V2_SOFTWARE_master_202510172141"
-<<<<<<< HEAD
-    workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${SDK_TAG}"
-=======
     workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
->>>>>>> dl-main
     docker_repo_path: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
     # SDK download configuration

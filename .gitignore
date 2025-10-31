@@ -149,3 +149,12 @@ poetry.toml
 
 # clangd
 .clang*
+
+# perf
+*perfetto.json
+*.db
+*.db-wal
+*.db-shm
+
+# third_party only for debug
+third_party

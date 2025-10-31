@@ -119,11 +119,11 @@ if command -v dlsmi >/dev/null 2>&1; then
     if dlsmi --list-gpus >> "$test_log" 2>&1; then
         gpu_count=$(dlsmi --list-gpus 2>/dev/null | wc -l)
         echo "[INFO] Detected $gpu_count GPU(s)" | tee -a "$summary_log"
-        
+
         # Recommend GPU limiting for large GPU counts
-        if [ "$gpu_count" -gt 2 ]; then
-            echo "[INFO] Note: $gpu_count GPUs detected. Consider limiting to first 2 devices for testing" | tee -a "$summary_log"
-            echo "[INFO] Recommendation: export CUDA_VISIBLE_DEVICES=0,1" | tee -a "$summary_log"
+        if [ "$gpu_count" -gt 1 ]; then
+            echo "[INFO] Note: $gpu_count GPUs detected. Consider limiting to first 1 devices for testing" | tee -a "$summary_log"
+            echo "[INFO] Recommendation: export CUDA_VISIBLE_DEVICES=0" | tee -a "$summary_log"
         fi
     else
         echo "[WARN] Failed to query GPU status with dlsmi --list-gpus" | tee -a "$summary_log"

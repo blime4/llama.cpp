@@ -464,8 +464,7 @@ static void* expand_alibi_slopes_to_3d(
 
 // MHA Forward implementation for ALiBi support
 static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    printf("\n========== ENTERING flash_attn_ext_dldnn_mha_forward ==========\n");
-    fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING flash_attn_ext_dldnn_mha_forward ==========\n");
 
     bool ok = true;
     const struct ggml_tensor * KQV  = dst;
@@ -474,7 +473,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const struct ggml_tensor * V    = dst->src[2];
     const struct ggml_tensor * mask = dst->src[3];
 
-    printf("DEBUG: Getting cuDNN handle...\n");
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Getting cuDNN handle...\n");
     fflush(stdout);
 
     // Check CUDA device status before anything
@@ -484,13 +483,13 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         GGML_LOG_ERROR("Failed to get CUDA device: %s\n", cudaGetErrorString(cuda_err));
         return;
     }
-    printf("DEBUG: Current CUDA device: %d\n", device_id);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Current CUDA device: %d\n", device_id);
 
     // Check GPU memory status
     size_t free_mem, total_mem;
     cuda_err = cudaMemGetInfo(&free_mem, &total_mem);
     if (cuda_err == cudaSuccess) {
-        printf("DEBUG: GPU memory - Free: %.2f MB / Total: %.2f MB (%.1f%% free)\n",
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: GPU memory - Free: %.2f MB / Total: %.2f MB (%.1f%% free)\n",
                free_mem / (1024.0 * 1024.0),
                total_mem / (1024.0 * 1024.0),
                100.0 * free_mem / total_mem);
@@ -503,11 +502,11 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         return;
     }
 
-    printf("DEBUG: cuDNN handle obtained successfully: %p\n", (void*)cudnn_handle);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cuDNN handle obtained successfully: %p\n", (void*)cudnn_handle);
 
     // Get cuDNN version
     size_t cudnn_version = cudnnGetVersion();
-    printf("DEBUG: cuDNN version: %zu\n", cudnn_version);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cuDNN version: %zu\n", cudnn_version);
     fflush(stdout);
 
     // Determine target_type based on Q, K, V
@@ -530,7 +529,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
 
     // Convert Q to target_type if its type differs
     if (Q->type != target_type) {
-        printf("Converting Q from %s to %s for DLDNN attention.\n", ggml_type_name(Q->type),
+        GGML_DL_FATTN_DEBUG_PRINT("Converting Q from %s to %s for DLDNN attention.\n", ggml_type_name(Q->type),
         ggml_type_name(target_type));
         size_t q_converted_size = Q->ne[0] * Q->ne[1] * Q->ne[2] * Q->ne[3] * ggml_type_size(target_type);
         CUDA_CHECK(cudaMalloc(&q_converted_gpu, q_converted_size));
@@ -540,7 +539,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
 
     // Convert K to target_type if its type differs
     if (K->type != target_type) {
-        printf("Converting K from %s to %s for DLDNN attention.\n", ggml_type_name(K->type),
+        GGML_DL_FATTN_DEBUG_PRINT("Converting K from %s to %s for DLDNN attention.\n", ggml_type_name(K->type),
         ggml_type_name(target_type));
         size_t k_converted_size = K->ne[0] * K->ne[1] * K->ne[2] * K->ne[3] * ggml_type_size(target_type);
         CUDA_CHECK(cudaMalloc(&k_converted_gpu, k_converted_size));
@@ -550,7 +549,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
 
     // Convert V to target_type if its type differs
     if (V->type != target_type) {
-        printf("Converting V from %s to %s for DLDNN attention.\n", ggml_type_name(V->type),
+        GGML_DL_FATTN_DEBUG_PRINT("Converting V from %s to %s for DLDNN attention.\n", ggml_type_name(V->type),
         ggml_type_name(target_type));
         size_t v_converted_size = V->ne[0] * V->ne[1] * V->ne[2] * V->ne[3] * ggml_type_size(target_type);
         CUDA_CHECK(cudaMalloc(&v_converted_gpu, v_converted_size));
@@ -598,29 +597,29 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         }
     };
 
-    printf("DEBUG: Converting Q to BSHD format...\n"); fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting Q to BSHD format...\n"); fflush(stdout);
     if (!convert_to_bshd(q_data_source, q_bshd, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], target_type)) {
         GGML_LOG_ERROR("Failed to permute Q data to BSHD format with type %s.\n", ggml_type_name(target_type));
         ok = false;
     }
-    printf("DEBUG: Q conversion completed.\n"); fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Q conversion completed.\n"); fflush(stdout);
 
     if (ok) {
-        printf("DEBUG: Converting K to BSHD format...\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting K to BSHD format...\n"); fflush(stdout);
         if (!convert_to_bshd(k_data_source, k_bshd, K->ne[0], K->ne[1], K->ne[2], K->ne[3], target_type)) {
             GGML_LOG_ERROR("Failed to permute K data to BSHD format with type %s.\n", ggml_type_name(target_type));
             ok = false;
         }
-        printf("DEBUG: K conversion completed.\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: K conversion completed.\n"); fflush(stdout);
     }
 
     if (ok) {
-        printf("DEBUG: Converting V to BSHD format...\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting V to BSHD format...\n"); fflush(stdout);
         if (!convert_to_bshd(v_data_source, v_bshd, V->ne[0], V->ne[1], V->ne[2], V->ne[3], target_type)) {
             GGML_LOG_ERROR("Failed to permute V data to BSHD format with type %s.\n", ggml_type_name(target_type));
             ok = false;
         }
-        printf("DEBUG: V conversion completed.\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: V conversion completed.\n"); fflush(stdout);
     }
 
     if (ok) {
@@ -689,7 +688,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     // - softmax_lse_desc : return_softmax is false, pass nullptr.
     // - p_desc : return_softmax is false, pass nullptr.
 
-    printf("DEBUG: Calling cudnnGetMHAForwardWorkspaceSize...\n");
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Calling cudnnGetMHAForwardWorkspaceSize...\n");
     fflush(stdout);
 
     CUDNN_CHECK(cudnnGetMHAForwardWorkspaceSize(
@@ -702,52 +701,48 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         &workspace_size
     ));
 
-    printf("DEBUG: cudnnGetMHAForwardWorkspaceSize completed, workspace_size=%zu\n", workspace_size);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cudnnGetMHAForwardWorkspaceSize completed, workspace_size=%zu\n", workspace_size);
     fflush(stdout);
 
     void* workspace = nullptr;
     if (workspace_size > 0) {
-        printf("DEBUG: Allocating workspace memory: %zu bytes (%.2f MB)...\n",
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Allocating workspace memory: %zu bytes (%.2f MB)...\n",
                workspace_size, workspace_size / (1024.0 * 1024.0));
-        fflush(stdout);
 
         CUDA_CHECK(cudaMalloc(&workspace, workspace_size));
 
-        printf("DEBUG: Workspace allocated successfully at %p\n", workspace);
-        fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Workspace allocated successfully at %p\n", workspace);
     } else {
-        printf("DEBUG: No workspace memory needed.\n");
-        fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: No workspace memory needed.\n");
     }
 
     unsigned long long philox_seed = 0;
     unsigned long long philox_offset = 0;
 
     // Debug: Print detailed parameters before cudnnMHAForward call
-    printf("\n=== DLDNN MHA Forward Debug Info ===\n");
-    printf("Tensor shapes (DSHB format):\n");
-    printf("  Q=[D:%ld, S:%ld, H:%ld, B:%ld]\n", Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3]);
-    printf("  K=[D:%ld, S:%ld, H:%ld, B:%ld]\n", K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
-    printf("  V=[D:%ld, S:%ld, H:%ld, B:%ld]\n", V->ne[0], V->ne[1], V->ne[2], V->ne[3]);
-    printf("Derived parameters:\n");
-    printf("  Head size (D): %ld\n", Q->ne[0]);
-    printf("  Sequence length (S): %ld\n", Q->ne[1]);
-    printf("  Num heads Q: %ld, K: %ld, V: %ld\n", Q->ne[2], K->ne[2], V->ne[2]);
-    printf("  Batch size (B): %ld\n", Q->ne[3]);
-    printf("  GQA ratio: %ld\n", Q->ne[2] / K->ne[2]);
-    printf("Attention parameters:\n");
-    printf("  scale=%.6f, max_bias=%.6f, logit_softcap=%.6f\n", scale, max_bias, logit_softcap);
-    printf("  Has mask: %s\n", mask ? "yes" : "no");
-    printf("  Has ALiBi: %s\n", alibi_slopes_ptr ? "yes" : "no");
-    printf("Memory info:\n");
-    printf("  Workspace size: %zu bytes (%.2f MB)\n", workspace_size, workspace_size / (1024.0 * 1024.0));
-    printf("  Data type: %s\n", ggml_type_name(target_type));
-    printf("GPU pointers:\n");
-    printf("  q_bshd=%p, k_bshd=%p, v_bshd=%p\n", q_bshd, k_bshd, v_bshd);
-    printf("  temp_output=%p, workspace=%p\n", temp_output, workspace);
-    printf("  alibi_slopes=%p\n", alibi_slopes_ptr);
-    printf("\n>>> Calling cudnnMHAForward (this is the critical call)...\n");
-    fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("\n=== DLDNN MHA Forward Debug Info ===\n");
+    GGML_DL_FATTN_DEBUG_PRINT("Tensor shapes (DSHB format):\n");
+    GGML_DL_FATTN_DEBUG_PRINT("  Q=[D:%ld, S:%ld, H:%ld, B:%ld]\n", Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3]);
+    GGML_DL_FATTN_DEBUG_PRINT("  K=[D:%ld, S:%ld, H:%ld, B:%ld]\n", K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
+    GGML_DL_FATTN_DEBUG_PRINT("  V=[D:%ld, S:%ld, H:%ld, B:%ld]\n", V->ne[0], V->ne[1], V->ne[2], V->ne[3]);
+    GGML_DL_FATTN_DEBUG_PRINT("Derived parameters:\n");
+    GGML_DL_FATTN_DEBUG_PRINT("  Head size (D): %ld\n", Q->ne[0]);
+    GGML_DL_FATTN_DEBUG_PRINT("  Sequence length (S): %ld\n", Q->ne[1]);
+    GGML_DL_FATTN_DEBUG_PRINT("  Num heads Q: %ld, K: %ld, V: %ld\n", Q->ne[2], K->ne[2], V->ne[2]);
+    GGML_DL_FATTN_DEBUG_PRINT("  Batch size (B): %ld\n", Q->ne[3]);
+    GGML_DL_FATTN_DEBUG_PRINT("  GQA ratio: %ld\n", Q->ne[2] / K->ne[2]);
+    GGML_DL_FATTN_DEBUG_PRINT("Attention parameters:\n");
+    GGML_DL_FATTN_DEBUG_PRINT("  scale=%.6f, max_bias=%.6f, logit_softcap=%.6f\n", scale, max_bias, logit_softcap);
+    GGML_DL_FATTN_DEBUG_PRINT("  Has mask: %s\n", mask ? "yes" : "no");
+    GGML_DL_FATTN_DEBUG_PRINT("  Has ALiBi: %s\n", alibi_slopes_ptr ? "yes" : "no");
+    GGML_DL_FATTN_DEBUG_PRINT("Memory info:\n");
+    GGML_DL_FATTN_DEBUG_PRINT("  Workspace size: %zu bytes (%.2f MB)\n", workspace_size, workspace_size / (1024.0 * 1024.0));
+    GGML_DL_FATTN_DEBUG_PRINT("  Data type: %s\n", ggml_type_name(target_type));
+    GGML_DL_FATTN_DEBUG_PRINT("GPU pointers:\n");
+    GGML_DL_FATTN_DEBUG_PRINT("  q_bshd=%p, k_bshd=%p, v_bshd=%p\n", q_bshd, k_bshd, v_bshd);
+    GGML_DL_FATTN_DEBUG_PRINT("  temp_output=%p, workspace=%p\n", temp_output, workspace);
+    GGML_DL_FATTN_DEBUG_PRINT("  alibi_slopes=%p\n", alibi_slopes_ptr);
+    GGML_DL_FATTN_DEBUG_PRINT("\n>>> Calling cudnnMHAForward (this is the critical call)...\n");
 
     CUDNN_CHECK(cudnnMHAForward(
         cudnn_handle, q_desc.get(), q_bshd,
@@ -764,8 +759,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         workspace, workspace_size
     ));
 
-    printf("cudnnMHAForward completed successfully.\n");
-    fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("cudnnMHAForward completed successfully.\n");
 
     if (workspace != nullptr) {
         CUDA_CHECK(cudaFree(workspace));
@@ -774,7 +768,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     // Verify cudnnMHAForward output if requested
     const char *env_verify_any = getenv("GGML_CUDNN_VERIFY_ANY_ATTENTION");
     if (env_verify_any != nullptr && strcmp(env_verify_any, "1") == 0) {
-        printf("CUDNN_VERIFICATION: Verifying cudnnMHAForward output...\n");
+        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Verifying cudnnMHAForward output...\n");
 
         // Copy data from GPU to CPU for verification
         const int B = Q->ne[3];
@@ -787,15 +781,15 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         const size_t output_size = B * Sq * H * D * ggml_type_size(target_type);
 
         // Debug info
-        printf("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
-        printf("CUDNN_VERIFICATION: Memory sizes: output=%zu bytes\n", output_size);
+        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Memory sizes: output=%zu bytes\n", output_size);
 
         // Allocate CPU buffer for output only
         void* output_cpu = malloc(output_size);
 
         if (output_cpu) {
             // Copy MHA output from GPU to CPU (BSHD format from MHA)
-            printf("CUDNN_VERIFICATION: Copying MHA output (BSHD format)...\n");
+            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Copying MHA output (BSHD format)...\n");
             CUDA_CHECK(cudaMemcpy(output_cpu, temp_output, output_size, cudaMemcpyDeviceToHost));
 
             // Debug: MHA verification uses original Q, K, V data directly
@@ -803,7 +797,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
             // Debug: Print first few values from cudnn output (more details)
             if (target_type == GGML_TYPE_F16) {
                 const ggml_fp16_t* cudnn_output_data = static_cast<const ggml_fp16_t*>(output_cpu);
-                printf("CUDNN_VERIFICATION: cuDNN MHA Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: cuDNN MHA Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
                               to_float(cudnn_output_data[0]), to_float(cudnn_output_data[1]), to_float(cudnn_output_data[2]),
                               to_float(cudnn_output_data[3]), to_float(cudnn_output_data[4]), to_float(cudnn_output_data[5]),
                               to_float(cudnn_output_data[6]), to_float(cudnn_output_data[7]), to_float(cudnn_output_data[8]),
@@ -818,7 +812,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                         break;
                     }
                 }
-                printf("CUDNN_VERIFICATION: MHA output analysis - all_same=%s, first_val=%.3f\n",
+                GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: MHA output analysis - all_same=%s, first_val=%.3f\n",
                               all_same ? "TRUE" : "FALSE", first_val);
             }
 
@@ -894,10 +888,10 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
             }
 
             if (verify_result) {
-                printf("CUDNN_VERIFICATION: cudnnMHAForward verification PASSED!\n");
+                GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: cudnnMHAForward verification PASSED!\n");
             } else {
                 GGML_LOG_ERROR("CUDNN_VERIFICATION: cudnnMHAForward verification FAILED!\n");
-                printf("MHA Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, has_alibi=%s\n",
+                GGML_DL_FATTN_DEBUG_PRINT("MHA Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, has_alibi=%s\n",
                              B, H, Sq, Sk, D, scale, (max_bias > 0.0f) ? "true" : "false");
             }
         } else {
@@ -929,8 +923,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         }
     };
 
-    printf("DEBUG: Converting output from BSHD to DHSB format...\n");
-    fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting output from BSHD to DHSB format...\n");
 
     if (!convert_bhsd_to_dhsb(temp_output, KQV->data, temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], data_type)) {
         GGML_LOG_ERROR("Unsupported data type for permute: %d\n", data_type);
@@ -941,23 +934,19 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         ok = false;
     }
 
-    printf("DEBUG: Output conversion completed.\n");
-    fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Output conversion completed.\n");
 
     if (ok) {
         // check kernel execution
-        printf("DEBUG: Checking CUDA errors and synchronizing device...\n");
-        fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Checking CUDA errors and synchronizing device...\n");
 
         CUDA_CHECK(cudaGetLastError());
 
-        printf("DEBUG: About to call cudaDeviceSynchronize()...\n");
-        fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: About to call cudaDeviceSynchronize()...\n");
 
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        printf("DEBUG: cudaDeviceSynchronize() completed successfully.\n");
-        fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cudaDeviceSynchronize() completed successfully.\n");
     }
 
     // free temp_output
@@ -995,8 +984,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
 
 // ScaledDotProductAttention implementation for mask support
 static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    printf("\n========== ENTERING flash_attn_ext_dldnn_scaled_dot_product ==========\n");
-    fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING flash_attn_ext_dldnn_scaled_dot_product ==========\n");
     bool ok = true;
     const struct ggml_tensor * KQV  = dst;
     const struct ggml_tensor * Q    = dst->src[0];
@@ -1123,9 +1111,9 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
 
         // Check if this is GQA
         if (q_heads != k_heads || q_heads != v_heads) {
-            printf("GQA detected in ScaledDotProduct path: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
+            GGML_DL_FATTN_DEBUG_PRINT("GQA detected in ScaledDotProduct path: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
             // SDK now supports GQA - let's try it
-            printf("Attempting cudnnScaledDotProductAttention with GQA (SDK updated)...\n");
+            GGML_DL_FATTN_DEBUG_PRINT("Attempting cudnnScaledDotProductAttention with GQA (SDK updated)...\n");
             // If it fails, the error will be caught by cudnnStatus_t check
         }
 
@@ -1161,7 +1149,7 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
                 const int64_t actual_sq = Q->ne[1];       // actual query sequence length
                 const int64_t actual_sk = K->ne[1];       // actual key sequence length
 
-                printf("Mask dimensions: [%ld, %ld, %ld, %ld], Q: [%ld, %ld, %ld, %ld], K: [%ld, %ld, %ld, %ld]\n",
+                GGML_DL_FATTN_DEBUG_PRINT("Mask dimensions: [%ld, %ld, %ld, %ld], Q: [%ld, %ld, %ld, %ld], K: [%ld, %ld, %ld, %ld]\n",
                        mask_sk, mask_sq_pad, mask_dim2, mask_dim3,
                        Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3],
                        K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
@@ -1195,7 +1183,7 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
                     } else {
                         // Has padding, need to extract valid portion first
                         // Create intermediate buffer for valid mask [Sk, Sq, 1, 1] (no padding)
-                        GGML_LOG_WARN("Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld. Removing padding before permute.\n",
+                        GGML_DL_FATTN_DEBUG_PRINT("Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld. Removing padding before permute.\n",
                             mask_sq_pad, actual_sq);
 
                         // Copy valid portion: extract [Sk, Sq] from [Sk, Sq_pad]
@@ -1225,7 +1213,7 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
             } else {
                 // No explicit mask, use causal attention
                 is_causal = true;
-                printf("No explicit mask provided, using causal attention\n");
+                GGML_DL_FATTN_DEBUG_PRINT("No explicit mask provided, using causal attention\n");
             }
 
             // Get workspace size first
@@ -1250,12 +1238,12 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
             }
 
             // Debug: Print cuDNN call parameters
-            printf("cuDNN API call parameters:\n");
-            printf("  dropout: %.6f\n", 0.0f);
-            printf("  is_causal: %s\n", is_causal ? "true" : "false");
-            printf("  scale: %.6f\n", scale);
-            printf("  mask_desc: %s\n", mask_dldnn ? "provided" : "nullptr");
-            printf("  workspace_size: %zu bytes\n", workspace_size);
+            GGML_DL_FATTN_DEBUG_PRINT("cuDNN API call parameters:\n");
+            GGML_DL_FATTN_DEBUG_PRINT("  dropout: %.6f\n", 0.0f);
+            GGML_DL_FATTN_DEBUG_PRINT("  is_causal: %s\n", is_causal ? "true" : "false");
+            GGML_DL_FATTN_DEBUG_PRINT("  scale: %.6f\n", scale);
+            GGML_DL_FATTN_DEBUG_PRINT("  mask_desc: %s\n", mask_dldnn ? "provided" : "nullptr");
+            GGML_DL_FATTN_DEBUG_PRINT("  workspace_size: %zu bytes\n", workspace_size);
 
             // Call cudnnScaledDotProductAttention
             cudnnStatus_t status = cudnnScaledDotProductAttention(
@@ -1282,7 +1270,7 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
                 const char *env_verify_any = getenv("GGML_CUDNN_VERIFY_ANY_ATTENTION");
                 if ((env_verify != nullptr && strcmp(env_verify, "1") == 0) ||
                     (env_verify_any != nullptr && strcmp(env_verify_any, "1") == 0)) {
-                    printf("CUDNN_VERIFICATION: Verifying cudnnScaledDotProductAttention output...\n");
+                    GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Verifying cudnnScaledDotProductAttention output...\n");
 
                     // Q: [head_dim, seq_len, num_heads, batch_size] --> [D, Sq, H, B]
                     // K: [head_dim, seq_len, num_heads, batch_size] --> [D, Sk, H, B]
@@ -1298,8 +1286,8 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
                     const size_t mask_size = mask_dldnn ? 1 * 1 * Sq * Sk * ggml_type_size(target_type) : 0;
 
                     // Debug info
-                    printf("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
-                    printf("CUDNN_VERIFICATION: Memory sizes: output=%zu, mask=%zu bytes\n", output_size, mask_size);
+                    GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
+                    GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Memory sizes: output=%zu, mask=%zu bytes\n", output_size, mask_size);
 
                     // Allocate CPU buffers for output and mask only
                     void* mask_cpu = mask_dldnn ? malloc(mask_size) : nullptr;
@@ -1315,26 +1303,26 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
 
                         // Copy output and mask from GPU to CPU only
                         if (mask_dldnn) {
-                            printf("CUDNN_VERIFICATION: Copying mask tensor (%zu bytes)...\n", mask_size);
+                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Copying mask tensor (%zu bytes)...\n", mask_size);
                             CUDA_CHECK(cudaMemcpy(mask_cpu, mask_dldnn, mask_size, cudaMemcpyDeviceToHost));
                         }
 
-                        printf("CUDNN_VERIFICATION: Copying output tensor (%zu bytes)...\n", output_size);
+                        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Copying output tensor (%zu bytes)...\n", output_size);
                         CUDA_CHECK(cudaMemcpy(output_cpu, temp_output, output_size, cudaMemcpyDeviceToHost));
 
                         // Debug: Print output values for analysis
-                        printf("CUDNN_VERIFICATION: Analyzing output values...\n");
+                        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Analyzing output values...\n");
                         if (target_type == GGML_TYPE_F16) {
                             const ggml_fp16_t* output_data = static_cast<const ggml_fp16_t*>(output_cpu);
-                            printf("CUDNN_VERIFICATION: cuDNN Output[0:5] = %.3f, %.3f, %.3f, %.3f, %.3f\n",
+                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: cuDNN Output[0:5] = %.3f, %.3f, %.3f, %.3f, %.3f\n",
                                          to_float(output_data[0]), to_float(output_data[1]), to_float(output_data[2]),
                                          to_float(output_data[3]), to_float(output_data[4]));
                         }
 
                         // Special analysis for causal case with Sq=1
                         if (is_causal && Sq == 1) {
-                            printf("CUDNN_VERIFICATION: Special case - Causal attention with single query (Sq=1, Sk=%d)\n", Sk);
-                            printf("CUDNN_VERIFICATION: In this case, query can only attend to position 0 of key sequence\n");
+                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Special case - Causal attention with single query (Sq=1, Sk=%d)\n", Sk);
+                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: In this case, query can only attend to position 0 of key sequence\n");
                         }
 
                         // Run verification based on data type
@@ -1410,7 +1398,7 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
 
                         if (!verify_result) {
                             GGML_LOG_ERROR("CUDNN_VERIFICATION: cudnnScaledDotProductAttention verification failed!\n");
-                            printf("Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, is_causal=%s, has_mask=%s\n",
+                            GGML_DL_FATTN_DEBUG_PRINT("Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, is_causal=%s, has_mask=%s\n",
                                          B, H, Sq, Sk, D, scale, is_causal ? "true" : "false", mask_dldnn ? "true" : "false");
                         }
                     } else {
@@ -1694,7 +1682,7 @@ static bool flash_attn_ext_is_in_fail_list(int64_t hsk, int64_t nr22, int64_t nr
         if (s->hsk == (int) hsk && s->nr22 == (int) nr22 && s->nr23 == (int) nr23 &&
             s->kv == (int) kv && s->nb == (int) nb && s->mask == imask &&
             eqf_approx(s->max_bias, max_bias) && eqf_approx(s->logit_softcap, logit_softcap)) {
-            printf("XFAIL_DETECTED (DLFA), just skip: hsk=%d, nr22=%d, nr23=%d, kv=%d, nb=%d, mask=%d, max_bias=%f, logit_softcap=%f\n",
+            GGML_DL_FATTN_DEBUG_PRINT("XFAIL_DETECTED (DLFA), just skip: hsk=%d, nr22=%d, nr23=%d, kv=%d, nb=%d, mask=%d, max_bias=%f, logit_softcap=%f\n",
                    (int)hsk, (int)nr22, (int)nr23, (int)kv, (int)nb, imask, max_bias, logit_softcap);
             return true;
         }
@@ -1755,7 +1743,7 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
     // Check for GQA (Grouped Query Attention) support
     if (n_head_q != n_head_k || n_head_k != n_head_v) {
         // This is GQA configuration - now supported by SDK
-        printf("DLDNN Flash Attention: GQA configuration detected (Q heads: %ld, K heads: %ld, V heads: %ld, ratio: %ld)\n",
+        GGML_DL_FATTN_DEBUG_PRINT("DLDNN Flash Attention: GQA configuration detected (Q heads: %ld, K heads: %ld, V heads: %ld, ratio: %ld)\n",
                       n_head_q, n_head_k, n_head_v, gqa_ratio);
         // Verify that head counts are compatible
         if (n_head_q % n_head_k != 0 || n_head_k != n_head_v) {
@@ -1770,6 +1758,7 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
         return false;
     }
 
+#if 0
     // ========================================================================
     // XFAIL Filter List - Based on test-backend-ops analysis
     // Filter out known failing cases while preserving all passing cases
@@ -1883,7 +1872,7 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
     if (flash_attn_ext_should_skip(dst->src, (const int32_t *) dst->op_params)) {
         return false;
     }
-
+#endif
     return true;
 }
 
@@ -1923,27 +1912,27 @@ void flash_attn_ext_dldnn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     }
 
     if (!has_alibi && !has_mask) {
-        // printf("DLDNN: No ALiBi or mask, using cudnnScaledDotProductAttention with is_causal=true\n");
+        // GGML_DL_FATTN_DEBUG_PRINT("DLDNN: No ALiBi or mask, using cudnnScaledDotProductAttention with is_causal=true\n");
         // use_scaled_dot_product = true;
-        printf("DLDNN: No ALiBi or mask, using cudnnMHAForward\n");
+        GGML_DL_FATTN_DEBUG_PRINT("DLDNN: No ALiBi or mask, using cudnnMHAForward\n");
         use_mha_forward = true;
     }
 
     const char *env_force_sdp = getenv("GGML_DLDNN_FORCE_SDP_ATTENTION");
     if (env_force_sdp != nullptr && strcmp(env_force_sdp, "1") == 0) {
-        printf("DLDNN: Force using cudnnScaledDotProductAttention\n");
+        GGML_DL_FATTN_DEBUG_PRINT("DLDNN: Force using cudnnScaledDotProductAttention\n");
         use_scaled_dot_product = true;
         use_mha_forward = false;
     }
 
     const char *env_force_mha = getenv("GGML_DLDNN_FORCE_MHA_FORWARD");
     if (env_force_mha != nullptr && strcmp(env_force_mha, "1") == 0) {
-        printf("DLDNN: Force using cudnnMHAForward\n");
+        GGML_DL_FATTN_DEBUG_PRINT("DLDNN: Force using cudnnMHAForward\n");
         use_mha_forward = true;
         use_scaled_dot_product = false;
     }
 
-    printf("DLDNN interface selection: has_alibi=%s, has_mask=%s, using %s\n",
+    GGML_DL_FATTN_DEBUG_PRINT("DLDNN interface selection: has_alibi=%s, has_mask=%s, using %s\n",
                   has_alibi ? "true" : "false",
                   has_mask ? "true" : "false",
                   use_mha_forward ? "cudnnMHAForward" : "cudnnScaledDotProductAttention");

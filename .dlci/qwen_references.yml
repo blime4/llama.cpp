@@ -45,6 +45,27 @@ models:
         expected_content: "8"
         description: "English arithmetic test"
 
+  qwen2.5-1.5b-instruct-q4_k_m:
+    model_path: "Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    description: "Qwen2.5 1.5B Instruct model with Q4_K_M quantization for Flash Attention testing"
+    tests:
+      math_calculation:
+        prompt: "请计算 2+3*4 的结果"
+        expected_content: "14"
+        description: "Basic arithmetic calculation test with Flash Attention"
+      simple_math:
+        prompt: "1+1等于几？"
+        expected_content: "2"
+        description: "Simple addition in Chinese with Flash Attention"
+      geography:
+        prompt: "请用一个词回答：北京是中国的什么？"
+        expected_content: "首都"
+        description: "Geography knowledge test with Flash Attention"
+      english_math:
+        prompt: "What is 5+3? Answer with only the number."
+        expected_content: "8"
+        description: "English arithmetic test with Flash Attention"
+
   Qwen3-30B-A3B-Q4_K_M:
     model_path: "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf"
     description: "Qwen3 30B A3B model with Q4_K_M quantization (reduced test scope)"

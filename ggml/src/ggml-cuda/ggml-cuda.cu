@@ -7,7 +7,7 @@
 #include "ggml-cuda/common.cuh"
 
 #ifdef GGML_USE_DLCU
-#include "../ggml-dlcu/ggml-dl.cuh"
+#include "../ggml-dlcu/dl-mulmat.cuh"
 #endif
 #ifdef GGML_USE_DLFA
 #include "../ggml-dlcu/dl-fattn.cuh"
@@ -1327,17 +1327,6 @@ static void ggml_cuda_op_mul_mat_cublas(
 
             const half alpha_f16 = 1.0f;
             const half beta_f16 = 0.0f;
-#ifdef GGML_USE_DLCU
-            if(ggml_dl::is_devit_enabled()) {
-#else
-            if(false) {
-#endif
-                std::vector<half> src1_ptr_cpu(10);
-                CUDA_CHECK(cudaMemcpy(src1_ptr_cpu.data(), src1_ptr, 10*sizeof(half), cudaMemcpyDeviceToHost));
-                for ( int i =0 ; i < 10; i++) {
-                    printf("[cublasGemmEx] src1_ptr_cpu[%d]: %f\n", i, __half2float(src1_ptr_cpu[i]));
-                }
-            }
             CUBLAS_CHECK(
                 cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
                         row_diff, src1_ncols, ne10,
@@ -1346,33 +1335,8 @@ static void ggml_cuda_op_mul_mat_cublas(
                         &beta_f16,  dst_fp16.get(), CUDA_R_16F, ldc,
                         CUBLAS_COMPUTE_16F,
                         CUBLAS_GEMM_DEFAULT_TENSOR_OP));
-
-#ifdef GGML_USE_DLCU
-            if(ggml_dl::is_devit_enabled()) {
-#else
-            if(false) {
-#endif
-                std::vector<half> dst_fp16_cpu(10);
-                CUDA_CHECK(cudaMemcpy(dst_fp16_cpu.data(), dst_fp16.get(), 10*sizeof(half), cudaMemcpyDeviceToHost));
-                for (int i = 0; i < 10; i++) {
-                    printf("[cublasGemmEx] dst_fp16_cpu[%d]: %f\n", i, __half2float(dst_fp16_cpu[i]));
-                }
-            }
-
             const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(GGML_TYPE_F16);
             to_fp32_cuda(dst_fp16.get(), dst_dd_i, row_diff*src1_ncols, stream);
-#ifdef GGML_USE_DLCU
-            if(ggml_dl::is_devit_enabled()) {
-#else
-            if(false) {
-#endif
-                CUDA_CHECK(cudaStreamSynchronize(stream));
-                std::vector<float> dst_fp32_cpu(10);
-                CUDA_CHECK(cudaMemcpy(dst_fp32_cpu.data(), dst_dd_i, 10*sizeof(float), cudaMemcpyDeviceToHost));
-                for (int i = 0; i < 10; i++) {
-                    printf("[cublasGemmEx] dst_fp32_cpu[%d]: %f\n", i, dst_fp32_cpu[i]);
-                }
-            }
         }
     } else {
         ggml_cuda_pool_alloc<float> src0_ddq_as_f32(ctx.pool(id));
@@ -1980,7 +1944,7 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
     if (r2 == 1 && r3 == 1 && ggml_is_contiguous_2(src0) && ggml_is_contiguous_2(src1)) {
         // there is no broadcast and src0, src1 are contiguous across dims 2, 3
         // use cublasGemmStridedBatchedEx
-        // printf("for debug : cublasGemmStridedBatchedEx\n");
+        GGML_DL_MULMAT_DEBUG_PRINT("for debug : cublasGemmStridedBatchedEx\n");
         CUBLAS_CHECK(
         cublasGemmStridedBatchedEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne10,
@@ -2013,7 +1977,7 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
 
         CUDA_CHECK(cudaGetLastError());
 
-        // printf("for debug : cublasGemmBatchedEx\n");
+        GGML_DL_MULMAT_DEBUG_PRINT("for debug : cublasGemmBatchedEx\n");
         CUBLAS_CHECK(
         cublasGemmBatchedEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne10,
@@ -2107,105 +2071,20 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
 #if defined(GGML_USE_DLTU)
-    size_t dst_size = ggml_nbytes(dst);
-    int id = ggml_cuda_get_device();
-    ggml_cuda_pool_alloc<float> dst_dlblas_data(ctx.pool(id), dst_size);
-
-    ggml_tensor dst_dlblas = *dst; // copy all attributes from dst
-    dst_dlblas.data = dst_dlblas_data.get();
-    dst_dlblas.buffer = nullptr; // clear buffer, because using new memory allocation
-
-    // additional outputs for comparison
-    ggml_cuda_pool_alloc<float> dst_mmv_data(ctx.pool(id), ggml_nelements(dst));
-    ggml_tensor dst_mmv = *dst;
-    dst_mmv.data = dst_mmv_data.get();
-    dst_mmv.buffer = nullptr;
-
-    ggml_cuda_pool_alloc<float> dst_cublas_mmq_data(ctx.pool(id), ggml_nelements(dst));
-    ggml_tensor dst_cublas_mmq = *dst;
-    dst_cublas_mmq.data = dst_cublas_mmq_data.get();
-    dst_cublas_mmq.buffer = dst->buffer;
-
-#ifdef GGML_USE_DLCU
-    bool need_compare = ggml_dl::is_devit_enabled() ? true : false;
-#else
-    bool need_compare = false;
-#endif
-    const char *env_force_no_dlblas = getenv("GGML_FORCE_NO_DLBLAS");
-    const char *env_dlblas_consistent = getenv("GGML_DLBLAS_CONSISTENT");
-    const char *env_debug_path_selection = getenv("GGML_DEBUG_PATH_SELECTION");
     const char* which_branch = "";
 
-    bool dlblas_available = !split &&
-                            !(env_force_no_dlblas && env_force_no_dlblas[0] == '1');
-
-    // bugid: 16276 - [llama.cpp] dlblasGemmExV2 need to support batch broadcast. like cublasGemmBatchedEx, cublasGemmStridedBatchedEx
-    bool single_batch = src0->ne[2] * src0->ne[3] == 1 && src1->ne[2] * src1->ne[3] == 1;
-    if (!single_batch && env_debug_path_selection) {
-        if (src0->ne[2] * src0->ne[3] != 1){
-            printf("[DLBLAS_PATH_OVERRIDE] src0's shape %ldx%ldx%ldx%ld is not single batch, use original path.\n",
-                src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3]);
-        }
-        if (src1->ne[2] * src1->ne[3] != 1){
-            printf("[DLBLAS_PATH_OVERRIDE] src1's shape %ldx%ldx%ldx%ld is not single batch, use original path.\n",
-                src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
-        }
-    }
-
-    // only support single batch,  TODO: support batch broadcast
-    // use a quantitative version cublasGemmBatchedEx api. dlblasGemmBatchedEx ?
-    dlblas_available = dlblas_available && single_batch;
-
 #ifdef GGML_USE_DLCU
-    if (dlblas_available) {
-        dlblas_available = ggml_dl::should_use_dlblas(ctx, src0, src1, dst);
+    bool dlblas_available = ggml_dl::is_dlblas_available_simple(ctx, src0, src1, dst, split);
+    if (ggml_dl::should_use_dlblas_path(dlblas_available, use_mul_mat_vec, use_mul_mat_vec_q)) {
+        ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
+        which_branch = "ggml_dl::mul_mat_dlblas";
+        // Emit a debug line once per invocation so we can see which GPU path executed.
+        GGML_LOG_DEBUG("ggml_cuda_mul_mat: selected CUDA branch '%s'\n", which_branch);
+        return;
     }
-#endif
-
-    // Default is false, can be enabled by setting GGML_DLBLAS_CONSISTENT=1 | bugid : 15564
-    bool use_consistent_path = (env_dlblas_consistent != nullptr && env_dlblas_consistent[0] == '1');
-
-    // If dlblas is available and no comparison is required, use dlblas to ensure consistency
-    // Even if vec conditions are met, use dlblas to avoid mismatch (unless the matrix is too small for dlblas)
-#ifdef GGML_USE_DLCU
-    if (ggml_dl::is_devit_enabled() && !dlblas_available) {
 #else
-    if (false) {
+    bool dlblas_available = false;
 #endif
-        printf("[DLBLAS_PATH_OVERRIDE] dlblas is not available, use original path\n");
-    }
-    if (!need_compare && dlblas_available) {
-        if (use_consistent_path) {
-            if ((use_mul_mat_vec || use_mul_mat_vec_q) && env_debug_path_selection) {
-                printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld satisfies vec conditions but uses dlblas to maintain consistency\n",
-                       src0->ne[0], src0->ne[1]);
-            }
-            // printf("[DLBLAS_PATH_OVERRIDE] use dlblas to maintain consistency\n");
-#ifdef GGML_USE_DLCU
-            ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
-#endif
-            return;
-        }
-        if (!(use_mul_mat_vec || use_mul_mat_vec_q)) { // bugid : 15564
-            // printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld does not satisfy vec conditions, use dlblas path\n",
-            //            src0->ne[0], src0->ne[1]);
-#ifdef GGML_USE_DLCU
-            ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
-#endif
-            return;
-        } else {
-            if (env_debug_path_selection) {
-                printf("[DLBLAS_PATH_OVERRIDE] shape %ldx%ld satisfies vec conditions, use original path cause bugid : 15564.\n",
-                       src0->ne[0], src0->ne[1]);
-            }
-        }
-    }
-    // printf("[DLBLAS_PATH_OVERRIDE] use original path\n");
-    // else if (!split && ggml_is_transposed(src0)) {
-    //     // TODO: implement this.
-    //     ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_dlblas, quantize_mmq_q8_1_cuda);
-    //     return;
-    // }
 #endif
     if (!split && use_mul_mat_vec) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
@@ -2240,95 +2119,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
         which_branch = "ggml_cuda_op_mul_mat";
     }
-    if (need_compare) {
-        const bool can_compare = (dst->type == GGML_TYPE_F32) && (src1->type == GGML_TYPE_F32);
-        const bool can_mmv = can_compare && use_mul_mat_vec;
-
-        if (dlblas_available) {
-#ifdef GGML_USE_DLCU
-            ggml_dl::mul_mat_dlblas(ctx, src0, src1, &dst_dlblas);
-#endif
-        }
-        if (can_mmv) {
-            ggml_cuda_mul_mat_vec(ctx, src0, src1, nullptr, &dst_mmv);
-        }
-        bool did_cublas_mmq = false;
-        if (can_compare) {
-            const char *env = getenv("GGML_CMP_MMQ");
-            const bool want_mmq = (env && env[0] == '1');
-            if (want_mmq && use_mul_mat_q) {
-                ggml_cuda_op_mul_mat(ctx, src0, src1, &dst_cublas_mmq, ggml_cuda_op_mul_mat_cublas, quantize_mmq_q8_1_cuda);
-                did_cublas_mmq = true;
-            } else {
-                ggml_cuda_op_mul_mat(ctx, src0, src1, &dst_cublas_mmq, ggml_cuda_op_mul_mat_cublas, nullptr);
-            }
-        }
-
-        printf("dst-name: %s, dst-type: %s\n", dst->name, ggml_type_name(dst->type));
-        printf("src-name: %s, src-type: %s, src-ne: %lld, %lld, %lld, %lld, src1-nb: %zu, %zu, %zu, %zu, which_branch: %s\n",
-               src0->name, ggml_type_name(src0->type),
-               (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
-               (size_t)src1->nb[0], (size_t)src1->nb[1], (size_t)src1->nb[2], (size_t)src1->nb[3], which_branch);
-        const int num_elements = dst->ne[0] * dst->ne[1];
-
-        std::vector<float> h_dst(num_elements);
-        std::vector<float> h_dlblas(num_elements);
-        std::vector<float> h_mmv(num_elements);
-        std::vector<float> h_cublas_mmq(num_elements);
-
-        CUDA_CHECK(cudaMemcpy(h_dst.data(), (float*)dst->data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
-        if (dlblas_available) CUDA_CHECK(cudaMemcpy(h_dlblas.data(), (float*)dst_dlblas.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
-        if (can_mmv)  CUDA_CHECK(cudaMemcpy(h_mmv.data(), (float*)dst_mmv.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
-        if (can_compare) CUDA_CHECK(cudaMemcpy(h_cublas_mmq.data(), (float*)dst_cublas_mmq.data, num_elements * sizeof(float), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        const float *ref = nullptr; const char *ref_name = "";
-        const char *cublas_name = did_cublas_mmq ? "cublas_mmq" : "cublas";
-        if (dlblas_available) { ref = h_dlblas.data(); ref_name = "dlblas"; }
-        else if (can_compare) { ref = h_cublas_mmq.data(); ref_name = cublas_name; }
-        else if (can_mmv) { ref = h_mmv.data(); ref_name = "mmv"; }
-        else { ref = h_dst.data(); ref_name = "dst(current)"; }
-
-        auto print_diff = [&](const char *name, const float *a){
-            if (a == nullptr) return;
-            double mean_abs = 0.0; float max_abs = 0.0f; int max_idx = 0; float v_ref=0.0f, v_a=0.0f;
-            for (int i = 0; i < num_elements; ++i) {
-                float d = fabsf(a[i] - ref[i]);
-                mean_abs += d;
-                if (d > max_abs) { max_abs = d; max_idx = i; v_ref = ref[i]; v_a = a[i]; }
-            }
-            mean_abs /= std::max(1, num_elements);
-            int row = max_idx / (int)dst->ne[0];
-            int col = max_idx % (int)dst->ne[0];
-            printf("[matmul-cmp] against ref=%s, target=%s: max_abs=%.6g at (%d,%d), ref=%.6g, tgt=%.6g, mean_abs=%.6g\n",
-                   ref_name, name, max_abs, row, col, v_ref, v_a, (float)mean_abs);
-        };
-
-        for (int i = 0; i < std::min(10, num_elements); ++i) {
-            if (i == 0) printf("[matmul-cmp] ref(%s) head10: ", ref_name);
-            printf("%f ", ref[i]);
-            if (i == std::min(10, num_elements)-1) printf("\n");
-        }
-
-        print_diff("dst(current)", h_dst.data());
-        if (dlblas_available)    print_diff("dlblas", h_dlblas.data());
-        if (can_mmv)     print_diff("mmv", h_mmv.data());
-        if (can_compare) print_diff(cublas_name, h_cublas_mmq.data());
-
-        if (can_mmv && can_compare) {
-            double mean_abs = 0.0; float max_abs = 0.0f; int max_idx = 0; float v_a=0.0f, v_b=0.0f;
-            for (int i = 0; i < num_elements; ++i) {
-                float d = fabsf(h_mmv[i] - h_cublas_mmq[i]);
-                mean_abs += d;
-                if (d > max_abs) { max_abs = d; max_idx = i; v_a = h_mmv[i]; v_b = h_cublas_mmq[i]; }
-            }
-            mean_abs /= std::max(1, num_elements);
-            int row = max_idx / (int)dst->ne[0];
-            int col = max_idx % (int)dst->ne[0];
-            printf("[matmul-cmp] pair mmv vs %s: max_abs=%.6g at (%d,%d), mmv=%.6g, %s=%.6g, mean_abs=%.6g\n",
-                   cublas_name, max_abs, row, col, v_a, cublas_name, v_b, (float)mean_abs);
-        }
-    }
+    // Emit a debug line once per invocation so we can see which GPU path executed.
+    GGML_LOG_DEBUG("ggml_cuda_mul_mat: selected CUDA branch '%s' (dst=%s, src0_type=%s, src1_type=%s)\n",
+                   which_branch[0] ? which_branch : "unknown",
+                   dst->name,
+                   ggml_type_name(src0->type),
+                   ggml_type_name(src1->type));
 }
 
 
@@ -3684,10 +3480,6 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return false;
             }
             if (op->src[1]->type == GGML_TYPE_BF16 || op->src[2]->type == GGML_TYPE_BF16) {
-                return false;
-            }
-
-            if (ggml_dl::flash_attn_ext_should_skip(op->src, op->op_params)) {
                 return false;
             }
 
