@@ -49,7 +49,6 @@
 
 // TODO: remove this after all supported.
 // FLASH ATTENTION
-static const bool GGML_DLFA_READY = std::getenv("GGML_DLFA_READY") == nullptr || std::getenv("GGML_DLFA_READY") != nullptr; // default on now.
 static const bool GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE = std::getenv("GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE") != nullptr;
 static const std::vector<ggml_type> GGML_DLFA_SUPPORTED_TYPES = {GGML_TYPE_F16/*, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0*/};
 static int GGML_QUANT_BITS = []() {
@@ -7883,9 +7882,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_pad_ext(GGML_TYPE_F32, {11, 22, 33, 44}, 1, 2, 3, 4, 5, 6, 7, 8, v));
     }
 
-    if (GGML_DLFA_READY) {
-    for (int hsk : { 40, 64, 80, 96, 128, 192, 256, 576 }) {
-        for (int hsv : { 40, 64, 80, 96, 128, 192, 256, 512 }) {
+    for (int hsk : { 40, 64, 72, 80, 96, 128, 192, 256, 576 }) {
+        for (int hsv : { 40, 64, 72, 80, 96, 128, 192, 256, 512 }) {
             if (hsk != 192 && hsk != 576 && hsk != hsv) continue;
             if (hsk == 192 && (hsv != 128 && hsv != 192)) continue;
             if (hsk == 576 && hsv != 512) continue; // DeepSeek MLA
@@ -7940,7 +7938,6 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_flash_attn_ext(
             64, 64, 4, {1, 1}, 128, 2, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, {0, 1, 2, 3}));
 
-    }
 
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
@@ -8134,7 +8131,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         }
     }
 
-    if (GGML_DLFA_READY && GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE) {
+    if (GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE) {
     for (int kv : { 4096, 8192, 16384, }) {
         for (int hs : { 64, 128, }) {
             for (int nr : { 1, 4, }) {
