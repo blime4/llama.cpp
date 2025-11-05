@@ -35,18 +35,52 @@ inline float to_float<ggml_bf16_t>(const ggml_bf16_t& val) {
 }
 
 // ============================================================================
-// CUDA Permute Kernels for Tensor Format Conversion
+// CUDA Layout Reordering Kernels for Tensor Format Conversion
+// Physical data movement (not just logical permutation)
+// ============================================================================
+//
+// Performance Impact Analysis:
+// ---------------------------
+// These kernels perform PHYSICAL data reordering (not zero-cost view changes).
+// Each Flash Attention call requires multiple complete data copies:
+//
+// Data Flow:
+//   Original DSHB  ──[physical copy]──> BSHD temp  ──[cuDNN]──> BSHD output  ──[physical copy]──> DHSB result
+//   (Q tensor)         reorder_layout              MHA/SDP                       reorder_layout
+//                      ~4 MB                                                     ~4 MB
+//
+// Per Flash Attention Call (example: D=128, S=512, H=32, B=1):
+// ┌─────────────────────┬──────────────┬──────────────┐
+// │ Operation           │ Data Size    │ Cost Type    │
+// ├─────────────────────┼──────────────┼──────────────┤
+// │ Q: DSHB→BSHD        │ 4 MB (F16)   │ Physical Copy│
+// │ K: DSHB→BSHD        │ 4 MB (F16)   │ Physical Copy│
+// │ V: DSHB→BSHD        │ 4 MB (F16)   │ Physical Copy│
+// │ cuDNN Compute       │ -            │ GPU Compute  │
+// │ Output: BSHD→DHSB   │ 4 MB (F16)   │ Physical Copy│
+// │ Mask: conversion    │ ~1 MB (opt)  │ Physical Copy│
+// ├─────────────────────┼──────────────┼──────────────┤
+// │ TOTAL               │ ~17 MB       │ 5 Full Copies│
+// └─────────────────────┴──────────────┴──────────────┘
+//
+// Potential Optimization:
+// If cuDNN supported custom strides (via descriptor), we could eliminate all
+// physical copies and achieve zero-copy operation:
+//   Original DSHB ──[descriptor only]──> cuDNN ──[descriptor only]──> DHSB output
+//
+// Optimization Space: Eliminate ~17 MB data movement, potentially save 30-50% end-to-end latency
+//
 // ============================================================================
 
 template<typename T>
-static __global__ void permute_3120_kernel(
+static __global__ void reorder_layout_dshb_to_bshd_kernel(
     const T* __restrict__ input,
     T* __restrict__ output,
     int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3
 ) {
-    /* Permutation pattern: 3120
-     * Input:  [dim_0][dim_1][dim_2][dim_3]
-     * Output: [dim_3][dim_1][dim_2][dim_0]
+    /* Physical data reordering: DSHB → BSHD
+     * Input:  [dim_0=D][dim_1=S][dim_2=H][dim_3=B]  (GGML format)
+     * Output: [dim_3=B][dim_1=S][dim_2=H][dim_0=D]  (cuDNN format)
      */
     const size_t total_elements = static_cast<size_t>(dim_0) * dim_1 * dim_2 * dim_3;
     size_t idx = blockIdx.y * blockDim.y + threadIdx.y;
@@ -72,7 +106,7 @@ static __global__ void permute_3120_kernel(
 }
 
 template<typename T>
-static __host__ void call_permute_3120_kernel(
+static __host__ void call_reorder_layout_dshb_to_bshd(
     const void* input,
     void* output,
     int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3,
@@ -87,7 +121,7 @@ static __host__ void call_permute_3120_kernel(
         (dim_3 + block_dim.y - 1) / block_dim.y
     );
 
-    permute_3120_kernel<T><<<grid_dim, block_dim, 0, stream>>>(
+    reorder_layout_dshb_to_bshd_kernel<T><<<grid_dim, block_dim, 0, stream>>>(
         static_cast<const T*>(input),
         static_cast<T*>(output),
         dim_0, dim_1, dim_2, dim_3
@@ -99,7 +133,7 @@ static __host__ void call_permute_3120_kernel(
 }
 
 template<typename T>
-static __global__ void permute_3210_kernel(
+static __global__ void reorder_layout_bshd_to_dhsb_kernel(
     const T* __restrict__ input,
     T* __restrict__ output,
     const int64_t dim_0,
@@ -107,6 +141,11 @@ static __global__ void permute_3210_kernel(
     const int64_t dim_2,
     const int64_t dim_3
 ) {
+    /* Physical data reordering: BSHD → DHSB
+     * Input:  [dim_0=B][dim_1=S][dim_2=H][dim_3=D]  (cuDNN format)
+     * Output: [dim_3=D][dim_2=H][dim_1=S][dim_0=B]  (GGML format)
+     * This performs complete dimension reversal [0,1,2,3] → [3,2,1,0]
+     */
     // 1D thread block: Adapts to dim_3
     const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total_elements = dim_0 * dim_1 * dim_2 * dim_3;
@@ -119,19 +158,19 @@ static __global__ void permute_3210_kernel(
     const int64_t i1 = (idx / (dim_3 * dim_2)) % dim_1;
     const int64_t i0 = idx / (dim_3 * dim_2 * dim_1);
 
-    // Permute 3210: [i0, i1, i2, i3] -> [i3, i2, i1, i0]
+    // Reorder: [i0, i1, i2, i3] -> [i3, i2, i1, i0]
     const int64_t out_idx =
         i3 * (dim_2 * dim_1 * dim_0) +
         i2 * (dim_1 * dim_0) +
         i1 * dim_0 +
         i0;
 
-    // Copy element by element (no vectorization)
+    // Physical copy: element by element (no vectorization)
     output[out_idx] = input[idx];
 }
 
 template<typename T>
-static __host__ void call_permute_3210_kernel(
+static __host__ void call_reorder_layout_bshd_to_dhsb(
     const void* input,
     void* output,
     int64_t dim_0,
@@ -147,7 +186,7 @@ static __host__ void call_permute_3210_kernel(
     const int64_t total_elements = dim_0 * dim_1 * dim_2 * dim_3;
     const int grid_size = (total_elements + block_size - 1) / block_size;
 
-    permute_3210_kernel<T><<<grid_size, block_size, 0, stream>>>(
+    reorder_layout_bshd_to_dhsb_kernel<T><<<grid_size, block_size, 0, stream>>>(
         static_cast<const T*>(input),
         static_cast<T*>(output),
         dim_0, dim_1, dim_2, dim_3
@@ -435,7 +474,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const struct ggml_tensor * mask = dst->src[3];
 
     GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Getting cuDNN handle...\n");
-    fflush(stdout);
 
     // Check CUDA device status before anything
     int device_id = -1;
@@ -455,7 +493,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                total_mem / (1024.0 * 1024.0),
                100.0 * free_mem / total_mem);
     }
-    fflush(stdout);
 
     cudnnHandle_t cudnn_handle = getCudnnHandle();
     if (cudnn_handle == nullptr) {
@@ -468,7 +505,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     // Get cuDNN version
     size_t cudnn_version = cudnnGetVersion();
     GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cuDNN version: %zu\n", cudnn_version);
-    fflush(stdout);
 
     // Determine target_type based on Q, K, V
     enum ggml_type target_type = GGML_TYPE_F16; // Default to F16
@@ -542,45 +578,45 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     auto convert_to_bshd = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
         switch (type) {
             case GGML_TYPE_F16:
-                call_permute_3120_kernel<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_dshb_to_bshd<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             case GGML_TYPE_F32:
-                call_permute_3120_kernel<float>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_dshb_to_bshd<float>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             case GGML_TYPE_BF16:
-                call_permute_3120_kernel<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_dshb_to_bshd<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             default:
                 // This case should ideally not be reached if type conversion is handled prior to this.
-                // If it is reached, it means an unsupported type made it through for permutation.
-                GGML_LOG_ERROR("Unsupported data type %s for permute_3120_kernel.\n", ggml_type_name(type));
+                // If it is reached, it means an unsupported type made it through for data reordering.
+                GGML_LOG_ERROR("Unsupported data type %s for reorder_layout_dshb_to_bshd.\n", ggml_type_name(type));
                 return false;
         }
     };
 
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting Q to BSHD format...\n"); fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering Q layout to BSHD format...\n");
     if (!convert_to_bshd(q_data_source, q_bshd, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to permute Q data to BSHD format with type %s.\n", ggml_type_name(target_type));
+        GGML_LOG_ERROR("Failed to reorder Q data layout to BSHD format with type %s.\n", ggml_type_name(target_type));
         ok = false;
     }
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Q conversion completed.\n"); fflush(stdout);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Q layout reordering completed.\n");
 
     if (ok) {
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting K to BSHD format...\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering K layout to BSHD format...\n");
         if (!convert_to_bshd(k_data_source, k_bshd, K->ne[0], K->ne[1], K->ne[2], K->ne[3], target_type)) {
-            GGML_LOG_ERROR("Failed to permute K data to BSHD format with type %s.\n", ggml_type_name(target_type));
+            GGML_LOG_ERROR("Failed to reorder K data layout to BSHD format with type %s.\n", ggml_type_name(target_type));
             ok = false;
         }
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: K conversion completed.\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: K layout reordering completed.\n");
     }
 
     if (ok) {
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting V to BSHD format...\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering V layout to BSHD format...\n");
         if (!convert_to_bshd(v_data_source, v_bshd, V->ne[0], V->ne[1], V->ne[2], V->ne[3], target_type)) {
-            GGML_LOG_ERROR("Failed to permute V data to BSHD format with type %s.\n", ggml_type_name(target_type));
+            GGML_LOG_ERROR("Failed to reorder V data layout to BSHD format with type %s.\n", ggml_type_name(target_type));
             ok = false;
         }
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: V conversion completed.\n"); fflush(stdout);
+        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: V layout reordering completed.\n");
     }
 
     if (ok) {
@@ -650,7 +686,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     // - p_desc : return_softmax is false, pass nullptr.
 
     GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Calling cudnnGetMHAForwardWorkspaceSize...\n");
-    fflush(stdout);
 
     CUDNN_CHECK(cudnnGetMHAForwardWorkspaceSize(
         cudnn_handle, q_desc.get(), k_desc.get(), v_desc.get(),
@@ -663,7 +698,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     ));
 
     GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cudnnGetMHAForwardWorkspaceSize completed, workspace_size=%zu\n", workspace_size);
-    fflush(stdout);
 
     void* workspace = nullptr;
     if (workspace_size > 0) {
@@ -863,31 +897,31 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         if (output_cpu) free(output_cpu);
     }
 
-    // permute temp_output to final KQV format
+    // Reorder temp_output layout to final KQV format (physical data movement)
     // from BSHD - DLDNN output format
     // to DHSB   - llama.cpp expected format
 
-    // call permute kernel according to data_type - use 3210 permute for DHSB format
+    // Call layout reordering kernel according to data_type
     auto convert_bhsd_to_dhsb = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
         switch (type) {
             case GGML_TYPE_F16:
-                call_permute_3210_kernel<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_bshd_to_dhsb<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             case GGML_TYPE_F32:
-                call_permute_3210_kernel<float>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_bshd_to_dhsb<float>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             case GGML_TYPE_BF16:
-                call_permute_3210_kernel<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_bshd_to_dhsb<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             default:
                 return false;
         }
     };
 
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Converting output from BSHD to DHSB format...\n");
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering output layout from BSHD to DHSB format...\n");
 
     if (!convert_bhsd_to_dhsb(temp_output, KQV->data, temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], data_type)) {
-        GGML_LOG_ERROR("Unsupported data type for permute: %d\n", data_type);
+        GGML_LOG_ERROR("Unsupported data type for layout reordering: %d\n", data_type);
         // free temp_output
         if (temp_output != nullptr) {
             CUDA_CHECK(cudaFree(temp_output));
@@ -895,7 +929,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         ok = false;
     }
 
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Output conversion completed.\n");
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Output layout reordering completed.\n");
 
     if (ok) {
         // check kernel execution
@@ -1015,52 +1049,52 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
     CUDA_CHECK(cudaMalloc(&k_bhsd, k_bhsd_size));
     CUDA_CHECK(cudaMalloc(&v_bhsd, v_bhsd_size));
 
-    auto permute_3210 = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
+    auto reorder_bshd_to_dhsb = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
         switch (type) {
             case GGML_TYPE_F16:
-                call_permute_3210_kernel<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_bshd_to_dhsb<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             case GGML_TYPE_F32:
-                call_permute_3210_kernel<float>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_bshd_to_dhsb<float>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             case GGML_TYPE_BF16:
-                call_permute_3210_kernel<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
+                call_reorder_layout_bshd_to_dhsb<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
                 return true;
             default:
                 return false;
         }
     };
 
-    // Convert to BSHD format: DSHB -> BSHD
+    // Reorder to BSHD format: DSHB -> BSHD (physical data movement)
     // GGML: [head_dim, seq_len, num_heads, batch_size] (DSHB)
     // cuDNN: [batch_size, seq_len, num_heads, head_dim] (BSHD)
-    // Permute 3120: [i0=D, i1=S, i2=H, i3=B] -> [i3=B, i1=S, i2=H, i0=D]
-    auto permute_dshb_to_bshd = [](const void* input, void* output, int64_t D, int64_t S, int64_t H, int64_t B, enum ggml_type type) -> bool {
+    // Reordering pattern: [i0=D, i1=S, i2=H, i3=B] -> [i3=B, i1=S, i2=H, i0=D]
+    auto reorder_dshb_to_bshd = [](const void* input, void* output, int64_t D, int64_t S, int64_t H, int64_t B, enum ggml_type type) -> bool {
         switch (type) {
             case GGML_TYPE_F16:
-                call_permute_3120_kernel<ggml_fp16_t>(input, output, D, S, H, B);
+                call_reorder_layout_dshb_to_bshd<ggml_fp16_t>(input, output, D, S, H, B);
                 return true;
             case GGML_TYPE_F32:
-                call_permute_3120_kernel<float>(input, output, D, S, H, B);
+                call_reorder_layout_dshb_to_bshd<float>(input, output, D, S, H, B);
                 return true;
             case GGML_TYPE_BF16:
-                call_permute_3120_kernel<ggml_bf16_t>(input, output, D, S, H, B);
+                call_reorder_layout_dshb_to_bshd<ggml_bf16_t>(input, output, D, S, H, B);
                 return true;
             default:
                 return false;
         }
     };
 
-    if (!permute_dshb_to_bshd(q_data_source, q_bhsd, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to permute Q data to BSHD format\n");
+    if (!reorder_dshb_to_bshd(q_data_source, q_bhsd, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], target_type)) {
+        GGML_LOG_ERROR("Failed to reorder Q data layout to BSHD format\n");
         ok = false;
     }
-    if (ok && !permute_dshb_to_bshd(k_data_source, k_bhsd, K->ne[0], K->ne[1], K->ne[2], K->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to permute K data to BSHD format\n");
+    if (ok && !reorder_dshb_to_bshd(k_data_source, k_bhsd, K->ne[0], K->ne[1], K->ne[2], K->ne[3], target_type)) {
+        GGML_LOG_ERROR("Failed to reorder K data layout to BSHD format\n");
         ok = false;
     }
-    if (ok && !permute_dshb_to_bshd(v_data_source, v_bhsd, V->ne[0], V->ne[1], V->ne[2], V->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to permute V data to BSHD format\n");
+    if (ok && !reorder_dshb_to_bshd(v_data_source, v_bhsd, V->ne[0], V->ne[1], V->ne[2], V->ne[3], target_type)) {
+        GGML_LOG_ERROR("Failed to reorder V data layout to BSHD format\n");
         ok = false;
     }
 
@@ -1133,18 +1167,18 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
                     size_t mask_size = 1 * 1 * actual_sq * actual_sk * ggml_type_size(target_type);
                     CUDA_CHECK(cudaMalloc(&mask_dldnn, mask_size));
 
-                    // Convert mask: [Sk, Sq_pad, 1, 1] -> [1, 1, Sq, Sk] (removing padding)
-                    // permute_3210 expects: input[dim_0, dim_1, dim_2, dim_3] -> output[dim_3, dim_2, dim_1, dim_0]
+                    // Convert mask: [Sk, Sq_pad, 1, 1] -> [1, 1, Sq, Sk] (removing padding, physical data reordering)
+                    // reorder_bshd_to_dhsb expects: input[dim_0, dim_1, dim_2, dim_3] -> output[dim_3, dim_2, dim_1, dim_0]
                     // For mask[Sk, Sq, 1, 1] -> [1, 1, Sq, Sk]: dim_0=Sk, dim_1=Sq, dim_2=1, dim_3=1
                     if (mask_sq_pad == actual_sq) {
-                        // No padding, direct transpose
+                        // No padding, direct reordering
                         // Input: [Sk, Sq, 1, 1] with dim_0=Sk, dim_1=Sq, dim_2=1, dim_3=1
                         // Output: [1, 1, Sq, Sk]
-                        permute_3210(mask->data, mask_dldnn, mask_sk, mask_sq_pad, 1, 1, target_type);
+                        reorder_bshd_to_dhsb(mask->data, mask_dldnn, mask_sk, mask_sq_pad, 1, 1, target_type);
                     } else {
                         // Has padding, need to extract valid portion first
                         // Create intermediate buffer for valid mask [Sk, Sq, 1, 1] (no padding)
-                        GGML_DL_FATTN_DEBUG_PRINT("Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld. Removing padding before permute.\n",
+                        GGML_DL_FATTN_DEBUG_PRINT("Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld. Removing padding before reordering.\n",
                             mask_sq_pad, actual_sq);
 
                         // Copy valid portion: extract [Sk, Sq] from [Sk, Sq_pad]
@@ -1159,10 +1193,10 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
                             CUDA_CHECK(cudaMemcpyAsync(dst_row, src_row, actual_sq * element_size, cudaMemcpyDeviceToDevice));
                         }
 
-                        // Now transpose the no-pad mask [Sk, Sq] conceptually as [Sk, Sq, 1, 1] -> [1, 1, Sq, Sk]
+                        // Now reorder the no-pad mask [Sk, Sq] conceptually as [Sk, Sq, 1, 1] -> [1, 1, Sq, Sk]
                         // Input: [Sk, Sq, 1, 1] with dim_0=Sk, dim_1=Sq, dim_2=1, dim_3=1
                         // Output: [1, 1, Sq, Sk]
-                        permute_3210(mask_no_pad, mask_dldnn, mask_sk, actual_sq, 1, 1, target_type);
+                        reorder_bshd_to_dhsb(mask_no_pad, mask_dldnn, mask_sk, actual_sq, 1, 1, target_type);
 
                         // Clean up intermediate buffer
                         CUDA_CHECK(cudaFree(mask_no_pad));
@@ -1374,12 +1408,12 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
             }
 
             if (ok) {
-                // Convert output from BSHD back to DHSB format
+                // Reorder output layout from BSHD back to DHSB format (physical data movement)
                 // cuDNN outputs BSHD: [batch_size, seq_len, num_heads, head_dim]
                 // GGML needs DHSB: [head_dim, num_heads, seq_len, batch_size]
-                // This requires 3210 permute: [i0, i1, i2, i3] -> [i3, i2, i1, i0]
-                if (!permute_3210(temp_output, KQV->data, temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], target_type)) {
-                    GGML_LOG_ERROR("Failed to convert output from BSHD to DHSB format\n");
+                // This requires complete dimension reversal: [i0, i1, i2, i3] -> [i3, i2, i1, i0]
+                if (!reorder_bshd_to_dhsb(temp_output, KQV->data, temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], target_type)) {
+                    GGML_LOG_ERROR("Failed to reorder output layout from BSHD to DHSB format\n");
                     ok = false;
                 }
             }
