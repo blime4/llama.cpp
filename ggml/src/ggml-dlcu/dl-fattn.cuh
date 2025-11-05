@@ -54,6 +54,7 @@ void flash_attn_ext_dldnn(
     ggml_backend_cuda_context& ctx,
     ggml_tensor* dst);
 
+#if 0 // will be removed later
 /**
  * @brief Precise FAIL-case skip check for FLASH_ATTN_EXT
  * @param src   Q,K,V,mask tensor array (op->src)
@@ -63,6 +64,7 @@ void flash_attn_ext_dldnn(
 bool flash_attn_ext_should_skip(
     const ggml_tensor * const * src,
     const int32_t * op_params);
+#endif
 
 /**
  * @brief Convert tensor data between GGML types on GPU

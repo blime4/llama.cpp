@@ -1,8 +1,3 @@
-/**
- * @file dl-fattn.cu
- * @brief DengLin (DL) Flash Attention CUDA extensions implementation
- */
-
 #ifdef GGML_USE_DLFA
 
 #include "dl-fattn.cuh"
@@ -24,23 +19,16 @@
 #include <mutex>
 #include <algorithm>
 
-// ============================================================================
-// Helper Functions (for printing/debugging only)
-// ============================================================================
-
-// Helper function to convert different types to float (for printing only)
 template<typename T>
 static inline float to_float(const T& val) {
     return static_cast<float>(val);
 }
 
-// Specialization for ggml_fp16_t
 template<>
 inline float to_float<ggml_fp16_t>(const ggml_fp16_t& val) {
     return ggml_fp16_to_fp32(val);
 }
 
-// Specialization for ggml_bf16_t
 template<>
 inline float to_float<ggml_bf16_t>(const ggml_bf16_t& val) {
     return ggml_bf16_to_fp32(val);
@@ -253,7 +241,9 @@ static void register_cleanup() {
 #define CUDNN_CHECK(x) do { \
     cudnnStatus_t status = (x); \
     if (status != CUDNN_STATUS_SUCCESS) { \
-        GGML_LOG_ERROR("cuDNN error: %s\n", cudnnGetErrorString(status)); \
+        GGML_LOG_ERROR("cuDNN error in %s\n  at %s:%d\n  %s (code: %d)\n  Failed call: %s\n", \
+                       __PRETTY_FUNCTION__, __FILE__, __LINE__, \
+                       cudnnGetErrorString(status), status, #x); \
         GGML_ASSERT(false); \
     } \
 } while(0)
@@ -375,35 +365,6 @@ struct GGMLTensorDescriptor {
 
     cudnnTensorDescriptor_t get() const { return desc; }
 };
-
-// ============================================================================
-// Type Conversion Kernels
-// ============================================================================
-
-// Generic type conversion kernel for contiguous tensors
-template <typename S, typename D>
-__global__ void convert_tensor_kernel(const S* src, D* dst, size_t n) {
-    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        dst[i] = (D)src[i];
-    }
-}
-
-// Generic type conversion kernel for non-contiguous tensors
-template <typename S, typename D>
-__global__ void convert_tensor_nc_kernel(const S* src, D* dst, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3, int64_t s01, int64_t s02, int64_t s03) {
-    int64_t i0 = threadIdx.x + blockIdx.x * blockDim.x;
-    int64_t i1 = threadIdx.y + blockIdx.y * blockDim.y;
-    int64_t i2 = threadIdx.z + blockIdx.z * blockDim.z;
-
-    if (i0 < ne0 && i1 < ne1 && i2 < ne2) {
-        const S* src_row = src + i0 + i1 * s01 + i2 * s02;
-        D* dst_row = dst + i0 + i1 * ne0 + i2 * ne0 * ne1;
-        // TODO: Handle ne3 (batch size) if needed.
-        // This is a simplified 3D conversion, might need extension for 4D or custom strides.
-        *dst_row = (D)*src_row;
-    }
-}
 
 // ============================================================================
 // ALiBi Slopes Helper
@@ -1691,6 +1652,7 @@ static bool flash_attn_ext_is_in_fail_list(int64_t hsk, int64_t nr22, int64_t nr
 }
 // --- END: FLASH_ATTN_EXT fail-case list and matcher ---
 
+#if 0 // will be removed later
 bool flash_attn_ext_should_skip(const ggml_tensor * const * src, const int32_t * op_params) {
     int64_t hsk_val = 0, nr22_val = 1, nr23_val = 1, kv_val = 0, nb_val = 1;
     bool has_mask_val = false;
@@ -1703,6 +1665,7 @@ bool flash_attn_ext_should_skip(const ggml_tensor * const * src, const int32_t *
 
     return flash_attn_ext_is_in_fail_list(hsk_val, nr22_val, nr23_val, kv_val, nb_val, has_mask_val, max_bias, logit_softcap);
 }
+#endif
 
 bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_UNUSED(ctx);
@@ -1758,7 +1721,7 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
         return false;
     }
 
-#if 0
+#if 0 // will be removed later
     // ========================================================================
     // XFAIL Filter List - Based on test-backend-ops analysis
     // Filter out known failing cases while preserving all passing cases

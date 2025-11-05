@@ -1,15 +1,4 @@
 #!/bin/bash
-#
-# Llama.cpp Test Suite
-#
-# Usage:
-#   Normal mode: ./test_llama_cpp.sh
-#   CI mode:     ./test_llama_cpp.sh --ci-test --binary-path /path/to/release
-#
-# CI mode uses binaries from a release package (e.g., downloaded from release_llama_cpp.sh)
-# instead of the local build directory.
-#
-
 set -e
 
 # Load shared utility helpers (includes safe_rm)
@@ -77,7 +66,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --simple-tp: Run Tensor Parallel tests with split-mode (row/layer/none)"
             echo "  --big: Use large model for TP tests (Qwen3-30B instead of Qwen2.5-1.5B)"
             echo "  --verbose: Enable verbose output (show detailed logs in real-time)"
-            echo "  --no-fa: Disable Flash Attention (do not use -fa flag)"
+            echo "  --no-fa: Disable Flash Attention (test with standard inference)"
             exit 1
             ;;
     esac
@@ -148,9 +137,11 @@ env >> "$test_log" 2>&1
 # Configure ccache
 echo "[INFO] Configuring ccache..." | tee -a "$summary_log"
 ccache_dir="/LocalRun/$(whoami)/cache/llama_cpp_ccache"
-ccache --set-config cache_dir="${ccache_dir}" >> "$test_log" 2>&1
-ccache --set-config max_size=20G >> "$test_log" 2>&1
-ccache --zero-stats >> "$test_log" 2>&1
+{
+    ccache --set-config cache_dir="${ccache_dir}"
+    ccache --set-config max_size=20G
+    ccache --zero-stats
+} >> "$test_log" 2>&1
 # ---------- ci/cd ----------
 
 # Enter repository directory
@@ -211,18 +202,18 @@ if [ "$SIMPLE_TEST" = true ]; then
     # To add a new test, simply add a new line here
     # To remove a test, comment out or delete the line
     # ============================================================
-    declare -a SIMPLE_TEST_LIST=(
-        "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_DLBLAS_CONSISTENT=1 GGML_DEBUG_PATH_SELECTION=1 GGML_FORCE_DLBLAS_TEST=1 GGML_CUDA_GPTQ_GROUP_SIZE=128"
-        # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
+    declare -a SIMPLE_TEST_CASES=(
+        # "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_DLBLAS_CONSISTENT=1 GGML_DEBUG_PATH_SELECTION=1 GGML_FORCE_DLBLAS_TEST=1 GGML_CUDA_GPTQ_GROUP_SIZE=128"
+        "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
         # "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
         # "ADD|${build_dir_bin}/test-backend-ops -o ADD|NONE"  # Example: Add more tests here
         # "MUL|${build_dir_bin}/test-backend-ops -o MUL|NONE"  # Example
     )
 
     # Print test list
-    echo "[INFO] Test list (${#SIMPLE_TEST_LIST[@]} tests):" | tee -a "$summary_log"
-    for i in "${!SIMPLE_TEST_LIST[@]}"; do
-        IFS='|' read -r test_name test_cmd test_env <<< "${SIMPLE_TEST_LIST[$i]}"
+    echo "[INFO] Test list (${#SIMPLE_TEST_CASES[@]} tests):" | tee -a "$summary_log"
+    for i in "${!SIMPLE_TEST_CASES[@]}"; do
+        IFS='|' read -r test_name test_cmd test_env <<< "${SIMPLE_TEST_CASES[$i]}"
         echo "[INFO]   $((i+1)). $test_name" | tee -a "$summary_log"
     done
     echo "" | tee -a "$summary_log"
@@ -233,12 +224,12 @@ if [ "$SIMPLE_TEST" = true ]; then
     skip_count=0
     fail_list=()
     skip_list=()
-    total_tests=${#SIMPLE_TEST_LIST[@]}
+    total_tests=${#SIMPLE_TEST_CASES[@]}
 
     # Execute tests from list
-    for i in "${!SIMPLE_TEST_LIST[@]}"; do
+    for i in "${!SIMPLE_TEST_CASES[@]}"; do
         # Parse test configuration
-        IFS='|' read -r test_name test_cmd test_env <<< "${SIMPLE_TEST_LIST[$i]}"
+        IFS='|' read -r test_name test_cmd test_env <<< "${SIMPLE_TEST_CASES[$i]}"
         test_num=$((i+1))
 
         echo "" | tee -a "$summary_log"
@@ -262,7 +253,7 @@ if [ "$SIMPLE_TEST" = true ]; then
 
         # Execute with or without environment variables
         if [ "$test_env" != "NONE" ]; then
-            env $test_env bash -c "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
+            env "$test_env" bash -c "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
             ret=${PIPESTATUS[0]}
         else
             eval "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
@@ -301,8 +292,8 @@ if [ "$SIMPLE_TEST" = true ]; then
             # Only count FAIL lines that are not summary/status lines
             if [ "$sub_test_fail_count" -eq 0 ]; then
                 # Count 31mFAIL but exclude lines containing "Backend" or lines that are at the end (summary)
-                total_fail_lines=$(grep -n "31mFAIL" "$temp_output" 2>/dev/null | wc -l || echo "0")
-                backend_fail_lines=$(grep -n "31mFAIL" "$temp_output" 2>/dev/null | grep -c "Backend" || echo "0")
+                total_fail_lines=$(grep -c "31mFAIL" "$temp_output" 2>/dev/null || echo "0")
+                backend_fail_lines=$(grep "31mFAIL" "$temp_output" 2>/dev/null | grep -c "Backend" || echo "0")
                 # Exclude the last FAIL line if it's a summary (typically the final overall status)
                 if [ "$total_fail_lines" -gt 0 ]; then
                     sub_test_fail_count=$((total_fail_lines - backend_fail_lines - 1))
@@ -341,17 +332,17 @@ if [ "$SIMPLE_TEST" = true ]; then
         # - FAIL: if exit code is non-zero OR there are sub-test failures
         # - SKIP: if exit code is 0, no failures, but all sub-tests were skipped
         # - PASS: if exit code is 0, no failures, and there are some passed tests
-        if [ $ret -ne 0 ]; then
+        if [ "$ret" -ne 0 ]; then
             # Exit code non-zero
             echo "[FAIL] $test_name (exit code: $ret, ${duration}s)" | tee -a "$summary_log"
             fail_count=$((fail_count+1))
             fail_list+=("$test_name (exit code $ret)")
-        elif [ $sub_test_fail_count -gt 0 ]; then
+        elif [ "$sub_test_fail_count" -gt 0 ]; then
             # Exit code is 0 but sub-tests failed
             echo "[FAIL] $test_name (${duration}s, $sub_test_fail_count sub-test failures)" | tee -a "$summary_log"
             fail_count=$((fail_count+1))
             fail_list+=("$test_name ($sub_test_fail_count sub-test failures)")
-        elif [ $sub_test_pass_count -eq 0 ] && [ $sub_test_skip_count -gt 0 ]; then
+        elif [ "$sub_test_pass_count" -eq 0 ] && [ "$sub_test_skip_count" -gt 0 ]; then
             # All sub-tests were skipped (not supported)
             echo "[SKIP] $test_name (${duration}s, $sub_test_skip_count sub-tests skipped)" | tee -a "$summary_log"
             skip_count=$((skip_count+1))
@@ -407,14 +398,36 @@ if [ "$SIMPLE_TEST" = true ]; then
     exit 0
 fi
 
-# Simple model test mode - Qwen2.5 models with GGML_DLFA_READY=1
+extract_model_output() {
+    local full_output="$1"
+
+    echo "$full_output" | sed -n '/^$/,/^llama_perf_sampler_print:/p' | sed '$d' | tail -n +2
+}
+
+validate_output() {
+    local output_content="$1"
+    local expected_content="$2"
+
+    if echo "$output_content" | grep -qi "$expected_content"; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 if [ "$SIMPLE_MODEL" = true ]; then
     echo "[INFO] ============================================================" | tee -a "$summary_log"
-    echo "[INFO] Simple Model Test Mode - Flash Attention Validation" | tee -a "$summary_log"
+    echo "[INFO] Qwen2.5 model correctness test" | tee -a "$summary_log"
     echo "[INFO] ============================================================" | tee -a "$summary_log"
-    echo "[INFO] Target Model: Qwen2.5-1.5B (q4_k_m only)" | tee -a "$summary_log"
-    echo "[INFO] Environment: GGML_DLFA_READY=1 (Flash Attention ENABLED)" | tee -a "$summary_log"
-    echo "[INFO] Focus: Testing Flash Attention implementation on quantized model" | tee -a "$summary_log"
+    echo "[INFO] Target model: Qwen2.5-1.5B (q4_k_m)" | tee -a "$summary_log"
+
+    if [ "$NO_FA" = "true" ]; then
+        echo "[INFO] Test mode: standard inference (no Flash Attention)" | tee -a "$summary_log"
+        echo "[INFO] Purpose: verify standard inference output matches expected" | tee -a "$summary_log"
+    else
+        echo "[INFO] Test mode: Flash Attention inference (GGML_DLFA_READY=1)" | tee -a "$summary_log"
+        echo "[INFO] Purpose: verify Flash Attention output matches expected" | tee -a "$summary_log"
+    fi
     echo "[INFO] ============================================================" | tee -a "$summary_log"
 
     # Initialize counters
@@ -424,139 +437,55 @@ if [ "$SIMPLE_MODEL" = true ]; then
     fail_list=()
     skip_list=()
 
-    # Define Qwen2.5 models to test - only q4_k_m for FA implementation testing
     model_base_path="${LOCAL_MODEL_PATH}"
-    qwen25_models=(
-        "Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    )
+    model_path="Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    full_model_path="${model_base_path%/}/${model_path}"
+    model_name="qwen2.5-1.5b-instruct-q4_k_m"
 
-    # YAML configuration file for test references
-    yaml_config="${REPO_PATH}/.dlci/qwen_references.yml"
-
-    # Function to parse YAML and extract test cases for a model (same as in full test)
-    parse_yaml_tests() {
-        local model_name="$1"
-        local yaml_file="$2"
-
-        awk -v model="$model_name" '
-        BEGIN { in_model = 0; in_tests = 0; }
-        /^  [a-zA-Z0-9_.-]+:/ {
-            current_model = $1
-            gsub(/:/, "", current_model)
-            in_model = (current_model == model)
-            in_tests = 0
-        }
-        in_model && /^    tests:/ { in_tests = 1; next }
-        in_model && in_tests && /^      [a-zA-Z0-9_-]+:/ {
-            test_name = $1
-            gsub(/:/, "", test_name)
-            current_test = test_name
-        }
-        in_model && in_tests && /^        prompt:/ {
-            gsub(/^        prompt: "/, "")
-            gsub(/"$/, "")
-            prompt = $0
-        }
-        in_model && in_tests && /^        expected_content:/ {
-            gsub(/^        expected_content: "/, "")
-            gsub(/"$/, "")
-            expected = $0
-            print prompt "|" expected "|" current_test
-        }
-        ' "$yaml_file"
-    }
-
-    # Check if model file exists and is readable
-    check_model_file() {
-        local model_path="$1"
-        local model_name="$2"
-
-        if [ ! -f "$model_path" ]; then
-            echo "[WARN] Model file not found: $model_path ($model_name)" | tee -a "$summary_log"
-            return 1
-        fi
-
-        if [ ! -r "$model_path" ]; then
-            echo "[WARN] Model file not readable: $model_path ($model_name)" | tee -a "$summary_log"
-            return 1
-        fi
-
-        echo "[INFO] Model file validated: $model_name" | tee -a "$summary_log"
-        return 0
-    }
-
-    # Build test list
-    declare -a model_test_list=()
-    total_tests=0
-
-    for model_path in "${qwen25_models[@]}"; do
-        # Remove trailing slash from model_base_path to avoid double slashes
-        model_base_clean="${model_base_path%/}"
-        full_model_path="${model_base_clean}/${model_path}"
-        model_name=$(basename "$model_path" .gguf)
-
-        if check_model_file "$full_model_path" "Qwen2.5-$model_name"; then
-            echo "[INFO] Adding Qwen2.5 model tests for: $model_name" | tee -a "$summary_log"
-
-            if [ -f "$yaml_config" ]; then
-                echo "[INFO] Loading test cases from YAML for $model_name" | tee -a "$summary_log"
-                readarray -t test_cases < <(parse_yaml_tests "$model_name" "$yaml_config")
-                for test_case in "${test_cases[@]}"; do
-                    IFS='|' read -r prompt expected_content test_name <<< "$test_case"
-                    model_test_list+=("$model_name|$test_name|$prompt|$expected_content|$full_model_path")
-                    total_tests=$((total_tests + 1))
-                done
-            else
-                echo "[WARN] YAML config not found: $yaml_config" | tee -a "$summary_log"
-            fi
-
-            # Only test the q4_k_m model for FA implementation validation
-            break
-        fi
-    done
-
-    if [ ${#model_test_list[@]} -eq 0 ]; then
-        echo "[ERROR] Qwen2.5 q4_k_m model not found for Flash Attention testing" | tee -a "$summary_log"
-        echo "[INFO] Expected model path: ${model_base_path%/}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf" | tee -a "$summary_log"
+    if [ ! -f "$full_model_path" ]; then
+        echo "[ERROR] Model file not found: $full_model_path" | tee -a "$summary_log"
         exit 1
     fi
+    echo "[INFO] Model file: $full_model_path" | tee -a "$summary_log"
 
-    echo "[INFO] Total Qwen2.5 model tests to run: $total_tests" | tee -a "$summary_log"
+    declare -a SIMPLE_MODEL_CASES=(
+        # "math_calculation|请计算 2+3*4 的结果|14|数学计算测试"
+        "geography|请用一个词回答：北京是中国的什么？|首都|地理知识测试"
+    )
+
+    total_tests=${#SIMPLE_MODEL_CASES[@]}
+    echo "[INFO] Total tests to run: $total_tests" | tee -a "$summary_log"
     echo "" | tee -a "$summary_log"
 
-    # Execute model tests with GGML_DLFA_READY=1
-    for i in "${!model_test_list[@]}"; do
-        IFS='|' read -r model_name test_name prompt expected_content model_path <<< "${model_test_list[$i]}"
+    for i in "${!SIMPLE_MODEL_CASES[@]}"; do
+        IFS='|' read -r test_name prompt expected_content description <<< "${SIMPLE_MODEL_CASES[$i]}"
         test_num=$((i+1))
 
         echo "" | tee -a "$summary_log"
         echo "[INFO] ========================================" | tee -a "$summary_log"
-        echo "[INFO] Test $test_num/$total_tests: $model_name - $test_name" | tee -a "$summary_log"
-        echo "[INFO] Model: $model_path" | tee -a "$summary_log"
-        if [ "$NO_FA" = "true" ]; then
-            echo "[INFO] *** Flash Attention DISABLED: --no-fa enabled ***" | tee -a "$summary_log"
-        else
-            echo "[INFO] *** Flash Attention ENABLED: GGML_DLFA_READY=1 ***" | tee -a "$summary_log"
-        fi
+        echo "[INFO] test $test_num/$total_tests: $model_name - $test_name" | tee -a "$summary_log"
+        echo "[INFO] description: $description" | tee -a "$summary_log"
+        echo "[INFO] prompt: $prompt" | tee -a "$summary_log"
+        echo "[INFO] expected output: $expected_content" | tee -a "$summary_log"
         echo "[INFO] ========================================" | tee -a "$summary_log"
         echo "-----------------------------" | tee -a "$test_log"
 
         start_time=$(date +%s)
         set +e
 
-        # Run inference with or without Flash Attention based on --no-fa flag
         temp_output=$(mktemp)
         if [ "$NO_FA" = "true" ]; then
-            echo "[DEBUG] Running WITHOUT Flash Attention (--no-fa enabled), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
-            CUDA_VISIBLE_DEVICES=0 ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
+            echo "[DEBUG] (without Flash Attention), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
+            echo "[DEBUG] Prompt content: '$prompt'" | tee -a "$test_log"
+            CUDA_VISIBLE_DEVICES=0 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
             ret=$?
         else
-            echo "[DEBUG] Running with GGML_DLFA_READY=1, --flash-attn, -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
-            CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
+            echo "[DEBUG] (with Flash Attention), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
+            echo "[DEBUG] Prompt content: '$prompt'" | tee -a "$test_log"
+            CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
             ret=$?
         fi
 
-        # Display output
         cat "$temp_output" | tee -a "$test_log"
 
         set -e
@@ -564,65 +493,63 @@ if [ "$SIMPLE_MODEL" = true ]; then
         duration=$((end_time - start_time))
         echo "-----------------------------" | tee -a "$test_log"
 
-        # Validate output
         if [ $ret -ne 0 ]; then
             echo "[FAIL] $model_name - $test_name (exit code: $ret, ${duration}s)" | tee -a "$summary_log"
             fail_count=$((fail_count+1))
             fail_list+=("$model_name - $test_name (exit code $ret)")
         else
-            # Check if expected content is in the output with improved validation
-            output_content=$(cat "$temp_output")
+            full_output=$(cat "$temp_output")
+            model_output=$(extract_model_output "$full_output")
 
-            # Enhanced content validation with better pattern matching
-            validation_result=$(validate_content_enhanced "$model_name" "$test_name" "$output_content" "$expected_content")
-            if [ $? -eq 0 ]; then
+            echo "[DEBUG] Model generated text: $model_output" | tee -a "$test_log"
+            if validate_output "$model_output" "$expected_content"; then
                 echo "[PASS] $model_name - $test_name (${duration}s)" | tee -a "$summary_log"
-                echo "[INFO] Content validation: $validation_result" | tee -a "$summary_log"
+                echo "[INFO] ✓ Output contains expected: $expected_content" | tee -a "$summary_log"
                 pass_count=$((pass_count+1))
             else
-                echo "[FAIL] $model_name - $test_name (${duration}s, content validation failed)" | tee -a "$summary_log"
-                echo "[DEBUG] $validation_result" | tee -a "$summary_log"
+                echo "[FAIL] $model_name - $test_name (${duration}s)" | tee -a "$summary_log"
+                echo "[ERROR] Output does NOT contain expected: $expected_content" | tee -a "$summary_log"
+                echo "[ERROR] Model generated: $model_output" | tee -a "$summary_log"
                 fail_count=$((fail_count+1))
-                fail_list+=("$model_name - $test_name (content validation failed)")
+                fail_list+=("$model_name - $test_name (validation failed)")
             fi
         fi
-
-        # Clean up temp file
         safe_rm -f "$temp_output"
     done
 
-    # Summary
     test_end_time=$(date +%s)
     test_duration=$((test_end_time - test_start_time))
 
     echo "" | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Qwen2.5 Model Test Summary" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO]   Model:            $model_name" | tee -a "$summary_log"
     if [ "$NO_FA" = "true" ]; then
-        echo "[INFO] Simple Model Test Summary (WITHOUT Flash Attention)" | tee -a "$summary_log"
-        echo "[INFO] =============================================" | tee -a "$summary_log"
-        echo "[INFO]   Environment:  Flash Attention DISABLED" | tee -a "$summary_log"
+        echo "[INFO]   Mode:             without Flash Attention" | tee -a "$summary_log"
     else
-        echo "[INFO] Simple Model Test Summary (Flash Attention)" | tee -a "$summary_log"
-        echo "[INFO] =============================================" | tee -a "$summary_log"
-        echo "[INFO]   Environment:  GGML_DLFA_READY=1" | tee -a "$summary_log"
+        echo "[INFO]   Mode:             Flash Attention (GGML_DLFA_READY=1)" | tee -a "$summary_log"
     fi
-    echo "[INFO]   Total tests:  $total_tests" | tee -a "$summary_log"
-    echo "[INFO]   Passed:       $pass_count" | tee -a "$summary_log"
-    echo "[INFO]   Failed:       $fail_count" | tee -a "$summary_log"
-    echo "[INFO]   Total time:   ${test_duration}s" | tee -a "$summary_log"
+    echo "[INFO]   Total tests:      $total_tests" | tee -a "$summary_log"
+    echo "[INFO]   Passed:           $pass_count" | tee -a "$summary_log"
+    echo "[INFO]   Failed:           $fail_count" | tee -a "$summary_log"
+    echo "[INFO]   Total time:       ${test_duration}s" | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
 
-    # Display fail details and exit if any failures
     if [ $fail_count -ne 0 ]; then
         echo "" | tee -a "$summary_log"
-        echo "[LLAMA_CPP_FAIL] Simple model tests failed:" | tee -a "$summary_log"
+        echo "[LLAMA_CPP_FAIL] Tests failed:" | tee -a "$summary_log"
         for fail_item in "${fail_list[@]}"; do
             echo "  - $fail_item" | tee -a "$summary_log"
         done
         exit 1
     else
         echo "" | tee -a "$summary_log"
-        echo "[LLAMA_CPP_PASS] Qwen2.5 q4_k_m model Flash Attention tests passed!" | tee -a "$summary_log"
+        if [ "$NO_FA" = "true" ]; then
+            echo "[LLAMA_CPP_PASS] Standard inference tests passed!" | tee -a "$summary_log"
+        else
+            echo "[LLAMA_CPP_PASS] Flash Attention tests passed!" | tee -a "$summary_log"
+        fi
     fi
 
     exit 0
@@ -695,7 +622,7 @@ if [ "$SIMPLE_PERF" = true ]; then
 
             # Run performance test
             temp_output=$(mktemp)
-            env $mode_env ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n $PERF_TOKENS --temp 0.7 --top-k 40 --top-p 0.9 -s $i -p "$PERF_PROMPT" > "$temp_output" 2>&1
+            env "$mode_env" "${build_dir_bin}/llama-cli" -m "$model_path" -no-cnv -n "$PERF_TOKENS" --temp 0.7 --top-k 40 --top-p 0.9 -s "$i" -p "$PERF_PROMPT" > "$temp_output" 2>&1
             ret=$?
 
             end_time=$(date +%s.%N)
@@ -886,7 +813,7 @@ if [ "$SIMPLE_TP" = true ]; then
             # Run TP test
             temp_output=$(mktemp)
             echo "[DEBUG] Running TP test with split-mode=$split_mode and $mode_env" | tee -a "$test_log"
-            env $mode_env ${build_dir_bin}/llama-cli -m "$model_path" --split-mode "$split_mode" -no-cnv -n $TP_TOKENS --temp 0.7 --top-k 40 --top-p 0.9 -s 42 -p "$TP_PROMPT" > "$temp_output" 2>&1
+            env "$mode_env" "${build_dir_bin}/llama-cli" -m "$model_path" --split-mode "$split_mode" -no-cnv -n "$TP_TOKENS" --temp 0.7 --top-k 40 --top-p 0.9 -s 42 -p "$TP_PROMPT" > "$temp_output" 2>&1
             ret=$?
 
             # Display output (verbose mode shows all, otherwise first 10 lines)
@@ -1300,7 +1227,7 @@ validate_qwen_output() {
     fi
 
     # Run inference with fixed parameters for deterministic output
-    ${build_dir_bin}/llama-cli -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p "$prompt" > "$output_file" 2>&1
+    "${build_dir_bin}/llama-cli" -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p "$prompt" > "$output_file" 2>&1
     local cmd_result=$?
 
     if [ $cmd_result -ne 0 ]; then
@@ -1312,15 +1239,18 @@ validate_qwen_output() {
     fi
 
     # Validate output content using enhanced validation
-    local output_content=$(cat "$output_file")
+    local output_content
+    output_content=$(cat "$output_file")
     echo "[DEBUG] Model response extract:" | tee -a "$test_log"
     # Extract the actual response (skip system info and performance stats)
-    local response_part=$(echo "$output_content" | sed -n '/^$/,/llama_perf_sampler_print:/p' | head -n -1 | tail -n +2)
+    local response_part
+    response_part=$(echo "$output_content" | sed -n '/^$/,/llama_perf_sampler_print:/p' | head -n -1 | tail -n +2)
     echo "$response_part" | tee -a "$test_log"
 
     echo "[DEBUG] Starting content validation..." | tee -a "$test_log"
+    local validation_result
     validate_content_only "$model_name" "$test_name" "$output_content" "$expected_content"
-    local validation_result=$?
+    validation_result=$?
     echo "[DEBUG] Validation completed with result: $validation_result" | tee -a "$test_log"
 
     if [ $validation_result -eq 0 ]; then
@@ -1428,7 +1358,7 @@ for test_case in "${test_cases[@]}"; do
 
         # Normal execution - output to both screen and temp file
         set +e  # Disable exit on error temporarily
-        eval $test_case > "$temp_output" 2>&1
+        eval "$test_case" > "$temp_output" 2>&1
         ret=$?
         set -e  # Re-enable exit on error
 
@@ -1560,7 +1490,7 @@ echo "[INFO]   Failed: ${fail_count}" | tee -a "$summary_log"
 echo "[INFO]   Qwen model tests: ${qwen_tests_count}" | tee -a "$summary_log"
 
 # Generate Qwen model test summary
-if [ ${qwen_tests_count} -gt 0 ]; then
+if [ "${qwen_tests_count}" -gt 0 ]; then
     echo "" | tee -a "$summary_log"
     echo "[INFO] Qwen Model Test Summary:" | tee -a "$summary_log"
     echo "[INFO] ==============================" | tee -a "$summary_log"

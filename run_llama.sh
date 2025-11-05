@@ -27,11 +27,13 @@ MAIN_LOG_FILE=""
 # Initialize logging
 init_logging() {
     MAIN_LOG_FILE="${REPO_PATH}/run_llama_$(date +%Y%m%d_%H%M%S).log"
-    echo "=== llama.cpp Build and Test Log ===" > "$MAIN_LOG_FILE"
-    echo "Start Time: $(date)" >> "$MAIN_LOG_FILE"
-    echo "Platform: ${platform:-auto-detect}" >> "$MAIN_LOG_FILE"
-    echo "SDK Path: ${sdk_path:-not set}" >> "$MAIN_LOG_FILE"
-    echo "========================================" >> "$MAIN_LOG_FILE"
+    {
+        echo "=== llama.cpp Build and Test Log ==="
+        echo "Start Time: $(date)"
+        echo "Platform: ${platform:-auto-detect}"
+        echo "SDK Path: ${sdk_path:-not set}"
+        echo "========================================"
+    } > "$MAIN_LOG_FILE"
 }
 
 # Unified logging functions
@@ -164,26 +166,22 @@ configure_platform() {
             log_info "Configuring x86_64 platform parameters"
             CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF"
             TEST_TIMEOUT=600
-            ENABLE_FULL_TESTS=true
             ;;
         aarch64)
             log_info "Configuring aarch64 platform parameters"
             CMAKE_ARGS="-DGGML_CPU_ARM_ARCH=armv8-a -DGGML_NATIVE=OFF -DGGML_RVV=OFF"
             TEST_TIMEOUT=600
-            ENABLE_FULL_TESTS=true
             export HC_CE_DISPATCH_MODE=1
             ;;
         loongarch64)
             log_info "Configuring loongarch64 platform parameters"
             CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF"
             TEST_TIMEOUT=600
-            ENABLE_FULL_TESTS=true
             ;;
         android)
             log_info "Configuring Android platform parameters (cross-compilation)"
             CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF -DGGML_NATIVE=OFF"
             TEST_TIMEOUT=300  # Shorter timeout for cross-compiled binaries
-            ENABLE_FULL_TESTS=false  # Disable full tests for cross-compilation
             log_warn "Android platform detected - tests will be limited (cross-compilation target)"
             ;;
         *)
@@ -201,7 +199,7 @@ interactive_setup() {
     if [ -z "$sdk_path" ]; then
         echo -e "${YELLOW}Please set SDK path (required):${NC}"
         printf "SDK path: "
-        if read sdk_input && [ -n "$sdk_input" ] && [ -d "$sdk_input" ]; then
+        if read -r sdk_input && [ -n "$sdk_input" ] && [ -d "$sdk_input" ]; then
             export sdk_path="$sdk_input"
             log_success "SDK path set: $sdk_path"
         else
@@ -214,10 +212,11 @@ interactive_setup() {
 
     # Repository path setup
     if [ -z "$REPO_PATH" ]; then
-        local current_dir=$(pwd)
+        local current_dir
+        current_dir=$(pwd)
         echo -e "${YELLOW}Repository path (current: $current_dir):${NC}"
         printf "Repository path [press Enter to use current directory]: "
-        if read repo_input; then
+        if read -r repo_input; then
             if [ -n "$repo_input" ]; then
                 export REPO_PATH="$repo_input"
             else
@@ -238,7 +237,7 @@ interactive_setup() {
     echo "5) android (Android ARM64 cross-compilation)"
 
     printf "Please select (1-5): "
-    if read choice; then
+    if read -r choice; then
         case "$choice" in
             1) INTERACTIVE_PLATFORM=$(detect_platform) ;;
             2) INTERACTIVE_PLATFORM="x86_64" ;;
@@ -257,7 +256,7 @@ interactive_setup() {
     echo "3) Test only"
 
     printf "Please select (1-3): "
-    if read action_choice; then
+    if read -r action_choice; then
         case "$action_choice" in
             1) INTERACTIVE_ACTION="all" ;;
             2) INTERACTIVE_ACTION="compile" ;;
@@ -293,7 +292,8 @@ check_tools() {
     fi
 
     # Check platform-specific library dependencies
-    local platform=$(uname -m)
+    local platform
+    platform=$(uname -m)
     case "$platform" in
         loongarch64)
             log_info "Checking LoongArch64 platform-specific dependencies..."
@@ -311,7 +311,7 @@ check_tools() {
             local libgomp_found=false
             local actual_path=""
             for path in "${libgomp_paths[@]}"; do
-                if ls $path >/dev/null 2>&1; then
+                if ls "$path" >/dev/null 2>&1; then
                     log_info "Found libgomp: $path"
                     libgomp_found=true
                     actual_path="$path"
@@ -346,7 +346,8 @@ check_tools() {
                 local expected_path="/usr/lib/gcc/loongarch64-OpenCloudOS-linux/12/libgomp.so"
                 if [ "$actual_path" != "$expected_path" ] && [ ! -e "$expected_path" ]; then
                     log_info "Creating libgomp compatibility symbolic link..."
-                    local expected_dir=$(dirname "$expected_path")
+                    local expected_dir
+                    expected_dir=$(dirname "$expected_path")
                     sudo mkdir -p "$expected_dir" 2>/dev/null || true
                     sudo ln -sf "$actual_path" "$expected_path" 2>/dev/null || {
                         log_warn "Unable to create symbolic link, execute manually: sudo ln -sf $actual_path $expected_path"
@@ -405,7 +406,8 @@ setup_ccache() {
 
     log_info "Configuring ccache..."
 
-    local ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
+    local ccache_dir
+    ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
     ccache --set-config cache_dir="$ccache_dir"
     local ccache_max_size="${CCACHE_MAXSIZE:-20G}"
     ccache --set-config max_size="$ccache_max_size"
@@ -415,7 +417,8 @@ setup_ccache() {
     ccache --zero-stats
 
     if [ -z "${CCACHE_LOGFILE:-}" ]; then
-        export CCACHE_LOGFILE="/LocalRun/$(whoami)/cache/ccache.log"
+        CCACHE_LOGFILE="/LocalRun/$(whoami)/cache/ccache.log"
+        export CCACHE_LOGFILE
     fi
 
     # Create custom bin directory for ccache wrappers
@@ -478,7 +481,8 @@ check_dlpti_tools() {
 
     # Test dlpti_tools basic functionality
     # Note: dlpti_tools --help returns exit code 255, so we check if it produces expected output
-    local help_output=$(dlpti_tools --help 2>&1)
+    local help_output
+    help_output=$(dlpti_tools --help 2>&1)
     if [[ ! "$help_output" =~ "dlpti_tools - A comprehensive tool" ]]; then
         log_error "dlpti_tools command failed or produced unexpected output"
         log_error "Output: $help_output"
@@ -527,7 +531,8 @@ setup_dlpti_environment() {
 
     # Ensure we have access to DL devices
     if [ -d "/dev/dl" ]; then
-        local dl_devices=$(ls /dev/dl* 2>/dev/null | wc -l)
+        local dl_devices
+        dl_devices=$(find /dev -maxdepth 1 -name 'dl*' 2>/dev/null | wc -l)
         log_info "Found $dl_devices DL device(s)"
 
         # Check device permissions
@@ -543,7 +548,8 @@ setup_dlpti_environment() {
     log_info "Testing dlPTI capture functionality..."
 
     # First, test if dlpti_tools can run without library issues
-    local basic_test_output=$(dlpti_tools --help 2>&1)
+    local basic_test_output
+    basic_test_output=$(dlpti_tools --help 2>&1)
     if [[ ! "$basic_test_output" =~ "dlpti_tools - A comprehensive tool" ]]; then
         log_warn "dlpti_tools basic test failed"
         log_warn "Output: $basic_test_output"
@@ -557,7 +563,8 @@ setup_dlpti_environment() {
     fi
 
     # Test capture functionality with a very simple command
-    local test_output=$(timeout 10 dlpti_tools capture --activity-mask cmd --data-file /tmp/dlpti_test_$$.db -- /bin/true 2>&1)
+    local test_output
+    test_output=$(timeout 10 dlpti_tools capture --activity-mask cmd --data-file /tmp/dlpti_test_$$.db -- /bin/true 2>&1)
     local test_ret=$?
 
     if [ $test_ret -eq 0 ]; then
@@ -569,7 +576,7 @@ setup_dlpti_environment() {
         log_warn "Test output: $test_output"
 
         # Check if it's a library loading issue
-        if [[ "$test_output" =~ "libdlpti.so" ]] || [[ "$test_output" =~ "cannot open shared object file" ]]; then
+        if [[ "$test_output" != "libdlpti.so" ]] || [[ "$test_output" =~ "cannot open shared object file" ]]; then
             log_error "dlPTI library loading issue detected"
 
             # Run troubleshooting for library issues
@@ -631,10 +638,11 @@ dlpti_troubleshoot() {
     # Check device access
     log_info "3. Device Access Check:"
     if [ -d "/dev" ]; then
-        local dl_devices=$(ls /dev/dl* 2>/dev/null || echo "")
+        local dl_devices
+        dl_devices=$(ls /dev/dl* 2>/dev/null || echo "")
         if [ -n "$dl_devices" ]; then
             log_info "   DL devices found:"
-            ls -la /dev/dl* 2>/dev/null | while read -r line; do
+            find /dev -maxdepth 1 -name 'dl*' -ls 2>/dev/null | while read -r line; do
                 log_info "     $line"
             done
         else
@@ -706,11 +714,13 @@ compile_llama_cpp() {
     local debug="${3:-false}"
 
     log_info "Starting llama.cpp compilation (platform: $platform)"
-    local compile_start_time=$(date +%s)
+    local compile_start_time
+    compile_start_time=$(date +%s)
 
     # Ensure we're in the correct directory
     if [ -z "$REPO_PATH" ]; then
-        export REPO_PATH=$(pwd)
+        REPO_PATH=$(pwd)
+        export REPO_PATH
     fi
     cd "$REPO_PATH"
 
@@ -837,7 +847,7 @@ compile_llama_cpp() {
 
         # Find actual libgomp path
         for path in "${libgomp_search_paths[@]}"; do
-            if ls $path >/dev/null 2>&1; then
+            if ls "$path" >/dev/null 2>&1; then
                 actual_libgomp="$path"
                 log_info "Using libgomp for compilation: $actual_libgomp"
                 break
@@ -862,10 +872,11 @@ compile_llama_cpp() {
 
     # Compile
     cd "$build_dir"
-    ninja -j $(nproc)
+    ninja -j "$(nproc)"
 
     # Calculate compilation time
-    local compile_end_time=$(date +%s)
+    local compile_end_time
+    compile_end_time=$(date +%s)
     local compile_duration=$((compile_end_time - compile_start_time))
 
     log_success "Compilation completed, time taken: ${compile_duration} seconds"
@@ -918,7 +929,7 @@ run_tests_with_repeat() {
         fi
 
         # Brief pause between runs
-        if [ $i -lt $repeat_count ]; then
+        if [ "$i" -lt "$repeat_count" ]; then
             sleep 1
         fi
     done
@@ -928,7 +939,8 @@ run_tests_with_repeat() {
     echo ""
 
     # Calculate elapsed time
-    local end_time=$(date +%s)
+    local end_time
+    end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
     local elapsed_str=""
     if [ $elapsed -ge 60 ]; then
@@ -983,7 +995,6 @@ run_tests() {
     local no_fa="${8:-false}"
 
     log_info "Starting test execution (platform: $platform)"
-    local test_start_time=$(date +%s)
 
     # Set test environment variables
     export GGML_TEST_MODE=1
@@ -1097,7 +1108,6 @@ run_tests() {
     # dlPTI integration
     local dlpti_prefix=""
     local dlpti_data_file=""
-    local dlpti_working=false
 
     if [ "$enable_dlpti" = "true" ]; then
         log_info "dlPTI profiling enabled, setting up capture environment..."
@@ -1108,8 +1118,6 @@ run_tests() {
             enable_dlpti=false
         else
             if setup_dlpti_environment "$dlpti_options"; then
-                dlpti_working=true
-
                 # Build dlpti_tools capture command prefix
                 dlpti_prefix="dlpti_tools capture $dlpti_options --"
 
@@ -1124,8 +1132,6 @@ run_tests() {
                 log_info "dlPTI data file: $dlpti_data_file"
             else
                 log_warn "dlPTI environment setup failed, but continuing with profiling attempt..."
-                dlpti_working=false
-
                 # Still try to set up the command, but with warnings
                 dlpti_prefix="dlpti_tools capture $dlpti_options --"
                 if [[ "$dlpti_options" =~ --data-file[[:space:]]+([^[:space:]]+) ]]; then
@@ -1141,30 +1147,20 @@ run_tests() {
 
     # Run the comprehensive test script
     local ret=0
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
 
     # Use main log file for all output
 
     if [ "$platform" = "loongarch64" ]; then
         # LoongArch64 specific handling with timeout monitoring
         log_info "Running comprehensive test suite with LoongArch64 timeout monitoring..."
-
-        if [ "$verbose" = "true" ]; then
-            log_info "Verbose mode: Real-time output enabled"
-            if [ "$enable_dlpti" = "true" ]; then
-                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
-                $dlpti_prefix bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE" &
-            else
-                bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE" &
-            fi
+        log_info "Output will be saved to $MAIN_LOG_FILE"
+        if [ "$enable_dlpti" = "true" ]; then
+            env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
+            $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
         else
-            log_info "Output will be saved to $MAIN_LOG_FILE"
-            if [ "$enable_dlpti" = "true" ]; then
-                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
-                $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
-            else
-                bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
-            fi
+            bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1 &
         fi
         local test_pid=$!
 
@@ -1201,30 +1197,19 @@ run_tests() {
         # Normal execution for other platforms
         log_info "Executing comprehensive test suite..."
 
-        if [ "$verbose" = "true" ]; then
-            log_info "Verbose mode: Real-time output enabled"
-            if [ "$enable_dlpti" = "true" ]; then
-                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
-                $dlpti_prefix bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE"
-                ret=${PIPESTATUS[0]}
-            else
-                bash "$test_script" $test_script_args 2>&1 | tee -a "$MAIN_LOG_FILE"
-                ret=${PIPESTATUS[0]}
-            fi
+        log_info "Output will be saved to $MAIN_LOG_FILE"
+        if [ "$enable_dlpti" = "true" ]; then
+            env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
+            $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
+            ret=$?
         else
-            log_info "Output will be saved to $MAIN_LOG_FILE"
-            if [ "$enable_dlpti" = "true" ]; then
-                env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" PATH="$PATH" DLPTI_AUTO_LOAD="$DLPTI_AUTO_LOAD" \
-                $dlpti_prefix bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
-                ret=$?
-            else
-                bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
-                ret=$?
-            fi
+            bash "$test_script" $test_script_args >> "$MAIN_LOG_FILE" 2>&1
+            ret=$?
         fi
     fi
 
-    local end_time=$(date +%s)
+    local end_time
+    end_time=$(date +%s)
     local test_duration=$((end_time - start_time))
 
     # Format duration for better readability
@@ -1250,7 +1235,7 @@ run_tests() {
         test_mode_name="Comprehensive test suite"
     fi
 
-    if [ $ret -eq 0 ]; then
+    if [ "$ret" -eq 0 ]; then
         log_success "$test_mode_name completed successfully!"
         log_success "Total execution time: $duration_str"
         log_info "Full test log saved to: $MAIN_LOG_FILE"
@@ -1261,9 +1246,11 @@ run_tests() {
             log_info "=== dlPTI Profiling Results ==="
 
             if [ -f "$dlpti_data_file" ]; then
-                local file_size=$(stat -c%s "$dlpti_data_file" 2>/dev/null || echo "0")
+                local file_size
+                file_size=$(stat -c%s "$dlpti_data_file" 2>/dev/null || echo "0")
                 if [ "$file_size" -gt 1024 ]; then
-                    local dlpti_abs_path=$(realpath "$dlpti_data_file")
+                    local dlpti_abs_path
+                    dlpti_abs_path=$(realpath "$dlpti_data_file")
                     log_success "dlPTI profile data saved to: $dlpti_abs_path"
                     log_success "Profile data size: $(du -h "$dlpti_data_file" | cut -f1)"
                     echo ""
@@ -1272,22 +1259,27 @@ run_tests() {
                     log_info "  2. Export to Perfetto: dlpti_tools export --format perfetto-json $dlpti_abs_path"
                     log_info "  3. Range-based export: dlpti_tools export --export-range 10%:90% --format perfetto-json $dlpti_abs_path"
                 else
-                    local dlpti_abs_path=$(realpath "$dlpti_data_file")
+                    local dlpti_abs_path
+                    dlpti_abs_path=$(realpath "$dlpti_data_file")
                     log_warn "dlPTI data file exists but is very small ($file_size bytes): $dlpti_abs_path"
                     log_warn "This may indicate a capture failure or very short execution time"
                 fi
             else
-                local dlpti_abs_path=$(realpath "$dlpti_data_file" 2>/dev/null || echo "$dlpti_data_file")
+                local dlpti_abs_path
+                dlpti_abs_path=$(realpath "$dlpti_data_file" 2>/dev/null || echo "$dlpti_data_file")
                 log_warn "dlPTI data file not found: $dlpti_abs_path"
                 log_info "Checking for alternative dlPTI output files..."
 
                 # Look for any capture files in current directory
-                local capture_files=$(ls capture-*.db 2>/dev/null | head -5)
+                local capture_files
+                capture_files=$(find . -maxdepth 1 -name 'capture-*.db' 2>/dev/null | head -5)
                 if [ -n "$capture_files" ]; then
                     log_info "Found alternative capture files:"
                     for file in $capture_files; do
-                        local size=$(du -h "$file" | cut -f1)
-                        local file_abs_path=$(realpath "$file")
+                        local size
+                        size=$(du -h "$file" | cut -f1)
+                        local file_abs_path
+                        file_abs_path=$(realpath "$file")
                         log_info "  - $file_abs_path ($size)"
                     done
                 else
@@ -1301,7 +1293,8 @@ run_tests() {
 
             # Check for dlPTI error messages in main log
             if [ -f "$MAIN_LOG_FILE" ]; then
-                local dlpti_errors=$(grep -i "dlpti.*error\|capture failed" "$MAIN_LOG_FILE" 2>/dev/null || true)
+                local dlpti_errors
+                dlpti_errors=$(grep -i "dlpti.*error\|capture failed" "$MAIN_LOG_FILE" 2>/dev/null || true)
                 if [ -n "$dlpti_errors" ]; then
                     log_warn "dlPTI errors detected in log:"
                     echo "$dlpti_errors" | while read -r line; do
@@ -1311,7 +1304,7 @@ run_tests() {
             fi
         fi
         return 0
-    elif [ $ret -eq 124 ]; then
+    elif [ "$ret" -eq 124 ]; then
         log_error "$test_mode_name timed out after $duration_str"
         log_error "Test log file: $MAIN_LOG_FILE"
 
