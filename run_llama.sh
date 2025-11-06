@@ -744,7 +744,7 @@ compile_llama_cpp() {
         -DCMAKE_VERBOSE_MAKEFILE=ON
         -DCMAKE_BUILD_TYPE="$build_type"
         -DGGML_BACKEND_DL=ON
-        -DGGML_CUDA_GRAPHS=OFF
+        -DGGML_CUDA_GRAPHS=ON
         -DLLAMA_CURL=OFF
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         -DGGML_CUDA_FA=ON
