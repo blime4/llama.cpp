@@ -2914,12 +2914,22 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     bool cuda_graph_update_required = false;
 
     if (cuda_ctx->cuda_graph->graph == nullptr) {
+#ifdef GGML_USE_DLCU
+        // For DLCU, allow CUDA graphs on Volta (CC 700) and above
+        if (ggml_cuda_info().devices[cuda_ctx->device].cc < GGML_CUDA_CC_VOLTA) {
+            cuda_ctx->cuda_graph->disable_due_to_gpu_arch = true;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to GPU architecture (CC %d < VOLTA %d) for DLCU\n", __func__, ggml_cuda_info().devices[cuda_ctx->device].cc, GGML_CUDA_CC_VOLTA);
+#endif
+        }
+#else
         if (ggml_cuda_info().devices[cuda_ctx->device].cc < GGML_CUDA_CC_AMPERE) {
             cuda_ctx->cuda_graph->disable_due_to_gpu_arch = true;
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to GPU architecture\n", __func__);
 #endif
         }
+#endif
     }
 
     // Disable CUDA graphs in presence of env var, old GPU, use-case which is changing too rapidly,

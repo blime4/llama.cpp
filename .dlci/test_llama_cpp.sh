@@ -203,8 +203,8 @@ if [ "$SIMPLE_TEST" = true ]; then
     # To remove a test, comment out or delete the line
     # ============================================================
     declare -a SIMPLE_TEST_CASES=(
-        # "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_DLBLAS_CONSISTENT=1 GGML_DEBUG_PATH_SELECTION=1 GGML_FORCE_DLBLAS_TEST=1 GGML_CUDA_GPTQ_GROUP_SIZE=128"
-        "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
+        "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_DLBLAS_CONSISTENT=1 GGML_DEBUG_PATH_SELECTION=1 GGML_FORCE_DLBLAS_TEST=1 GGML_CUDA_GPTQ_GROUP_SIZE=128"
+        # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
         # "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
         # "ADD|${build_dir_bin}/test-backend-ops -o ADD|NONE"  # Example: Add more tests here
         # "MUL|${build_dir_bin}/test-backend-ops -o MUL|NONE"  # Example
@@ -253,7 +253,7 @@ if [ "$SIMPLE_TEST" = true ]; then
 
         # Execute with or without environment variables
         if [ "$test_env" != "NONE" ]; then
-            env "$test_env" bash -c "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
+            bash -c "$test_env $test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
             ret=${PIPESTATUS[0]}
         else
             eval "$test_cmd" 2>&1 | tee "$temp_output" | tee -a "$test_log"
@@ -622,7 +622,7 @@ if [ "$SIMPLE_PERF" = true ]; then
 
             # Run performance test
             temp_output=$(mktemp)
-            env "$mode_env" "${build_dir_bin}/llama-cli" -m "$model_path" -no-cnv -n "$PERF_TOKENS" --temp 0.7 --top-k 40 --top-p 0.9 -s "$i" -p "$PERF_PROMPT" > "$temp_output" 2>&1
+            bash -c "$mode_env ${build_dir_bin}/llama-cli -m '$model_path' -no-cnv -n $PERF_TOKENS --temp 0.7 --top-k 40 --top-p 0.9 -s $i -p '$PERF_PROMPT'" > "$temp_output" 2>&1
             ret=$?
 
             end_time=$(date +%s.%N)
@@ -813,7 +813,7 @@ if [ "$SIMPLE_TP" = true ]; then
             # Run TP test
             temp_output=$(mktemp)
             echo "[DEBUG] Running TP test with split-mode=$split_mode and $mode_env" | tee -a "$test_log"
-            env "$mode_env" "${build_dir_bin}/llama-cli" -m "$model_path" --split-mode "$split_mode" -no-cnv -n "$TP_TOKENS" --temp 0.7 --top-k 40 --top-p 0.9 -s 42 -p "$TP_PROMPT" > "$temp_output" 2>&1
+            bash -c "$mode_env ${build_dir_bin}/llama-cli -m '$model_path' --split-mode '$split_mode' -no-cnv -n $TP_TOKENS --temp 0.7 --top-k 40 --top-p 0.9 -s 42 -p '$TP_PROMPT'" > "$temp_output" 2>&1
             ret=$?
 
             # Display output (verbose mode shows all, otherwise first 10 lines)
@@ -1356,9 +1356,16 @@ for test_case in "${test_cases[@]}"; do
         # Create temporary file to capture output
         temp_output=$(mktemp)
 
+        # Check if this is test-backend-ops and add GGML_CUDA_DISABLE_GRAPHS=1
+        if [[ "$test_case" == *"test-backend-ops"* ]]; then
+            test_case_with_env="GGML_CUDA_DISABLE_GRAPHS=1 $test_case"
+        else
+            test_case_with_env="$test_case"
+        fi
+
         # Normal execution - output to both screen and temp file
         set +e  # Disable exit on error temporarily
-        eval "$test_case" > "$temp_output" 2>&1
+        eval "$test_case_with_env" > "$temp_output" 2>&1
         ret=$?
         set -e  # Re-enable exit on error
 

@@ -564,8 +564,6 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
 
     // kernel launch directly to persistent memory (eliminating one cudaMemcpyDeviceToDevice)
     // TODO : support bf16 later.
-    CUDA_CHECK(cudaDeviceSynchronize());
-
     if (bits == 8) {
         ggml_cuda_gptq_quantize_8_bit_fp16<<<gridDim, blockDim, 0, stream>>>(
             src0_ptr_as_fp16, (uint8_t*)gptq_data->qweight, (half*)gptq_data->qzeros, (half*)gptq_data->scales,
@@ -576,7 +574,6 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
             K, M, group_size);
     }
 
-    CUDA_CHECK(cudaDeviceSynchronize());
     // check the CUDA error after kernel launch
     cudaError_t r = cudaGetLastError();
     if (r != cudaSuccess) {
@@ -860,15 +857,8 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
             CUDA_CHECK(cudaMemcpyAsync(dst->data, dst_device_fp16, bytes, cudaMemcpyDeviceToDevice, stream));
         }
     } else {
-        CUDA_CHECK(cudaStreamSynchronize(stream));
         GGML_ABORT("DL: [%s] unsupported dst type %s", __FUNCTION__, ggml_type_name(dst->type));
     }
-
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    return;
-
-    // should not reach here
-    GGML_ABORT("DL: [%s] no valid GPTQ mapping found", __FUNCTION__);
 }
 
 [[noreturn]] static void ggml_cuda_op_mul_mat_dlblas(
