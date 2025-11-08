@@ -1652,8 +1652,13 @@ static void ggml_compute_forward_mul_mat_id(
             chunk_size = 64;
         }
 
+#if defined(__aarch64__)
+        // disable for ARM
+        const bool disable_chunking = true;
+#else
         // disable for NUMA
         const bool disable_chunking = ggml_is_numa();
+#endif // defined(__aarch64__)
 
         int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
         int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
@@ -2949,9 +2954,7 @@ static thread_ret_t ggml_graph_compute_thread(void * data) {
     for (int node_n = 0; node_n < cgraph->n_nodes && atomic_load_explicit(&tp->abort, memory_order_relaxed) != node_n; node_n++) {
         struct ggml_tensor * node = cgraph->nodes[node_n];
 
-        GGML_DLPTI_TRACE_OPERATOR(node, {
-            ggml_compute_forward(&params, node);
-        });
+        ggml_compute_forward(&params, node);
 
         if (state->ith == 0 && cplan->abort_callback &&
                 cplan->abort_callback(cplan->abort_callback_data)) {

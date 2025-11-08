@@ -3371,9 +3371,6 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
 
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
-                GGML_DLPTI_TRACE_OPERATOR(node, {
-
-
 #ifdef GGML_CUDA_DEBUG
                 const int nodes_fused = i - prev_i - 1;
                 prev_i = i;
@@ -3524,6 +3521,13 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                                 continue;
                             }
 
+                            // we don't support repeating adds
+                            if (bias_op == GGML_OP_ADD &&
+                                (!ggml_are_same_shape(gate_bias_n->src[0], gate_bias_n->src[1]) ||
+                                 !ggml_are_same_shape(up_bias_n->src[0], up_bias_n->src[1]))) {
+                                continue;
+                            }
+
                             const ggml_tensor * src0 = up_n->src[0];
                             const ggml_tensor * src1 = up_n->src[1];
                             const ggml_tensor * ids  = up_n->src[2];
@@ -3633,6 +3637,10 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                             continue;
                         }
 
+                        if (bias_op == GGML_OP_ADD && !ggml_are_same_shape(bias_node->src[0], bias_node->src[1])) {
+                            continue;
+                        }
+
                         ggml_cuda_mm_fusion_args_host fusion_data{};
                         fusion_data.x_bias = bias_tensor;
 
@@ -3694,7 +3702,6 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
                 }
                 GGML_ASSERT(ok);
-                });
             }
         }
 
