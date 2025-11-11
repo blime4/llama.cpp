@@ -216,6 +216,11 @@ add_library(ggml-base
             gguf.cpp
             ggml-dlfa.cpp)
 
+set_target_properties(ggml-base PROPERTIES
+    VERSION ${GGML_VERSION}
+    SOVERSION ${GGML_VERSION_MAJOR}
+)
+
 target_include_directories(ggml-base PRIVATE .)
 if (GGML_BACKEND_DL)
     target_compile_definitions(ggml-base PUBLIC GGML_BACKEND_DL)
@@ -224,6 +229,11 @@ endif()
 add_library(ggml
             ggml-backend-reg.cpp)
 add_library(ggml::ggml ALIAS ggml)
+
+set_target_properties(ggml PROPERTIES
+    VERSION ${GGML_VERSION}
+    SOVERSION ${GGML_VERSION_MAJOR}
+)
 
 if (GGML_BACKEND_DIR)
     if (NOT GGML_BACKEND_DL)
@@ -312,6 +322,12 @@ function(ggml_add_backend_library backend)
     if (GGML_DLCU)
         target_compile_definitions(${backend} PRIVATE GGML_USE_DLCU)
     endif()
+
+    # Set versioning properties for all backend libraries
+    set_target_properties(${backend} PROPERTIES
+        VERSION ${GGML_VERSION}
+        SOVERSION ${GGML_VERSION_MAJOR}
+    )
 
     if(NOT GGML_AVAILABLE_BACKENDS)
         set(GGML_AVAILABLE_BACKENDS "${backend}"
