@@ -408,16 +408,22 @@ setup_ccache() {
 
     local ccache_dir
     ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
+    # Create ccache directory if it doesn't exist
+    mkdir -p "$ccache_dir"
     ccache --set-config cache_dir="$ccache_dir"
     local ccache_max_size="${CCACHE_MAXSIZE:-20G}"
     ccache --set-config max_size="$ccache_max_size"
     if [ -n "${CCACHE_BASEDIR:-}" ]; then
+        # Create base_dir directory if it doesn't exist
+        mkdir -p "$CCACHE_BASEDIR"
         ccache --set-config base_dir="$CCACHE_BASEDIR"
     fi
     ccache --zero-stats
 
     if [ -z "${CCACHE_LOGFILE:-}" ]; then
         CCACHE_LOGFILE="/LocalRun/$(whoami)/cache/ccache.log"
+        # Create log file directory if it doesn't exist
+        mkdir -p "$(dirname "$CCACHE_LOGFILE")"
         export CCACHE_LOGFILE
     fi
 
