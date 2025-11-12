@@ -269,6 +269,68 @@ interactive_setup() {
     return 0
 }
 
+# Compare version numbers (returns 0 if version1 >= version2, 1 otherwise)
+version_ge() {
+    local version1="$1"
+    local version2="$2"
+
+    # If versions are equal, return 0
+    if [ "$version1" = "$version2" ]; then
+        return 0
+    fi
+
+    # Use sort -V for version comparison
+    # Sort both versions and check which one comes first
+    local sorted_versions
+    sorted_versions=$(printf '%s\n%s\n' "$version1" "$version2" | sort -V)
+    local first_version
+    first_version=$(echo "$sorted_versions" | head -n1)
+
+    # If version2 is first (or equal), then version1 >= version2
+    # If version1 is first, then version1 < version2
+    if [ "$first_version" = "$version2" ]; then
+        return 0  # version1 >= version2
+    else
+        return 1  # version1 < version2
+    fi
+}
+
+# Check GCC version
+check_gcc_version() {
+    local min_version="9.4.0"
+
+    if ! command -v gcc >/dev/null 2>&1; then
+        log_error "gcc not found, cannot check version"
+        return 1
+    fi
+
+    # Get gcc version (format: gcc (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0)
+    local gcc_version_output
+    gcc_version_output=$(gcc --version 2>/dev/null | head -n1)
+
+    # Extract version number (x.y.z format)
+    local gcc_version
+    gcc_version=$(echo "$gcc_version_output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+
+    if [ -z "$gcc_version" ]; then
+        log_error "Failed to parse gcc version from: $gcc_version_output"
+        return 1
+    fi
+
+    log_info "Detected gcc version: $gcc_version"
+
+    # Compare versions (must be >= 9.4.0)
+    if ! version_ge "$gcc_version" "$min_version"; then
+        log_error "gcc version $gcc_version is too old"
+        log_error "Required gcc version: >= $min_version"
+        log_error "Please upgrade gcc to version $min_version or higher"
+        return 1
+    fi
+
+    log_success "gcc version check passed: $gcc_version >= $min_version"
+    return 0
+}
+
 # Check necessary tools and libraries
 check_tools() {
     local auto_install_enabled="${1:-true}"
@@ -288,6 +350,13 @@ check_tools() {
         for tool in "${missing_tools[@]}"; do
             echo "  - $tool"
         done
+        return 1
+    fi
+
+    # Check GCC version (must be > 9.4.0)
+    log_info "Checking gcc version requirement..."
+    if ! check_gcc_version; then
+        log_error "gcc version check failed, compilation cannot proceed"
         return 1
     fi
 
