@@ -30,7 +30,7 @@ build:
   sdk:
     tag: "V2_SOFTWARE_master_202510172141"
     workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
-    docker_repo_path: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
+    docker_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
     # SDK download configuration
     download:

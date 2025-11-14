@@ -31,7 +31,7 @@ init_logging() {
         echo "=== llama.cpp Build and Test Log ==="
         echo "Start Time: $(date)"
         echo "Platform: ${platform:-auto-detect}"
-        echo "SDK Path: ${sdk_path:-not set}"
+        echo "SDK Path: ${SDK_DIR:-not set}"
         echo "========================================"
     } > "$MAIN_LOG_FILE"
 }
@@ -86,7 +86,7 @@ Usage: $0 [options]
 Options:
   --platform PLATFORM     Target platform (x86_64, aarch64, loongarch64, android)
   --action ACTION         Action to execute (compile, test, all)
-  --sdk-path PATH         SDK path (or use environment variable sdk_path)
+  --sdk-path PATH         SDK path (or use environment variable SDK_DIR)
   --repo-path PATH        Repository path (or use environment variable REPO_PATH)
   --model-path PATH       Model path (or use environment variable LOCAL_MODEL_PATH)
   --no-auto-install       Disable automatic installation of missing dependencies
@@ -113,7 +113,7 @@ Action descriptions:
   all                     Compile + Test (default)
 
 Environment variables:
-  sdk_path                SDK path
+  SDK_DIR                SDK path
   REPO_PATH              Repository path (default: current directory)
   LOCAL_MODEL_PATH       Model path (default: from config.yml)
 
@@ -137,7 +137,7 @@ Examples:
   $0 --simple-tp --big --dlpti "--activity-mask cmd,cu,curt,nne --data-file tp_profile_{datetime}.db"
 
 Quick start:
-  export sdk_path="/path/to/your/sdk"
+  export SDK_DIR="/path/to/your/sdk"
   $0
 
 EOF
@@ -196,18 +196,18 @@ interactive_setup() {
     echo -e "${CYAN}=== Interactive Environment Setup ===${NC}"
 
     # SDK path setup
-    if [ -z "$sdk_path" ]; then
+    if [ -z "$SDK_DIR" ]; then
         echo -e "${YELLOW}Please set SDK path (required):${NC}"
         printf "SDK path: "
         if read -r sdk_input && [ -n "$sdk_input" ] && [ -d "$sdk_input" ]; then
-            export sdk_path="$sdk_input"
-            log_success "SDK path set: $sdk_path"
+            export SDK_DIR="$sdk_input"
+            log_success "SDK path set: $SDK_DIR"
         else
             log_error "Invalid SDK path"
             return 1
         fi
     else
-        log_success "SDK path already set: $sdk_path"
+        log_success "SDK path already set: $SDK_DIR"
     fi
 
     # Repository path setup
@@ -442,25 +442,25 @@ check_tools() {
 
 # Setup SDK environment
 setup_sdk() {
-    local sdk_path_arg="$1"
+    local SDK_DIR_arg="$1"
 
-    if [ -z "$sdk_path_arg" ]; then
+    if [ -z "$SDK_DIR_arg" ]; then
         log_error "SDK path not set"
         return 1
     fi
 
-    if [ ! -d "$sdk_path_arg" ]; then
-        log_error "SDK path does not exist: $sdk_path_arg"
+    if [ ! -d "$SDK_DIR_arg" ]; then
+        log_error "SDK path does not exist: $SDK_DIR_arg"
         return 1
     fi
 
-    if [ ! -f "$sdk_path_arg/env.sh" ]; then
-        log_error "SDK environment script does not exist: $sdk_path_arg/env.sh"
+    if [ ! -f "$SDK_DIR_arg/env.sh" ]; then
+        log_error "SDK environment script does not exist: $SDK_DIR_arg/env.sh"
         return 1
     fi
 
-    log_info "Configuring SDK environment: $sdk_path_arg"
-    source "$sdk_path_arg/env.sh"
+    log_info "Configuring SDK environment: $SDK_DIR_arg"
+    source "$SDK_DIR_arg/env.sh"
 
     log_success "SDK environment configuration completed"
     return 0
@@ -497,7 +497,7 @@ setup_ccache() {
     fi
 
     # Create custom bin directory for ccache wrappers
-    local custom_bin_dir="$sdk_path/custom_bin"
+    local custom_bin_dir="$SDK_DIR/custom_bin"
     mkdir -p "$custom_bin_dir"
 
     # Create ccache symbolic links
@@ -534,21 +534,21 @@ check_dlpti_tools() {
     log_info "Checking dlPTI tools availability..."
 
     # Ensure SDK bin directory is in PATH and lib directory is in LD_LIBRARY_PATH
-    if [ -n "$sdk_path" ]; then
-        if [ -d "$sdk_path/bin" ]; then
-            export PATH="$sdk_path/bin:$PATH"
-            log_info "Added SDK bin directory to PATH: $sdk_path/bin"
+    if [ -n "$SDK_DIR" ]; then
+        if [ -d "$SDK_DIR/bin" ]; then
+            export PATH="$SDK_DIR/bin:$PATH"
+            log_info "Added SDK bin directory to PATH: $SDK_DIR/bin"
         fi
 
-        if [ -d "$sdk_path/lib" ]; then
-            export LD_LIBRARY_PATH="$sdk_path/lib:${LD_LIBRARY_PATH:-}"
-            log_info "Ensured SDK lib directory in LD_LIBRARY_PATH: $sdk_path/lib"
+        if [ -d "$SDK_DIR/lib" ]; then
+            export LD_LIBRARY_PATH="$SDK_DIR/lib:${LD_LIBRARY_PATH:-}"
+            log_info "Ensured SDK lib directory in LD_LIBRARY_PATH: $SDK_DIR/lib"
         fi
     fi
 
     if ! command -v dlpti_tools >/dev/null 2>&1; then
         log_error "dlpti_tools not found in PATH"
-        log_error "Expected location: $sdk_path/bin/dlpti_tools"
+        log_error "Expected location: $SDK_DIR/bin/dlpti_tools"
         log_error "Please ensure dlPTI SDK is properly installed and sourced"
         log_error "Typical setup: source /path/to/dlpti/sdk/env.sh"
         return 1
@@ -586,9 +586,9 @@ setup_dlpti_environment() {
     export DLPTI_AUTO_LOAD=1
 
     # Ensure library paths are properly set for dlPTI
-    if [ -n "$sdk_path" ] && [ -d "$sdk_path/lib" ]; then
-        export LD_LIBRARY_PATH="$sdk_path/lib:${LD_LIBRARY_PATH:-}"
-        log_info "Reinforced LD_LIBRARY_PATH with SDK lib: $sdk_path/lib"
+    if [ -n "$SDK_DIR" ] && [ -d "$SDK_DIR/lib" ]; then
+        export LD_LIBRARY_PATH="$SDK_DIR/lib:${LD_LIBRARY_PATH:-}"
+        log_info "Reinforced LD_LIBRARY_PATH with SDK lib: $SDK_DIR/lib"
     fi
 
     # Check for LD_PRELOAD conflicts and provide warnings
@@ -690,7 +690,7 @@ dlpti_troubleshoot() {
 
     # Check basic environment
     log_info "1. Environment Check:"
-    log_info "   SDK path: ${sdk_path:-NOT SET}"
+    log_info "   SDK path: ${SDK_DIR:-NOT SET}"
     log_info "   dlpti_tools: $(which dlpti_tools 2>/dev/null || echo "NOT FOUND")"
     log_info "   DLPTI_AUTO_LOAD: ${DLPTI_AUTO_LOAD:-NOT SET}"
     log_info "   LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-NOT SET}"
@@ -698,9 +698,9 @@ dlpti_troubleshoot() {
 
     # Check library files
     log_info "2. Library Check:"
-    if [ -n "$sdk_path" ]; then
-        local libdlpti="$sdk_path/lib/libdlpti.so"
-        local libdlpti_injection="$sdk_path/lib/libdlpti_injection.so"
+    if [ -n "$SDK_DIR" ]; then
+        local libdlpti="$SDK_DIR/lib/libdlpti.so"
+        local libdlpti_injection="$SDK_DIR/lib/libdlpti_injection.so"
 
         log_info "   libdlpti.so: $([ -f "$libdlpti" ] && echo "EXISTS" || echo "MISSING")"
         log_info "   libdlpti_injection.so: $([ -f "$libdlpti_injection" ] && echo "EXISTS" || echo "MISSING")"
@@ -824,7 +824,7 @@ compile_llama_cpp() {
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         -DGGML_CUDA_FA=ON
         -DGGML_CUDA_FA_ALL_QUANTS=OFF
-        -DSDK_DIR="$sdk_path"
+        -DSDK_DIR="$SDK_DIR"
     )
 
     # Add platform-specific arguments
@@ -1416,8 +1416,8 @@ run_tests() {
 main() {
     local platform=""
     local action="all"
-    local sdk_path_arg=""
-    local repo_path_arg=""
+    local SDK_DIR_arg=""
+    local REPO_PATH_arg=""
     local model_path_arg=""
     local auto_install=true
     local interactive=false
@@ -1445,11 +1445,11 @@ main() {
                 shift 2
                 ;;
             --sdk-path)
-                sdk_path_arg="$2"
+                SDK_DIR_arg="$2"
                 shift 2
                 ;;
             --repo-path)
-                repo_path_arg="$2"
+                REPO_PATH_arg="$2"
                 shift 2
                 ;;
             --model-path)
@@ -1562,12 +1562,12 @@ main() {
     fi
 
     # Set environment variables
-    if [ -n "$sdk_path_arg" ]; then
-        export sdk_path="$sdk_path_arg"
+    if [ -n "$SDK_DIR_arg" ]; then
+        export SDK_DIR="$SDK_DIR_arg"
     fi
 
-    if [ -n "$repo_path_arg" ]; then
-        export REPO_PATH="$repo_path_arg"
+    if [ -n "$REPO_PATH_arg" ]; then
+        export REPO_PATH="$REPO_PATH_arg"
     elif [ -z "$REPO_PATH" ]; then
         export REPO_PATH="$(pwd)"
     fi
@@ -1579,22 +1579,22 @@ main() {
         log_info "Using default LOCAL_MODEL_PATH from config: $LOCAL_MODEL_PATH"
     fi
 
-    # Map DLGPU_X86_SDK_PATH and llvm_devel_path to sdk_path if not already set
-    if [ -z "$sdk_path" ]; then
-        if [ -n "$DLGPU_X86_SDK_PATH" ]; then
-            export sdk_path="$DLGPU_X86_SDK_PATH"
-            log_info "Using DLGPU_X86_SDK_PATH as SDK path: $sdk_path"
+    # Map DLGPU_X86_SDK_DIR and llvm_devel_path to SDK_DIR if not already set
+    if [ -z "$SDK_DIR" ]; then
+        if [ -n "$DLGPU_X86_SDK_DIR" ]; then
+            export SDK_DIR="$DLGPU_X86_SDK_DIR"
+            log_info "Using DLGPU_X86_SDK_DIR as SDK path: $SDK_DIR"
         elif [ -n "$llvm_devel_path" ]; then
-            export sdk_path="$llvm_devel_path"
-            log_info "Using llvm_devel_path as SDK path: $sdk_path"
+            export SDK_DIR="$llvm_devel_path"
+            log_info "Using llvm_devel_path as SDK path: $SDK_DIR"
         fi
     fi
 
     # Validate required parameters
-    if [ -z "$sdk_path" ]; then
-        log_error "SDK path not set, please use --sdk-path or set environment variable sdk_path"
-        log_error "Alternatively, set DLGPU_X86_SDK_PATH or llvm_devel_path"
-        echo "Quick setup: export sdk_path=\"/path/to/your/sdk\""
+    if [ -z "$SDK_DIR" ]; then
+        log_error "SDK path not set, please use --sdk-path or set environment variable SDK_DIR"
+        log_error "Alternatively, set DLGPU_X86_SDK_DIR or llvm_devel_path"
+        echo "Quick setup: export SDK_DIR=\"/path/to/your/sdk\""
         echo "Or export llvm_devel_path=\"/path/to/your/sdk\""
         exit 1
     fi
@@ -1603,7 +1603,7 @@ main() {
     log_info "=== Execution Configuration ==="
     log_info "Platform: $platform"
     log_info "Action: $action"
-    log_info "SDK path: $sdk_path"
+    log_info "SDK path: $SDK_DIR"
     log_info "Repository path: $REPO_PATH"
     log_info "Model path: $LOCAL_MODEL_PATH"
     if [ "$debug" = "true" ]; then
@@ -1651,7 +1651,7 @@ main() {
             fi
 
             check_tools "$auto_install"
-            setup_sdk "$sdk_path"
+            setup_sdk "$SDK_DIR"
             setup_ccache "$platform"
             get_version_info
             compile_llama_cpp "$platform" "$build_dir" "$debug"

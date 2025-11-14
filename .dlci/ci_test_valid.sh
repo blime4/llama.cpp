@@ -81,7 +81,7 @@ detect_platform() {
 }
 
 # Function to set up SDK path
-setup_sdk_path() {
+setup_SDK_DIR() {
     local sdk_tag="${1:-$DEFAULT_SDK_TAG}"
     local platform="$2"
 
@@ -109,13 +109,13 @@ setup_sdk_path() {
     done
 
     # If no existing SDK found, use default location
-    local default_sdk_path="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/${sdk_tag}/sdk"
+    local default_SDK_DIR="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/${sdk_tag}/sdk"
     if [ "$platform" = "riscv64" ]; then
-        default_sdk_path="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/${sdk_tag}/sdk_riscv64"
+        default_SDK_DIR="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/${sdk_tag}/sdk_riscv64"
     fi
 
-    log_warn "No existing SDK found, will use: $default_sdk_path"
-    echo "$default_sdk_path"
+    log_warn "No existing SDK found, will use: $default_SDK_DIR"
+    echo "$default_SDK_DIR"
 }
 
 # Function to get platform suffix based on architecture
@@ -263,13 +263,13 @@ download_and_extract_release() {
 }
 
 # Function to setup Docker repo path
-setup_docker_repo_path() {
-    local sdk_path="$1"
+setup_docker_REPO_PATH() {
+    local SDK_DIR="$1"
 
     # Try to find docker directory relative to SDK path
     local potential_paths=(
-        "${sdk_path}/../docker"
-        "${sdk_path}/../../docker"
+        "${SDK_DIR}/../docker"
+        "${SDK_DIR}/../../docker"
         "/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/docker"
         "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
     )
@@ -293,24 +293,24 @@ setup_docker_repo_path() {
 # Function to run CI test
 run_ci_test() {
     local binary_path="$1"
-    local sdk_path="$2"
+    local SDK_DIR="$2"
     local docker_platform="$3"
-    local repo_path="$4"
+    local REPO_PATH="$4"
     local local_model_path="$5"
-    local docker_repo_path="$6"
+    local docker_REPO_PATH="$6"
 
     log_info "Setting up environment variables for CI test..."
 
     export BINARY_PATH="$binary_path"
-    export SDK_PATH="$sdk_path"
+    export SDK_DIR="$SDK_DIR"
     export DOCKER_PLATFORM="$docker_platform"
-    export REPO_PATH="$repo_path"
+    export REPO_PATH="$REPO_PATH"
     export LOCAL_MODEL_PATH="$local_model_path"
-    export DOCKER_REPO_PATH="$docker_repo_path"
+    export DOCKER_REPO_PATH="$docker_REPO_PATH"
 
     log_info "Environment variables set:"
     log_info "  BINARY_PATH: $BINARY_PATH"
-    log_info "  SDK_PATH: $SDK_PATH"
+    log_info "  SDK_DIR: $SDK_DIR"
     log_info "  DOCKER_PLATFORM: $DOCKER_PLATFORM"
     log_info "  REPO_PATH: $REPO_PATH"
     log_info "  LOCAL_MODEL_PATH: $LOCAL_MODEL_PATH"
@@ -320,7 +320,7 @@ run_ci_test() {
     log_info "Starting CI test execution..."
 
     # Run the CI test script
-    local ci_test_script="${repo_path}/.dlci/ci_test.sh"
+    local ci_test_script="${REPO_PATH}/.dlci/ci_test.sh"
     if [ ! -f "$ci_test_script" ]; then
         log_error "CI test script not found: $ci_test_script"
         return 1
@@ -372,19 +372,19 @@ main() {
 
     # Step 3: Set up SDK path
     log_info "Step 3: Setting up SDK path..."
-    SDK_PATH=$(setup_sdk_path "$DEFAULT_SDK_TAG" "$DOCKER_PLATFORM")
-    if [ -d "$SDK_PATH" ]; then
-        log_info "Found existing SDK at: $SDK_PATH"
-        log_success "SDK path: $SDK_PATH"
+    SDK_DIR=$(setup_SDK_DIR "$DEFAULT_SDK_TAG" "$DOCKER_PLATFORM")
+    if [ -d "$SDK_DIR" ]; then
+        log_info "Found existing SDK at: $SDK_DIR"
+        log_success "SDK path: $SDK_DIR"
     else
-        log_warn "SDK path does not exist: $SDK_PATH"
-        log_success "SDK path (will be used): $SDK_PATH"
+        log_warn "SDK path does not exist: $SDK_DIR"
+        log_success "SDK path (will be used): $SDK_DIR"
     fi
     echo ""
 
     # Step 4: Set up Docker repo path
     log_info "Step 4: Setting up Docker utilities path..."
-    DOCKER_REPO_PATH=$(setup_docker_repo_path "$SDK_PATH")
+    DOCKER_REPO_PATH=$(setup_docker_REPO_PATH "$SDK_DIR")
     if [ -d "$DOCKER_REPO_PATH" ] && [ -f "$DOCKER_REPO_PATH/bash.sh" ]; then
         log_info "Found Docker utilities at: $DOCKER_REPO_PATH"
         log_success "Docker repo path: $DOCKER_REPO_PATH"
@@ -516,7 +516,7 @@ main() {
     # Step 8: Run CI test
     log_info "Step 8: Running CI test..."
     echo "=========================================="
-    run_ci_test "$BINARY_PATH" "$SDK_PATH" "$DOCKER_PLATFORM" "$REPO_PATH" "$LOCAL_MODEL_PATH" "$DOCKER_REPO_PATH"
+    run_ci_test "$BINARY_PATH" "$SDK_DIR" "$DOCKER_PLATFORM" "$REPO_PATH" "$LOCAL_MODEL_PATH" "$DOCKER_REPO_PATH"
 
     local test_exit_code=$?
 

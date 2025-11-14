@@ -79,16 +79,16 @@ exec_with_log() {
 echo "[INFO] Compilation started at: $(date)" | tee -a "$compile_log"
 echo "[INFO] Logs will be saved to: $compile_log"
 
-# Ensure sdk_path is set and valid
-if [ -z "$sdk_path" ] || [ ! -d "$sdk_path" ]; then
-  echo "[ERROR] sdk_path is not set or is not a valid directory. Current value: '$sdk_path'" | tee -a "$compile_log"
+# Ensure SDK_DIR is set and valid
+if [ -z "$SDK_DIR" ] || [ ! -d "$SDK_DIR" ]; then
+  echo "[ERROR] SDK_DIR is not set or is not a valid directory. Current value: '$SDK_DIR'" | tee -a "$compile_log"
   output_log_on_error
   exit 1
 fi
 
 # Normalize SDK path to avoid double slashes and path issues
-sdk_path=$(readlink -f "$sdk_path")
-echo "[INFO] Normalized SDK path: $sdk_path" | tee -a "$compile_log"
+SDK_DIR=$(readlink -f "$SDK_DIR")
+echo "[INFO] Normalized SDK path: $SDK_DIR" | tee -a "$compile_log"
 
 echo "[INFO] Environment setup..." | tee -a "$compile_log"
 env >> "$compile_log" 2>&1
@@ -108,11 +108,11 @@ if [ "$ARCH" = "android" ]; then
     echo "[INFO] ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT" | tee -a "$compile_log"
 fi
 
-source ${sdk_path}/env.sh >> "$compile_log" 2>&1
+source ${SDK_DIR}/env.sh >> "$compile_log" 2>&1
 # Set LIBRARY_PATH for dlcc compiler
-export LIBRARY_PATH="${sdk_path}/lib:${LIBRARY_PATH}"
+export LIBRARY_PATH="${SDK_DIR}/lib:${LIBRARY_PATH}"
 # Also set LD_LIBRARY_PATH to match local environment
-export LD_LIBRARY_PATH="${sdk_path}/lib:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${SDK_DIR}/lib:${LD_LIBRARY_PATH}"
 echo "LIBRARY_PATH set to: $LIBRARY_PATH" | tee -a "$compile_log"
 echo "LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH" | tee -a "$compile_log"
 env >> "$compile_log" 2>&1
@@ -147,9 +147,9 @@ fi
 
 echo "[INFO] LLAMA_CPP_BUILD_VERSION: $LLAMA_CPP_BUILD_VERSION" | tee -a "$compile_log"
 
-# Define a custom bin directory within sdk_path for our tools like the ccache wrapper.
-# This avoids polluting the main PATH with the entire sdk_path.
-CUSTOM_BIN_DIR="$sdk_path/custom_bin"
+# Define a custom bin directory within SDK_DIR for our tools like the ccache wrapper.
+# This avoids polluting the main PATH with the entire SDK_DIR.
+CUSTOM_BIN_DIR="$SDK_DIR/custom_bin"
 
 echo "[INFO] Setting up custom CUDA compiler wrapper..." | tee -a "$compile_log"
 
@@ -172,10 +172,10 @@ if [ "$DISABLE_CCACHE" != "true" ]; then
 else
     # When ccache is disabled, create a direct symlink to the SDK compiler
     # Find the actual dlcc path from the SDK
-    ACTUAL_DLCC="$sdk_path/bin/dlcc"
+    ACTUAL_DLCC="$SDK_DIR/bin/dlcc"
     if [ ! -f "$ACTUAL_DLCC" ]; then
         # Fall back to clang++
-        ACTUAL_DLCC="$sdk_path/bin/clang++"
+        ACTUAL_DLCC="$SDK_DIR/bin/clang++"
     fi
     ln -sf "$ACTUAL_DLCC" "$CUSTOM_BIN_DIR/dlcc" || {
       echo "[ERROR] Failed to create symlink for direct compiler at $CUSTOM_BIN_DIR/dlcc." | tee -a "$compile_log"
@@ -206,7 +206,7 @@ echo "[INFO] Custom bin directory '$CUSTOM_BIN_DIR' added to PATH." >> "$compile
 # --- End of improved ccache setup ---
 
 # --- Compile llama.cpp ---
-sdk=$sdk_path
+sdk=$SDK_DIR
 echo "[INFO] REPO_PATH: ${REPO_PATH}" | tee -a "$compile_log"
 cd ${REPO_PATH}
 

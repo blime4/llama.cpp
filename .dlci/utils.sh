@@ -268,26 +268,26 @@ get_docker_image_for_platform() {
 }
 
 # Setup Docker repository (clone if needed and ensure main branch)
-# Usage: setup_docker_repo <docker_repo_path>
+# Usage: setup_docker_repo <docker_REPO_PATH>
 # Returns: 0 on success, 1 on failure
 setup_docker_repo() {
-    local docker_repo_path="$1"
+    local docker_REPO_PATH="$1"
 
-    if [ -z "$docker_repo_path" ]; then
+    if [ -z "$docker_REPO_PATH" ]; then
         echo "[ERROR] Docker repository path is required" >&2
         return 1
     fi
 
     # Clone docker repo and check branch if it doesn't exist
-    if [ ! -d "$docker_repo_path" ]; then
+    if [ ! -d "$docker_REPO_PATH" ]; then
         local git_repo_url=$(get_git_repo_url)
         local network_env=$(detect_network_env)
         echo "[INFO] Docker directory does not exist, cloning from $network_env network..."
         echo "[INFO] Using repository: $git_repo_url"
-        git clone "$git_repo_url" --depth 1 "$docker_repo_path"
+        git clone "$git_repo_url" --depth 1 "$docker_REPO_PATH"
     else
         echo "[INFO] Docker directory already exists, checking branch..."
-        cd "$docker_repo_path"
+        cd "$docker_REPO_PATH"
         local current_branch=$(git rev-parse --abbrev-ref HEAD)
         if [ "$current_branch" != "main" ]; then
             echo "[INFO] Current branch is $current_branch, switching to main..."
@@ -300,30 +300,30 @@ setup_docker_repo() {
     fi
 
     # Verify bash.sh exists after cloning/updating
-    if [ ! -f "$docker_repo_path/bash.sh" ]; then
-        echo "[ERROR] bash.sh not found after cloning/updating: $docker_repo_path/bash.sh" >&2
+    if [ ! -f "$docker_REPO_PATH/bash.sh" ]; then
+        echo "[ERROR] bash.sh not found after cloning/updating: $docker_REPO_PATH/bash.sh" >&2
         return 1
     fi
 
-    echo "[INFO] Docker repository setup completed: $docker_repo_path"
+    echo "[INFO] Docker repository setup completed: $docker_REPO_PATH"
     return 0
 }
 
 # Auto-detect and setup Docker repository path
-# Usage: auto_setup_docker_repo <sdk_path>
+# Usage: auto_setup_docker_repo <SDK_DIR>
 # Sets: DOCKER_REPO_PATH global variable
 # Returns: 0 on success, 1 on failure
 auto_setup_docker_repo() {
-    local sdk_path="$1"
+    local SDK_DIR="$1"
 
-    if [ -z "$sdk_path" ]; then
+    if [ -z "$SDK_DIR" ]; then
         echo "[ERROR] SDK path is required for auto-detection" >&2
         return 1
     fi
 
     if [ -z "$DOCKER_REPO_PATH" ]; then
-        # Try to find docker directory relative to SDK_PATH
-        local potential_docker_path="${sdk_path}/../docker"
+        # Try to find docker directory relative to SDK_DIR
+        local potential_docker_path="${SDK_DIR}/../docker"
         DOCKER_REPO_PATH="$(realpath "$potential_docker_path")"
         echo "[INFO] Auto-detected DOCKER_REPO_PATH: $DOCKER_REPO_PATH"
     fi
@@ -351,7 +351,7 @@ print_ci_build_usage() {
     echo "Usage: ci_build"
     echo ""
     echo "Required Environment Variables:"
-    echo "  SDK_PATH         - Path to SDK directory"
+    echo "  SDK_DIR         - Path to SDK directory"
     echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64, android)"
     echo ""
     echo "Optional Environment Variables:"
@@ -360,7 +360,7 @@ print_ci_build_usage() {
     echo "  SDK_TAG          - SDK tag for version information (auto-detected if not set)"
     echo ""
     echo "Example:"
-    echo "  export SDK_PATH=/path/to/sdk"
+    echo "  export SDK_DIR=/path/to/sdk"
     echo "  export DOCKER_PLATFORM=x86_64"
     echo "  export REPO_PATH=/path/to/repository"
     echo "  ci_build"
@@ -370,8 +370,8 @@ print_ci_build_usage() {
 validate_ci_build_env_vars() {
     local missing_vars=()
 
-    if [ -z "$SDK_PATH" ]; then
-        missing_vars+=("SDK_PATH")
+    if [ -z "$SDK_DIR" ]; then
+        missing_vars+=("SDK_DIR")
     fi
 
     if [ -z "$DOCKER_PLATFORM" ]; then
@@ -391,16 +391,16 @@ validate_ci_build_env_vars() {
 
 # Set default values for CI build optional variables
 set_ci_build_defaults() {
-    local default_repo_path="$(pwd)"
+    local default_REPO_PATH="$(pwd)"
 
     if [ -z "$REPO_PATH" ]; then
-        REPO_PATH="$default_repo_path"
+        REPO_PATH="$default_REPO_PATH"
         echo "[INFO] Using default REPO_PATH: $REPO_PATH"
     fi
 
     # Auto-detect and setup DOCKER_REPO_PATH if not set
     if [ -z "$DOCKER_REPO_PATH" ]; then
-        if ! auto_setup_docker_repo "$SDK_PATH"; then
+        if ! auto_setup_docker_repo "$SDK_DIR"; then
             echo "[ERROR] Failed to setup Docker repository"
             exit 1
         fi
@@ -414,13 +414,13 @@ set_ci_build_defaults() {
 
     # Auto-detect SDK_TAG if not set
     if [ -z "$SDK_TAG" ]; then
-        # Try to extract SDK tag from SDK_PATH
-        local sdk_basename=$(basename "$SDK_PATH")
+        # Try to extract SDK tag from SDK_DIR
+        local sdk_basename=$(basename "$SDK_DIR")
         if [[ "$sdk_basename" =~ ^sdk-[0-9]{12}$ ]]; then
             SDK_TAG="$sdk_basename"
             echo "[INFO] Auto-detected SDK_TAG: $SDK_TAG"
         else
-            echo "[WARNING] Cannot auto-detect SDK_TAG from SDK_PATH. Using default pattern."
+            echo "[WARNING] Cannot auto-detect SDK_TAG from SDK_DIR. Using default pattern."
             # Set a default pattern that compile_llama_cpp.sh can handle
             SDK_TAG="sdk-$(date +%Y%m%d%H%M)"
             echo "[INFO] Using generated SDK_TAG: $SDK_TAG"
@@ -432,8 +432,8 @@ set_ci_build_defaults() {
 validate_ci_build_paths() {
     local error_count=0
 
-    if [ ! -d "$SDK_PATH" ]; then
-        echo "[ERROR] SDK_PATH does not exist: $SDK_PATH"
+    if [ ! -d "$SDK_DIR" ]; then
+        echo "[ERROR] SDK_DIR does not exist: $SDK_DIR"
         error_count=$((error_count + 1))
     fi
 
@@ -453,8 +453,8 @@ validate_ci_build_paths() {
     fi
 
     # Check if SDK has required env.sh
-    if [ ! -f "$SDK_PATH/env.sh" ]; then
-        echo "[ERROR] SDK env.sh not found: $SDK_PATH/env.sh"
+    if [ ! -f "$SDK_DIR/env.sh" ]; then
+        echo "[ERROR] SDK env.sh not found: $SDK_DIR/env.sh"
         error_count=$((error_count + 1))
     fi
 
@@ -469,11 +469,11 @@ prepare_ci_build_docker_envs() {
     echo "[INFO] Preparing Docker environment variables..."
 
     # Export all required variables for Docker
-    export SDK_PATH
+    export SDK_DIR
     export DOCKER_PLATFORM
     export REPO_PATH
     export SDK_TAG
-    export sdk_path="$SDK_PATH"
+    export SDK_DIR="$SDK_DIR"
 
     # Collect environment variables matching the pattern
     DOCKER_ENVS=()
@@ -491,7 +491,7 @@ ci_build() {
     echo "======================================"
     echo "[INFO] Starting CI build execution..."
     echo "[INFO] Platform: $DOCKER_PLATFORM"
-    echo "[INFO] SDK Path: $SDK_PATH"
+    echo "[INFO] SDK Path: $SDK_DIR"
     echo "[INFO] SDK Tag: $SDK_TAG"
     echo "[INFO] Repository Path: $REPO_PATH"
     echo ""

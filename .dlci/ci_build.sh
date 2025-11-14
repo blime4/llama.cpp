@@ -6,7 +6,7 @@
 # compile_llama_cpp.sh to compile the llama.cpp project.
 #
 # Required Environment Variables:
-#   SDK_PATH        - Path to the SDK directory (e.g., /path/to/sdk)
+#   SDK_DIR        - Path to the SDK directory (e.g., /path/to/sdk)
 #   DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64, android)
 #
 # Optional Environment Variables:

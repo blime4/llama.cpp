@@ -36,7 +36,7 @@ compile_and_test_llama_cpp_x86_64:
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
@@ -57,7 +57,7 @@ compile_and_test_llama_cpp_aarch64:
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
@@ -78,7 +78,7 @@ compile_and_test_llama_cpp_riscv64:
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - echo "[INFO] Skipping device check for RISC-V platform (no hardware acceleration expected)"
     - echo "${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} \"\${DOCKER_ENVS[@]}\" \"${DOCKER_IMAGE_RISCV64}\" ${REPO_PATH}/.dlci/compile_llama_cpp.sh"
@@ -101,7 +101,7 @@ compile_and_test_llama_cpp_loongarch64:
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
@@ -122,7 +122,7 @@ compile_and_test_llama_cpp_android:
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export sdk_path="${SDK_WORKSPACE}/sdk"
+    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - echo "[INFO] Skipping device check for Android platform (cross-compilation target)"
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/compile_llama_cpp.sh

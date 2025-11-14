@@ -126,11 +126,11 @@ env >> "$test_log" 2>&1
 if [ -n "$LD_PRELOAD" ]; then
     saved_ld_preload="$LD_PRELOAD"
     unset LD_PRELOAD
-    source "${sdk_path}/env.sh" >> "$test_log" 2>&1
+    source "${SDK_DIR}/env.sh" >> "$test_log" 2>&1
     export LD_PRELOAD="$saved_ld_preload"
     unset saved_ld_preload
 else
-    source "${sdk_path}/env.sh" >> "$test_log" 2>&1
+    source "${SDK_DIR}/env.sh" >> "$test_log" 2>&1
 fi
 env >> "$test_log" 2>&1
 

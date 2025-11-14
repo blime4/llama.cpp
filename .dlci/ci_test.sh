@@ -7,7 +7,7 @@
 #
 # Required Environment Variables:
 #   BINARY_PATH     - Path to the extracted release directory containing binaries
-#   SDK_PATH        - Path to the SDK directory (e.g., /path/to/sdk)
+#   SDK_DIR        - Path to the SDK directory (e.g., /path/to/sdk)
 #   DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64, android)
 #
 # Optional Environment Variables:
@@ -32,7 +32,7 @@ print_usage() {
     echo ""
     echo "Required Environment Variables:"
     echo "  BINARY_PATH      - Path to extracted release directory with binaries"
-    echo "  SDK_PATH         - Path to SDK directory"
+    echo "  SDK_DIR         - Path to SDK directory"
     echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64, android)"
     echo "  REPO_PATH        - Repository path (default: current directory)"
     echo "  LOCAL_MODEL_PATH - Path to model files (default: ${DEFAULT_LOCAL_MODEL_PATH})"
@@ -42,7 +42,7 @@ print_usage() {
     echo ""
     echo "Example:"
     echo "  export BINARY_PATH=/path/to/extracted/release"
-    echo "  export SDK_PATH=/path/to/sdk"
+    echo "  export SDK_DIR=/path/to/sdk"
     echo "  export DOCKER_PLATFORM=x86_64"
     echo "  export REPO_PATH=/path/to/repository"
     echo "  export LOCAL_MODEL_PATH=/path/to/model"
@@ -57,8 +57,8 @@ validate_env_vars() {
         missing_vars+=("BINARY_PATH")
     fi
 
-    if [ -z "$SDK_PATH" ]; then
-        missing_vars+=("SDK_PATH")
+    if [ -z "$SDK_DIR" ]; then
+        missing_vars+=("SDK_DIR")
     fi
 
     if [ -z "$DOCKER_PLATFORM" ]; then
@@ -90,7 +90,7 @@ set_defaults() {
 
     # Auto-detect and setup DOCKER_REPO_PATH if not set
     if [ -z "$DOCKER_REPO_PATH" ]; then
-        if ! auto_setup_docker_repo "$SDK_PATH"; then
+        if ! auto_setup_docker_repo "$SDK_DIR"; then
             echo "[ERROR] Failed to setup Docker repository"
             exit 1
         fi
@@ -112,8 +112,8 @@ validate_paths() {
         error_count=$((error_count + 1))
     fi
 
-    if [ ! -d "$SDK_PATH" ]; then
-        echo "[ERROR] SDK_PATH does not exist: $SDK_PATH"
+    if [ ! -d "$SDK_DIR" ]; then
+        echo "[ERROR] SDK_DIR does not exist: $SDK_DIR"
         error_count=$((error_count + 1))
     fi
 
@@ -144,11 +144,11 @@ prepare_docker_envs() {
 
     # Export all required variables for Docker
     export BINARY_PATH
-    export SDK_PATH
+    export SDK_DIR
     export DOCKER_PLATFORM
     export LOCAL_MODEL_PATH
     export REPO_PATH
-    export sdk_path="$SDK_PATH"
+    export SDK_DIR="$SDK_DIR"
 
     # Collect environment variables matching the pattern
     DOCKER_ENVS=()
@@ -167,7 +167,7 @@ main() {
     echo "[INFO] Starting CI test execution..."
     echo "[INFO] Platform: $DOCKER_PLATFORM"
     echo "[INFO] Binary Path: $BINARY_PATH"
-    echo "[INFO] SDK Path: $SDK_PATH"
+    echo "[INFO] SDK Path: $SDK_DIR"
     echo "[INFO] Repository Path: $REPO_PATH"
     echo "[INFO] Model Path: $LOCAL_MODEL_PATH"
     echo ""

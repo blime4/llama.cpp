@@ -156,12 +156,12 @@ echo "[Step 2] Downloading and unpacking SDK..."
 bash ../../.dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
 
 # Step 3: Set SDK path
-export sdk_path="${SDK_WORKSPACE%/}/sdk"
-echo "[Step 3] SDK path set to: $sdk_path"
+export SDK_DIR="${SDK_WORKSPACE%/}/sdk"
+echo "[Step 3] SDK path set to: $SDK_DIR"
 
 # Check if SDK exists
-if [ ! -d "$sdk_path" ]; then
-    echo "[ERROR] SDK path does not exist: $sdk_path"
+if [ ! -d "$SDK_DIR" ]; then
+    echo "[ERROR] SDK path does not exist: $SDK_DIR"
     exit 1
 fi
 
@@ -210,7 +210,7 @@ append_env_var "ANDROID_CXX_FLAGS"
 append_env_var "LLVM"
 
 # Support android-doc.md variable names for compatibility
-append_env_var "DLGPU_X86_SDK_PATH"
+append_env_var "DLGPU_X86_SDK_DIR"
 append_env_var "llvm_devel_path"
 
 echo "Number of Docker environment variables: ${#DOCKER_ENVS[@]}"
@@ -257,15 +257,15 @@ if [ "$DOCKER_PLATFORM" = "android" ]; then
     echo "Generated binaries are for Android ARM64 and cannot run in this container."
     echo ""
     echo "Setup commands:"
-    echo "  - source $sdk_path/env.sh  # Load SDK environment"
+    echo "  - source $SDK_DIR/env.sh  # Load SDK environment"
     echo ""
     echo "Build commands (supports both variable styles):"
     echo "  # New style:"
-    echo "  export sdk_path=\"$sdk_path\""
+    echo "  export SDK_DIR=\"$SDK_DIR\""
     echo "  ./run_llama.sh --platform android"
     echo ""
     echo "  # android-doc.md compatible style:"
-    echo "  export llvm_devel_path=\"$sdk_path\""
+    echo "  export llvm_devel_path=\"$SDK_DIR\""
     echo "  export android_api_level=25"
     echo "  export tool_chain_cmake=\"/opt/android-sdk-linux/ndk/25.2.9519653/build/cmake/android.toolchain.cmake\""
     echo "  ./run_llama.sh --platform android"
@@ -277,13 +277,13 @@ if [ "$DOCKER_PLATFORM" = "android" ]; then
     echo ""
     echo "Deploy to Android device:"
     echo "  - adb push build_android/bin/* /data/local/tmp/llama/"
-    echo "  - adb push $sdk_path/lib/*.so /data/local/tmp/llama/"
+    echo "  - adb push $SDK_DIR/lib/*.so /data/local/tmp/llama/"
     echo "  - adb shell 'cd /data/local/tmp/llama && LD_LIBRARY_PATH=. ./llama-cli --help'"
     echo ""
     echo "Note: test-backend-ops and direct binary execution will NOT work (cross-compilation)"
 else
     echo "You can now interactively develop with llama.cpp in the docker container."
-    echo "You need to source $sdk_path/env.sh to use the SDK."
+    echo "You need to source $SDK_DIR/env.sh to use the SDK."
     echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT"
     echo "One-click command: test-backend-ops -o FLASH_ATTN_EXT -p \"(hsk=64.*hsv=64|hsk=128.*hsv=128|hsk=256.*hsv=256).*nb=1\""
     echo "One-click command: test-backend-ops -o GATED_LINEAR_ATTN"
@@ -312,7 +312,7 @@ if [ "$DOCKER_PLATFORM" = "android" ]; then
     exec docker run --rm -it                                   \
         --user $(id -u):$(id -g)                               \
         -v "$(pwd):/workspace"                                 \
-        -v "${sdk_path}:/sdk_path"                             \
+        -v "${SDK_DIR}:/SDK_DIR"                             \
         -v "$(get_model_path):/models"                         \
         -w /workspace                                          \
         -v "${build_dir}:/workspace/build"                     \
@@ -326,7 +326,7 @@ else
     exec docker run --rm -it                                   \
         --runtime=dlrt -e DENGLIN_DEVICES=all                  \
         -v "$(pwd):/workspace"                                 \
-        -v "${sdk_path}:/sdk_path"                             \
+        -v "${SDK_DIR}:/SDK_DIR"                             \
         -v "$(get_model_path):/models"                         \
         -w /workspace                                          \
         -v "${build_dir}:/workspace/build"                     \

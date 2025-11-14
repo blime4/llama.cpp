@@ -6,23 +6,23 @@
 echo "Setting up Docker development environment..."
 
 # Set SDK environment variables
-export sdk_path="/sdk_path"
-echo "sdk_path: $sdk_path"
+export SDK_DIR="/SDK_DIR"
+echo "SDK_DIR: $SDK_DIR"
 
 # Check if SDK exists
-if [ ! -d "$sdk_path" ]; then
-    echo "[ERROR] SDK path does not exist: $sdk_path"
+if [ ! -d "$SDK_DIR" ]; then
+    echo "[ERROR] SDK path does not exist: $SDK_DIR"
     echo "Please make sure the SDK is properly mounted in docker container"
     return 1
 fi
 
 # Source SDK environment
-if [ -f "$sdk_path/env.sh" ]; then
-    echo "Sourcing SDK environment from $sdk_path/env.sh..."
-    source "$sdk_path/env.sh"
+if [ -f "$SDK_DIR/env.sh" ]; then
+    echo "Sourcing SDK environment from $SDK_DIR/env.sh..."
+    source "$SDK_DIR/env.sh"
     echo "SDK environment loaded successfully"
 else
-    echo "[WARNING] SDK env.sh not found at $sdk_path/env.sh"
+    echo "[WARNING] SDK env.sh not found at $SDK_DIR/env.sh"
 fi
 
 # Set up PATH for build/bin commands
@@ -60,7 +60,7 @@ fi
 
 echo ""
 echo "=== Environment Summary ==="
-echo "SDK_PATH: $sdk_path"
+echo "SDK_DIR: $SDK_DIR"
 echo "BUILD_BIN: $BUILD_BIN_PATH"
 echo "PATH includes build/bin: $(echo $PATH | grep -q build/bin && echo "Yes" || echo "No")"
 

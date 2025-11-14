@@ -5,7 +5,7 @@
 
 # Function to set up Android compilation environment
 setup_android_compile_env() {
-    local sdk_path="$1"
+    local SDK_DIR="$1"
     local arch="$2"
 
     echo "[INFO] Setting up Android compilation environment..."
@@ -23,20 +23,20 @@ setup_android_compile_env() {
     export DOCKER_PLATFORM="$arch"
 
     # Set library paths (matching local environment)
-    export LIBRARY_PATH="${sdk_path}/lib:${LIBRARY_PATH}"
-    export LD_LIBRARY_PATH="${sdk_path}/lib:${LD_LIBRARY_PATH}"
+    export LIBRARY_PATH="${SDK_DIR}/lib:${LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="${SDK_DIR}/lib:${LD_LIBRARY_PATH}"
 
     echo "[INFO] Android environment configured:"
     echo "[INFO]   ANDROID_NDK_ROOT: $ANDROID_NDK_ROOT"
     echo "[INFO]   ANDROID_API_LEVEL: $ANDROID_API_LEVEL"
     echo "[INFO]   ANDROID_ABI: $ANDROID_ABI"
-    echo "[INFO]   SDK_PATH: $sdk_path"
+    echo "[INFO]   SDK_DIR: $SDK_DIR"
     echo "[INFO]   DOCKER_PLATFORM: $DOCKER_PLATFORM"
 }
 
 # Function to configure Android CMake flags (based on successful local compilation)
 get_android_cmake_flags() {
-    local sdk_path="$1"
+    local SDK_DIR="$1"
     local build_dir="$2"
 
     # Android configuration (matching local_dev.sh success pattern)
@@ -45,9 +45,9 @@ get_android_cmake_flags() {
     local android_sysroot="/opt/android-sdk-linux/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
     # SDK paths for dual SDK configuration
-    local sdk_aarch64="${sdk_path}_aarch64"
+    local sdk_aarch64="${SDK_DIR}_aarch64"
     if [ ! -d "$sdk_aarch64" ]; then
-        sdk_aarch64="${sdk_path%/*}/sdk_aarch64"
+        sdk_aarch64="${SDK_DIR%/*}/sdk_aarch64"
     fi
 
     # Android-specific compiler flags (minimal, proven to work)
@@ -59,7 +59,7 @@ get_android_cmake_flags() {
     local android_linker_flags="-L${android_lib_path} -latomic -Wl,--allow-shlib-undefined -Wl,--unresolved-symbols=ignore-all"
 
     # CUDA compiler setup
-    local cuda_nvcc_executable="${sdk_path}/custom_bin/dlcc"
+    local cuda_nvcc_executable="${SDK_DIR}/custom_bin/dlcc"
 
     # Check DISABLE_CCACHE from global scope and set CMake option accordingly
     local ccache_cmake_option="-DGGML_CCACHE=ON"
@@ -93,9 +93,9 @@ cmake -G Ninja -B ${build_dir} \\
     -DGGML_CUDA_FA_ALL_QUANTS=ON \\
     -DGGML_RVV=OFF \\
     -DGGML_NATIVE=OFF \\
-    -DSDK_DIR=${sdk_path} \\
+    -DSDK_DIR=${SDK_DIR} \\
     -DSDK_AARCH64_DIR=${sdk_aarch64} \\
-    -DCMAKE_IGNORE_PATH="${sdk_path}/include/crt;${sdk_path}/lib/clang" \\
+    -DCMAKE_IGNORE_PATH="${SDK_DIR}/include/crt;${SDK_DIR}/lib/clang" \\
     -DCUDA_NVCC_EXECUTABLE=${cuda_nvcc_executable} \\
     -DCMAKE_CUDA_COMPILER=${cuda_nvcc_executable} \\
     -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \\
@@ -106,18 +106,18 @@ EOF
 
 # Function to run Android compilation (extracted from successful local_dev.sh pattern)
 run_android_compilation() {
-    local sdk_path="$1"
-    local repo_path="$2"
+    local SDK_DIR="$1"
+    local REPO_PATH="$2"
     local arch="$3"
     local compile_log="$4"
 
     echo "[INFO] Starting Android compilation with proven local_dev.sh method..." | tee -a "$compile_log"
 
     # Setup environment
-    setup_android_compile_env "$sdk_path" "$arch"
+    setup_android_compile_env "$SDK_DIR" "$arch"
 
     # Source SDK environment
-    source "${sdk_path}/env.sh" >> "$compile_log" 2>&1
+    source "${SDK_DIR}/env.sh" >> "$compile_log" 2>&1
 
     # Setup ccache (matching local_dev.sh)
     # Check if ccache is disabled
@@ -128,7 +128,7 @@ run_android_compilation() {
         ccache --zero-stats >> "$compile_log" 2>&1
 
         # Setup custom CUDA compiler wrapper (matching local_dev.sh)
-        local custom_bin_dir="$sdk_path/custom_bin"
+        local custom_bin_dir="$SDK_DIR/custom_bin"
         mkdir -p "$custom_bin_dir"
         ln -sf /usr/bin/ccache "$custom_bin_dir/dlcc"
         export PATH="$custom_bin_dir:$PATH"
@@ -138,15 +138,15 @@ run_android_compilation() {
     fi
 
     # Build directory
-    local build_dir="${repo_path}/build_${arch}"
+    local build_dir="${REPO_PATH}/build_${arch}"
 
     # Generate and run CMake configuration
-    local cmake_cmd=$(get_android_cmake_flags "$sdk_path" "$build_dir")
+    local cmake_cmd=$(get_android_cmake_flags "$SDK_DIR" "$build_dir")
     echo "[INFO] CMake configuration:" | tee -a "$compile_log"
     echo "$cmake_cmd" | tee -a "$compile_log"
 
     # Execute CMake
-    cd "$repo_path"
+    cd "$REPO_PATH"
     eval "$cmake_cmd" >> "$compile_log" 2>&1
 
     if [ $? -ne 0 ]; then
