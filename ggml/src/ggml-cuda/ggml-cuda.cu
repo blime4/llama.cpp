@@ -2075,11 +2075,13 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
 
 #ifdef GGML_USE_DLCU
     bool dlblas_available = ggml_dl::is_dlblas_available_simple(ctx, src0, src1, dst, split);
-    if (ggml_dl::should_use_dlblas_path(dlblas_available, use_mul_mat_vec, use_mul_mat_vec_q)) {
+    bool should_use_dlblas_path = dlblas_available ?
+        ggml_dl::should_use_dlblas_path(use_mul_mat_vec, use_mul_mat_vec_q): false;
+    if (should_use_dlblas_path) {
         ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
         which_branch = "ggml_dl::mul_mat_dlblas";
         // Emit a debug line once per invocation so we can see which GPU path executed.
-        GGML_LOG_DEBUG("ggml_cuda_mul_mat: selected CUDA branch '%s'\n", which_branch);
+        GGML_DL_MULMAT_DEBUG_PRINT("ggml_cuda_mul_mat: selected CUDA branch '%s'\n", which_branch);
         return;
     }
 #else
@@ -2120,7 +2122,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         which_branch = "ggml_cuda_op_mul_mat";
     }
     // Emit a debug line once per invocation so we can see which GPU path executed.
-    GGML_LOG_DEBUG("ggml_cuda_mul_mat: selected CUDA branch '%s' (dst=%s, src0_type=%s, src1_type=%s)\n",
+    GGML_DL_MULMAT_DEBUG_PRINT("ggml_cuda_mul_mat: selected CUDA branch '%s' (dst=%s, src0_type=%s, src1_type=%s)\n",
                    which_branch[0] ? which_branch : "unknown",
                    dst->name,
                    ggml_type_name(src0->type),

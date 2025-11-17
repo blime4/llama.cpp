@@ -177,7 +177,6 @@ else
     echo "[INFO] Build directory: $build_dir" | tee -a "$summary_log"
 fi
 
-export GGML_TEST_MODE=1
 
 # Set environment variables
 export GGML_DEBUG=1
@@ -203,7 +202,7 @@ if [ "$SIMPLE_TEST" = true ]; then
     # To remove a test, comment out or delete the line
     # ============================================================
     declare -a SIMPLE_TEST_CASES=(
-        "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_DLBLAS_CONSISTENT=1 GGML_DEBUG_PATH_SELECTION=1 GGML_FORCE_DLBLAS_TEST=1 GGML_CUDA_GPTQ_GROUP_SIZE=128"
+        "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_TEST_MODE=1 GGML_DLBLAS_CONSISTENT=1 GGML_FORCE_DLBLAS_TEST=1 GGML_CUDA_GPTQ_GROUP_SIZE=128 "
         # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_DLFA_READY=1"
         # "MUL_MAT_ID|${build_dir_bin}/test-backend-ops -o MUL_MAT -p \"(type_a=q4_1,type_b=f32,n_mats=4,n_used=1,b=1,m=512,n=1,k=256)\"|NONE"
         # "ADD|${build_dir_bin}/test-backend-ops -o ADD|NONE"  # Example: Add more tests here
@@ -439,6 +438,7 @@ if [ "$SIMPLE_MODEL" = true ]; then
 
     model_base_path="${LOCAL_MODEL_PATH}"
     model_path="Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+    # model_path="Qwen1.5-14B-Chat-GGUF/qwen1_5-14b-chat-q4_k_m.gguf"
     full_model_path="${model_base_path%/}/${model_path}"
     model_name="qwen2.5-1.5b-instruct-q4_k_m"
 
@@ -477,11 +477,13 @@ if [ "$SIMPLE_MODEL" = true ]; then
         if [ "$NO_FA" = "true" ]; then
             echo "[DEBUG] (without Flash Attention), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
             echo "[DEBUG] Prompt content: '$prompt'" | tee -a "$test_log"
+            echo "[DEBUG] Command: CUDA_VISIBLE_DEVICES=0 \"${build_dir_bin}/llama-cli\" -m \"$full_model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p \"$prompt\" > \"$temp_output\" 2>&1" | tee -a "$test_log"
             CUDA_VISIBLE_DEVICES=0 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
             ret=$?
         else
             echo "[DEBUG] (with Flash Attention), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
             echo "[DEBUG] Prompt content: '$prompt'" | tee -a "$test_log"
+            echo "[DEBUG] Command: CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 \"${build_dir_bin}/llama-cli\" -m \"$full_model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p \"$prompt\" > \"$temp_output\" 2>&1" | tee -a "$test_log"
             CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
             ret=$?
         fi
@@ -1358,7 +1360,7 @@ for test_case in "${test_cases[@]}"; do
 
         # Check if this is test-backend-ops and add GGML_CUDA_DISABLE_GRAPHS=1
         if [[ "$test_case" == *"test-backend-ops"* ]]; then
-            test_case_with_env="GGML_CUDA_DISABLE_GRAPHS=1 $test_case"
+            test_case_with_env="GGML_TEST_MODE=1 GGML_CUDA_DISABLE_GRAPHS=1 $test_case"
         else
             test_case_with_env="$test_case"
         fi

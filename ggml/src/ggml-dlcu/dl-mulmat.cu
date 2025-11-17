@@ -744,20 +744,22 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
     GGML_DL_MULMAT_DEBUG_PRINT("ggml_cuda_mul_mat_dlblas: using DLBLAS backend (dst=%s, src0=%s, src1=%s)\n",
                                dst->name, src0->name, src1->name);
 
-    // In unit tests. TODO: Refactor : Others that do not go through llama_model::load_tensors are theoretically needed
-    static const bool is_test_mode = getenv("GGML_TEST_MODE") != nullptr;
     const int id = ggml_cuda_get_device();
     ggml_cuda_set_device(id);
-    if (is_test_mode) {
-        GGML_DL_MULMAT_DEBUG_PRINT("GGML_TEST_MODE=1, clearing weights and re-quantizing\n");
-        ggml_cuda_gptq_clear_weights();
-        const ggml_tensor * base = ggml_cuda_get_base_tensor(src0);
+    {
+        // In unit tests. TODO: Refactor : Others that do not go through llama_model::load_tensors are theoretically needed
+        static const bool is_test_mode = getenv("GGML_TEST_MODE") != nullptr;
+        if (is_test_mode) {
+            GGML_DL_MULMAT_DEBUG_PRINT("GGML_TEST_MODE=1, clearing weights and re-quantizing\n");
+            ggml_cuda_gptq_clear_weights();
+            const ggml_tensor * base = ggml_cuda_get_base_tensor(src0);
 
-        int bits = GGML_QUANT_BITS;
+            int bits = GGML_QUANT_BITS;
 
-        // quantize the base tensor anyway.
-        ggml_cuda_gptq_quantize_and_store(ctx, base->data, base, bits);
-        GGML_ASSERT(ggml_cuda_gptq_has_weight(base, id) && "DL: [GGML_TEST_MODE] ggml_cuda_gptq_quantize_and_store failed");
+            // quantize the base tensor anyway.
+            ggml_cuda_gptq_quantize_and_store(ctx, base->data, base, bits);
+            GGML_ASSERT(ggml_cuda_gptq_has_weight(base, id) && "DL: [GGML_TEST_MODE] ggml_cuda_gptq_quantize_and_store failed");
+        }
     }
 
     // DL: ensure weight tensor is available on this device
@@ -819,23 +821,15 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
     const bool dst_on_host = ggml_backend_buffer_is_host(dst->buffer);
     ggml_cuda_pool_alloc<float> dst_fp32_storage(ctx.pool(id));
     float * dst_device_fp32 = nullptr;
-    bool needs_write_back = true;
 
     if (!dst_on_host && dst->type == GGML_TYPE_F32) {
         dst_device_fp32 = (float *) dst->data;
-        needs_write_back = false;
     } else {
         dst_device_fp32 = dst_fp32_storage.alloc(ne_dst);
     }
 
     ggml_cuda_dlblas_gemmex(ctx, *gptq_weight, src1_ptr, src1_type, src0, src1, dst_device_fp32, GGML_TYPE_F32);
     CUDA_CHECK(cudaGetLastError());
-
-    // Write back results to destination tensor
-    if (!needs_write_back) {
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        return;
-    }
 
     if (dst->type == GGML_TYPE_F32) {
         size_t bytes = ne_dst * sizeof(float);
@@ -940,10 +934,13 @@ bool is_dlblas_available_simple(
     // check single batch (bugid: 16276)
     bool single_batch = src0->ne[2] * src0->ne[3] == 1 && src1->ne[2] * src1->ne[3] == 1;
     if (!single_batch) {
-        const char* env_debug = getenv("GGML_DEBUG_PATH_SELECTION");
-        if (env_debug) {
-            GGML_DL_MULMAT_DEBUG_PRINT("[DLBLAS_PATH_OVERRIDE] Not single batch, use original path\n");
-        }
+        GGML_DL_MULMAT_DEBUG_PRINT("[DLBLAS_PATH_OVERRIDE] Not single batch, use original path\n");
+        // GGML_DL_MULMAT_DEBUG_PRINT("src0: %8d %8d %8d %8d\n", src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3]);
+        // GGML_DL_MULMAT_DEBUG_PRINT("      %8d %8d %8d %8d\n", src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3]);
+        // GGML_DL_MULMAT_DEBUG_PRINT("src1: %8d %8d %8d %8d\n", src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3]);
+        // GGML_DL_MULMAT_DEBUG_PRINT("      %8d %8d %8d %8d\n", src1->nb[0], src1->nb[1], src1->nb[2], src1->nb[3]);
+        // GGML_DL_MULMAT_DEBUG_PRINT("src0 is contiguous %d, transposed %d, type = %s, name = %s\n", ggml_is_contiguous(src0), ggml_is_transposed(src0), ggml_type_name(src0->type), src0->name);
+        // GGML_DL_MULMAT_DEBUG_PRINT("src1 is contiguous %d, transposed %d, type = %s, name = %s\n", ggml_is_contiguous(src1), ggml_is_transposed(src1), ggml_type_name(src1->type), src1->name);
         return false;
     }
 
@@ -953,15 +950,16 @@ bool is_dlblas_available_simple(
     }
 
     const int device_id = ggml_cuda_get_device();
-    return ggml_cuda_gptq_has_weight(src0, device_id) || ggml_cuda_gptq_has_any_weight(src0);
+    bool has_weight = ggml_cuda_gptq_has_weight(src0, device_id);
+    bool has_any_weight =  ggml_cuda_gptq_has_any_weight(src0);
+    // GGML_DL_MULMAT_DEBUG_PRINT("has_weight: %d\n", has_weight);
+    // GGML_DL_MULMAT_DEBUG_PRINT("has_any_weight: %d\n", has_any_weight);
+    return has_weight || has_any_weight;
 }
 
 bool should_use_dlblas_path(
-    bool dlblas_available,
     bool use_mul_mat_vec,
     bool use_mul_mat_vec_q) {
-
-    if (!dlblas_available) return false;
 
     const char* env_force_dlblas_test = getenv("GGML_FORCE_DLBLAS_TEST");
     if (env_force_dlblas_test && env_force_dlblas_test[0] == '1') {
@@ -973,8 +971,7 @@ bool should_use_dlblas_path(
     bool use_consistent = (env_consistent && env_consistent[0] == '1');
 
     if (use_consistent) {
-        const char* env_debug = getenv("GGML_DEBUG_PATH_SELECTION");
-        if ((use_mul_mat_vec || use_mul_mat_vec_q) && env_debug) {
+        if (use_mul_mat_vec || use_mul_mat_vec_q) {
             GGML_DL_MULMAT_DEBUG_PRINT("[DLBLAS_PATH_OVERRIDE] Use dlblas for consistency\n");
         }
         return true;
@@ -982,6 +979,7 @@ bool should_use_dlblas_path(
 
     // bugid: 15564 - if not satisfy vec condition, use dlblas
     if (!(use_mul_mat_vec || use_mul_mat_vec_q)) {
+        GGML_DL_MULMAT_DEBUG_PRINT("[DLBLAS_PATH_OVERRIDE] Not satisfy vec condition, use dlblas path\n");
         return true;
     }
 

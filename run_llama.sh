@@ -1072,7 +1072,6 @@ run_tests() {
     log_info "Starting test execution (platform: $platform)"
 
     # Set test environment variables
-    export GGML_TEST_MODE=1
     export GGML_DEBUG=1
 
     # Platform-specific environment variables

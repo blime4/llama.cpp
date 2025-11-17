@@ -1435,7 +1435,7 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
 
     if (ok) {
         CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaDeviceSynchronize());
+        // CUDA_CHECK(cudaDeviceSynchronize());
     }
 }
 

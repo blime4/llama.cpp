@@ -70,7 +70,6 @@ bool is_dlblas_available_simple(
     bool split);
 
 bool should_use_dlblas_path(
-    bool dlblas_available,
     bool use_mul_mat_vec,
     bool use_mul_mat_vec_q);
 
