@@ -3,6 +3,7 @@
 #import "ggml-impl.h"
 #import "ggml-backend-impl.h"
 #import "ggml-metal-impl.h"
+#include "../ggml-dlpti-hooks.h"
 
 #import <Foundation/Foundation.h>
 

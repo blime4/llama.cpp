@@ -931,6 +931,17 @@ bool is_dlblas_available_simple(
         }
     }
 
+    // just for debug what some go dlblas is so slow. remove this later.
+    const char* only_one_layer_go_to_dlblas = getenv("GGML_ONLY_ONE_LAYER_GO_TO_DLBLAS");
+    if (only_one_layer_go_to_dlblas && only_one_layer_go_to_dlblas[0] == '1') {
+        if (strstr(src0->name, "blk.0.attn_k.weight") != nullptr) {
+            printf("for debug DL: [%s] %s, go dlblas path\n", __FUNCTION__, src0->name);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
     // check single batch (bugid: 16276)
     bool single_batch = src0->ne[2] * src0->ne[3] == 1 && src1->ne[2] * src1->ne[3] == 1;
     if (!single_batch) {

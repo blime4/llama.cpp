@@ -6,8 +6,8 @@
 // Minimal subset of DLPTI definitions required by ggml C sources without pulling
 // in the C++-only headers from the SDK.
 
-#define DLPTI_CB_DOMAIN_HC_API ((uint32_t)65)
-#define DLPTI_HC_CBID_PLATFORM_INIT ((uint32_t)1)
+#define DLPTI_CB_DOMAIN_RUNTIME_API ((uint32_t)2)
+#define DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord ((uint32_t)135)
 
 #ifndef GGML_DLPTI_SHARED_DATA_DEFINED
 #define GGML_DLPTI_SHARED_DATA_DEFINED

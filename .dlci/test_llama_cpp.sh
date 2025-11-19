@@ -477,14 +477,14 @@ if [ "$SIMPLE_MODEL" = true ]; then
         if [ "$NO_FA" = "true" ]; then
             echo "[DEBUG] (without Flash Attention), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
             echo "[DEBUG] Prompt content: '$prompt'" | tee -a "$test_log"
-            echo "[DEBUG] Command: CUDA_VISIBLE_DEVICES=0 \"${build_dir_bin}/llama-cli\" -m \"$full_model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p \"$prompt\" > \"$temp_output\" 2>&1" | tee -a "$test_log"
-            CUDA_VISIBLE_DEVICES=0 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
+            echo "[DEBUG] Command: CUDA_VISIBLE_DEVICES=0 \"${build_dir_bin}/llama-cli\" -m \"$full_model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p \"$prompt\" --no-warmup > \"$temp_output\" 2>&1" | tee -a "$test_log"
+            CUDA_VISIBLE_DEVICES=0 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" --no-warmup > "$temp_output" 2>&1
             ret=$?
         else
             echo "[DEBUG] (with Flash Attention), -ngl ${SIMPLE_MODEL_GPU_LAYERS}" | tee -a "$test_log"
             echo "[DEBUG] Prompt content: '$prompt'" | tee -a "$test_log"
-            echo "[DEBUG] Command: CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 \"${build_dir_bin}/llama-cli\" -m \"$full_model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p \"$prompt\" > \"$temp_output\" 2>&1" | tee -a "$test_log"
-            CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" > "$temp_output" 2>&1
+            echo "[DEBUG] Command: CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 \"${build_dir_bin}/llama-cli\" -m \"$full_model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p \"$prompt\" --no-warmup > \"$temp_output\" 2>&1" | tee -a "$test_log"
+            CUDA_VISIBLE_DEVICES=0 GGML_DLFA_READY=1 "${build_dir_bin}/llama-cli" -m "$full_model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -fa -ngl ${SIMPLE_MODEL_GPU_LAYERS} -p "$prompt" --no-warmup > "$temp_output" 2>&1
             ret=$?
         fi
 

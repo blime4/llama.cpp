@@ -7,8 +7,9 @@
 
 #ifdef DLPTI_ENABLED
 #ifdef __cplusplus
-#include <dlpti/dl/api_hc_defs.h>
 #include <dlpti/dl/hook.hpp>
+#define DLPTI_CB_DOMAIN_RUNTIME_API ((uint32_t)2)
+#define DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord ((uint32_t)135)
 #else
 #include "ggml-dlpti-compat.h"
 #endif
@@ -45,15 +46,35 @@ static inline const char * ggml_dlpti_get_op_name(const struct ggml_tensor * nod
 }
 #endif
 
-#if defined(__cplusplus) && defined(DLPTI_ENABLED)
+#if defined(__cplusplus) && defined(DLPTI_ENABLED) && \
+        defined(DLPTI_CPP_FUNCTION_TRACE_BEGIN_FUNC_NAME) && \
+        defined(DLPTI_CPP_FUNCTION_TRACE_END)
 #define GGML_DLPTI_TRACE_FUNCTION(func_literal)                                 \
     do {                                                                        \
         DLPTI_CPP_FUNCTION_TRACE_BEGIN_FUNC_NAME(                               \
-            DLPTI_CB_DOMAIN_HC_API,                                             \
-            DLPTI_HC_CBID_PLATFORM_INIT,                                        \
+            DLPTI_CB_DOMAIN_RUNTIME_API,                                        \
+            DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord,                           \
             func_literal,                                                       \
             void);                                                              \
         DLPTI_CPP_FUNCTION_TRACE_END();                                         \
+    } while (0)
+#elif defined(DLPTI_ENABLED)
+#define GGML_DLPTI_TRACE_FUNCTION(func_literal)                                                                 \
+    do {                                                                                                        \
+        DLPTI_SharedData __dlpti_shared_data = {0, 0};                                                          \
+        if (dlptiFunctionTraceEnabled(DLPTI_CB_DOMAIN_RUNTIME_API, DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord)) { \
+            dlptiFunctionEnter(DLPTI_CB_DOMAIN_RUNTIME_API,                                                     \
+                                DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord,                                       \
+                                func_literal,                                                                   \
+                                NULL,                                                                           \
+                                &__dlpti_shared_data);                                                          \
+        }                                                                                                       \
+        dlptiFunctionExit(DLPTI_CB_DOMAIN_RUNTIME_API,                                                          \
+                            DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord,                                           \
+                            func_literal,                                                                       \
+                            NULL,                                                                               \
+                            NULL,                                                                               \
+                            &__dlpti_shared_data);                                                              \
     } while (0)
 #else
 #define GGML_DLPTI_TRACE_FUNCTION(func_literal)                                 \
@@ -62,13 +83,15 @@ static inline const char * ggml_dlpti_get_op_name(const struct ggml_tensor * nod
     } while (0)
 #endif
 
-#if defined(__cplusplus) && defined(DLPTI_ENABLED)
+#if defined(__cplusplus) && defined(DLPTI_ENABLED) && \
+        defined(DLPTI_CPP_FUNCTION_TRACE_BEGIN_FUNC_NAME) && \
+        defined(DLPTI_CPP_FUNCTION_TRACE_END)
 #define GGML_DLPTI_TRACE_OPERATOR(node_, BODY)                                  \
     do {                                                                        \
         const char * __dlpti_func_name = ggml_dlpti_get_op_name((node_));       \
         DLPTI_CPP_FUNCTION_TRACE_BEGIN_FUNC_NAME(                               \
-            DLPTI_CB_DOMAIN_HC_API,                                             \
-            DLPTI_HC_CBID_PLATFORM_INIT,                                        \
+            DLPTI_CB_DOMAIN_RUNTIME_API,                                        \
+            DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord,                           \
             __dlpti_func_name,                                                  \
             void);                                                              \
         DLPTI_CPP_FUNCTION_TRACE_END();                                         \
@@ -77,28 +100,28 @@ static inline const char * ggml_dlpti_get_op_name(const struct ggml_tensor * nod
         } while (0);                                                            \
     } while (0)
 #elif defined(DLPTI_ENABLED)
-#define GGML_DLPTI_TRACE_OPERATOR(node_, BODY)                                  \
-    do {                                                                        \
-        const char * __dlpti_func_name = ggml_dlpti_get_op_name((node_));       \
-        DLPTI_SharedData __dlpti_shared_data = {0, 0};                          \
-        if (dlptiFunctionTraceEnabled(DLPTI_CB_DOMAIN_HC_API, DLPTI_HC_CBID_PLATFORM_INIT)) { \
-            dlptiFunctionEnter(DLPTI_CB_DOMAIN_HC_API,                          \
-                              DLPTI_HC_CBID_PLATFORM_INIT,                       \
-                              __dlpti_func_name,                                 \
-                              NULL,                                              \
-                              &__dlpti_shared_data);                             \
-        }                                                                       \
-        do {                                                                    \
-            BODY                                                                \
-        } while (0);                                                            \
-        if (dlptiFunctionTraceEnabled(DLPTI_CB_DOMAIN_HC_API, DLPTI_HC_CBID_PLATFORM_INIT)) { \
-            dlptiFunctionExit(DLPTI_CB_DOMAIN_HC_API,                           \
-                             DLPTI_HC_CBID_PLATFORM_INIT,                        \
-                             __dlpti_func_name,                                  \
-                             NULL,                                               \
-                             NULL,                                                \
-                             &__dlpti_shared_data);                               \
-        }                                                                       \
+#define GGML_DLPTI_TRACE_OPERATOR(node_, BODY)                                                                  \
+    do {                                                                                                        \
+        const char * __dlpti_func_name = ggml_dlpti_get_op_name((node_));                                       \
+        DLPTI_SharedData __dlpti_shared_data = {0, 0};                                                          \
+        if (dlptiFunctionTraceEnabled(DLPTI_CB_DOMAIN_RUNTIME_API, DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord)) { \
+            dlptiFunctionEnter(DLPTI_CB_DOMAIN_RUNTIME_API,                                                     \
+                              DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord,                                         \
+                              __dlpti_func_name,                                                                \
+                              NULL,                                                                             \
+                              &__dlpti_shared_data);                                                            \
+        }                                                                                                       \
+        do {                                                                                                    \
+            BODY                                                                                                \
+        } while (0);                                                                                            \
+        if (dlptiFunctionTraceEnabled(DLPTI_CB_DOMAIN_RUNTIME_API, DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord)) { \
+            dlptiFunctionExit(DLPTI_CB_DOMAIN_RUNTIME_API,                                                      \
+                             DLPTI_RUNTIME_TRACE_CBID_cudaEventRecord,                                          \
+                             __dlpti_func_name,                                                                 \
+                             NULL,                                                                              \
+                             NULL,                                                                              \
+                             &__dlpti_shared_data);                                                             \
+        }                                                                                                       \
     } while (0)
 #else
 #define GGML_DLPTI_TRACE_OPERATOR(node_, BODY)                                  \
@@ -109,4 +132,3 @@ static inline const char * ggml_dlpti_get_op_name(const struct ggml_tensor * nod
 #endif
 
 #endif // GGML_DLPTI_HOOKS_H
-
