@@ -8539,6 +8539,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     }
 
     if (GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE) {
+    // Qwen3-VL-8B https://github.com/ggml-org/llama.cpp/issues/17012
+    test_cases.emplace_back(new test_flash_attn_ext(72, 72, 16, {1, 1}, 5776, 5776, false, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16));
+
     for (int kv : { 4096, 8192, 16384, }) {
         for (int hs : { 64, 128, }) {
             for (int nr : { 1, 4, }) {
