@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
@@ -896,3 +897,105 @@ struct ggml_backend_cuda_context {
         return pool(device);
     }
 };
+
+inline void ggml_debug_tensor(ggml_backend_cuda_context& ctx, const char* name, const void* tdata, ggml_type type) {
+#ifndef NDEBUG
+    auto stream = ctx.stream();
+    cudaStreamCaptureStatus is_capture = cudaStreamCaptureStatusNone;
+    CUDA_CHECK(cudaStreamIsCapturing(stream, &is_capture));
+    if (is_capture == cudaStreamCaptureStatusActive) {
+        // skip dump when in capture
+        return;
+    }
+    if (type == GGML_TYPE_I32) {
+        int data[8];
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(data, tdata, sizeof(data), cudaMemcpyDeviceToHost));
+        printf("%s: %d %d %d %d %d %d %d %d\n",
+            name, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+    } else if (type == GGML_TYPE_F32) {
+        float data[8];
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(data, tdata, sizeof(data), cudaMemcpyDeviceToHost));
+        printf("%s: %f %f %f %f %f %f %f %f\n",
+            name, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+    } else if (type == GGML_TYPE_F16) {
+        half data[8];
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(data, tdata, sizeof(data), cudaMemcpyDeviceToHost));
+        printf("%s: %f %f %f %f %f %f %f %f\n",
+            name,
+            static_cast<float>(data[0]),
+            static_cast<float>(data[1]),
+            static_cast<float>(data[2]),
+            static_cast<float>(data[3]),
+            static_cast<float>(data[4]),
+            static_cast<float>(data[5]),
+            static_cast<float>(data[6]),
+            static_cast<float>(data[7]));
+    } else {
+        printf("%s: unsupported type %s\n", name, ggml_type_name(type));
+    }
+#endif
+}
+
+inline void ggml_debug_tensor(ggml_backend_cuda_context& ctx, const ggml_tensor * tensor) {
+#ifndef NDEBUG
+    ggml_debug_tensor(ctx, tensor->name, tensor->data, tensor->type);
+#endif
+}
+
+inline void ggml_dump_tensor(ggml_backend_cuda_context& ctx, const ggml_tensor * tensor) {
+#ifndef NDEBUG
+    auto stream = ctx.stream();
+    cudaStreamCaptureStatus is_capture = cudaStreamCaptureStatusNone;
+    CUDA_CHECK(cudaStreamIsCapturing(stream, &is_capture));
+    if (is_capture == cudaStreamCaptureStatusActive) {
+        // skip dump when in capture
+        return;
+    }
+    static std::unordered_map<std::string, int> dump_count;
+    std::string name = tensor->name;
+    if (dump_count.find(name) == dump_count.end()) {
+        dump_count[name] = 0;
+    } else {
+        dump_count[name]++;
+    }
+    std::string file_name = name + "_" + std::to_string(dump_count[name]) + ".txt";
+    FILE * fp = fopen(file_name.c_str(), "w");
+    fprintf(fp, "%s:%s %d %d %d %d\n",
+        tensor->name,
+        ggml_type_name(tensor->type),
+        tensor->ne[0],
+        tensor->ne[1],
+        tensor->ne[2],
+        tensor->ne[3]);
+    if (tensor->type == GGML_TYPE_I32) {
+        std::vector<int> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < data.size(); i++) {
+            fprintf(fp, "%d %d\n", i, data[i]);
+        }
+        fclose(fp);
+    } else if (tensor->type == GGML_TYPE_F32) { 
+        std::vector<float> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < data.size(); i++) {
+            fprintf(fp, "%d %f\n", i, data[i]);
+        }
+        fclose(fp);
+    } else if (tensor->type == GGML_TYPE_F16) {
+        std::vector<half> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
+        for (int i = 0; i < data.size(); i++) {
+            fprintf(fp, "%d %f\n", i, static_cast<float>(data[i]));
+        }
+        fclose(fp);
+    } else {
+        printf("%s: unsupported type %s\n", tensor->name, ggml_type_name(tensor->type));
+    }
+#endif
+}
