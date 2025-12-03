@@ -49,7 +49,7 @@ else
     SDK_TAG_TRANSFORMED="${SDK_TAG:-unknown}"
 fi
 
-RELEASE_NAME="llama-${CI_COMMIT_TAG:-dev}-${SDK_TAG_TRANSFORMED}-bin-${PLATFORM_SUFFIX}.zip"
+RELEASE_NAME="llama-${CI_COMMIT_TAG:-dev}-${SDK_TAG_TRANSFORMED}-bin-${PLATFORM_SUFFIX}.tar.gz"
 
 # Upload the package
 if [ -f "${REPO_PATH}/${RELEASE_NAME}" ]; then
