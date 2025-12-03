@@ -1084,12 +1084,7 @@ add_qwen_model_tests() {
     )
 
     local qwen3_models=(
-        # DL-TODO : FIXME, will core dump. operation not supported on global/shared address space
-        # if [ "${ARCH}" = "loongarch64" ] || [ "${ARCH}" = "aarch64" ]; then
-        #     echo "[WARN] Skipping Qwen3-30B-A3B-Q4_K_M model on ${ARCH} platform, cause it will core dump." | tee -a "$summary_log"
-        # else
-        #     "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf"
-        # fi
+        "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf"
     )
 
     qwen_model_tests=()
@@ -1183,14 +1178,26 @@ validate_qwen_output() {
         echo "[INFO] Using ngl=20 for Qwen3 model: $model_name"
     fi
 
-    export DLEOL_DISABLE_CU_MATMUL=1     # DL TODO file a bug.
+    export DLEOL_DISABLE_CU_MATMUL=1     # DL TODO file a bug. | when use CUDA GRAPH
 
-    "${build_dir_bin}/llama-cli" -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p "$prompt" > "$output_file" 2>&1
+    # Print command before executing for easier debugging
+    echo "[INFO] Executing command: ${build_dir_bin}/llama-cli -m \"$model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p \"$prompt\""
+
+    "${build_dir_bin}/llama-cli" -m "$model_path" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p "$prompt" 2>&1 | tee "$output_file"
     local cmd_result=$?
     if [ $cmd_result -ne 0 ]; then
         echo "[FAIL] llama-cli command failed with exit code $cmd_result"
         echo "[DEBUG] Command output:" >> "$test_log"
         cat "$output_file" >> "$test_log"
+
+        # Try to capture crash information from system logs when core dump occurs
+        if command -v dmesg >/dev/null 2>&1; then
+            echo "[DEBUG] Recent kernel messages (possible crash info):" >> "$test_log"
+            dmesg | tail -n 100 >> "$test_log" 2>&1 || true
+        else
+            echo "[DEBUG] 'dmesg' command not available; cannot capture kernel crash messages." >> "$test_log"
+        fi
+
         safe_rm -f "$output_file"
         return 1
     fi

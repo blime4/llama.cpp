@@ -145,13 +145,37 @@ download_sdk_archive() {
         return 1
     fi
 
-    echo "[INFO] SDK archive downloaded successfully"
+    # Verify that files were actually downloaded
+    local downloaded_files=""
+    if [[ "$download_pattern" == *"*"* ]]; then
+        # Pattern-based filename - check if any files match
+        downloaded_files=$(ls $download_pattern 2>/dev/null)
+        if [[ -z "$downloaded_files" ]]; then
+            echo "[ERROR] Download command succeeded but no files were downloaded" >&2
+            echo "[ERROR] No file found matching pattern: $download_pattern" >&2
+            echo "[INFO] This may indicate:" >&2
+            echo "[INFO]   1. The SDK archive does not exist for tag: $sdk_tag" >&2
+            echo "[INFO]   2. The filename pattern does not match any files in the repository" >&2
+            echo "[INFO]   3. Check if the SDK tag exists: jf rt search $repository/$sdk_tag/" >&2
+            return 1
+        fi
+    else
+        # Exact filename
+        if [[ ! -f "$download_pattern" ]]; then
+            echo "[ERROR] Download command succeeded but file was not found: $download_pattern" >&2
+            echo "[INFO] This may indicate the SDK archive does not exist for tag: $sdk_tag" >&2
+            return 1
+        fi
+        downloaded_files="$download_pattern"
+    fi
+
+    echo "[INFO] SDK archive downloaded successfully: $downloaded_files"
     return 0
 }
 
 # Download the SDK archive(s)
 if ! download_sdk_archive "$ARCH" "$REPOSITORY" "$DOWNLOAD_PATTERN" "$SDK_TAG"; then
-    echo "[ERROR] Failed to download x86 SDK archive"
+    echo "[ERROR] Failed to download SDK archive for platform: $ARCH"
     exit 1
 fi
 
@@ -238,7 +262,7 @@ extract_sdk_archive() {
 
 # Extract the SDK archive(s)
 if ! extract_sdk_archive "$ARCH" "$EXTRACT_DIR" "$DOWNLOAD_PATTERN"; then
-    echo "[ERROR] Failed to extract x86 SDK archive"
+    echo "[ERROR] Failed to extract SDK archive for platform: $ARCH"
     exit 1
 fi
 

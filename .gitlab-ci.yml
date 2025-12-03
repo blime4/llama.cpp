@@ -7,6 +7,28 @@ variables:
   # SDK_TAG, LOCAL_MODEL_PATH and Docker images - now managed by unified config in .dlci/config.yml
   # These variables are set by the utils.sh script in each job
 
+workflow:
+  # Requirements:
+  # 1. Direct push to main: needs to run the full pipeline;
+  # 2. MR (Merge Request) event: needs to run the full pipeline;
+  # 3. After MR merge success, the automatic "Merge branch 'xxx' into 'main'" commit generated when merging into main should NOT trigger another pipeline.
+  #
+  # In GitLab, when merging an MR into a protected branch, the default merge commit message is like:
+  #   "Merge branch 'feature-x' into 'main'"
+  # Here, by matching CI_COMMIT_MESSAGE with a regex and using workflow: rules,
+  # we completely skip creating a pipeline for those merge commits into dl-main.
+  rules:
+    # For merge commits automatically generated when merging MR into dl-main (commit message starts with "Merge branch")
+    # Do not create a pipeline in this case
+    - if: '$CI_COMMIT_BRANCH == "dl-main" && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_MESSAGE =~ /^Merge branch/'
+      when: never
+    # For all other cases (including:
+    # - regular pushes to dl-main
+    # - pushes to any feature branch
+    # - pipelines triggered by merge_request_event
+    # ), create pipelines as normal
+    - when: always
+
 .docker_envs: &docker_envs |
   DOCKER_ENVS=()
   while IFS='=' read -r key value; do
@@ -34,6 +56,12 @@ compile_and_test_llama_cpp_x86_64:
     DOCKER_PLATFORM: x86_64
   tags:
     - build-x86_64
+  rules:
+    # For pipelines triggered by release tags (e.g. dl-release-*), do not rerun the compile_and_test_llama_cpp stage
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+      when: never
+    # For all other cases, run as normal
+    - when: on_success
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
@@ -56,6 +84,10 @@ compile_and_test_llama_cpp_aarch64:
     DOCKER_PLATFORM: aarch64
   tags:
     - build-arm64
+  rules:
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+      when: never
+    - when: on_success
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
@@ -78,6 +110,10 @@ compile_and_test_llama_cpp_riscv64:
     DOCKER_PLATFORM: riscv64
   tags:
     - build-x86_64
+  rules:
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+      when: never
+    - when: on_success
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
@@ -101,6 +137,10 @@ compile_and_test_llama_cpp_loongarch64:
     DOCKER_PLATFORM: loongarch64
   tags:
     - build-loongarch64
+  rules:
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+      when: never
+    - when: on_success
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
@@ -123,6 +163,10 @@ compile_and_test_llama_cpp_android:
     DOCKER_PLATFORM: android
   tags:
     - build-x86_64  # Android cross-compilation uses x86_64 builder
+  rules:
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+      when: never
+    - when: on_success
   script:
     - *load_unified_config
     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"

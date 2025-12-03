@@ -326,7 +326,7 @@ else
     exec docker run --rm -it                                   \
         --runtime=dlrt -e DENGLIN_DEVICES=all                  \
         -v "$(pwd):/workspace"                                 \
-        -v "${SDK_DIR}:/SDK_DIR"                             \
+        -v "${SDK_DIR}:/SDK_DIR"                               \
         -v "$(get_model_path):/models"                         \
         -w /workspace                                          \
         -v "${build_dir}:/workspace/build"                     \

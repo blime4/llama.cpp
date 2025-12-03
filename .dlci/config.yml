@@ -35,30 +35,30 @@ build:
     # SDK download configuration
     download:
       x86_64:
-        repository: "sw-master-sdk-MR"
+        repository: "sw-master-sdk-MR/v2/test"
         filename_pattern: "*manylinux_2_28-x86_64-test.tar.xz"
         extract_dir: "sdk"
       aarch64:
-        repository: "sw-master-sdk-MR"
+        repository: "sw-master-sdk-MR/v2/test"
         filename_pattern: "*manylinux_2_28-aarch64-test.tar.xz"
         extract_dir: "sdk"
       riscv64:
-        repository: "sw-master-sdk-MR"
+        repository: "sw-master-sdk-MR/v2/test"
         filename_pattern: "*ubuntu24.04-riscv64-test.tar.xz"
         extract_dir: "sdk"
       loongarch64:
-        repository: "sw-master-sdk-MR"
+        repository: "sw-master-sdk-MR/v2/test"
         filename_pattern: "*manylinux_2_38-loongarch64-test.tar.xz"
         extract_dir: "sdk"
       android:
         # Android cross-compilation dual SDK configuration
         # x86 SDK for compilation, aarch64 SDK for linking
         x86_sdk:
-          repository: "sw-master-sdk-MR"
+          repository: "sw-master-sdk-MR/v2/test"
           filename_pattern: "*manylinux_2_28-x86_64-test.tar.xz"
           extract_dir: "sdk"
         aarch64_sdk:
-          repository: "sw-master-sdk-MR"
+          repository: "sw-master-sdk-MR/v2/test"
           filename_pattern: "*manylinux_2_28-aarch64-test.tar.xz"
           extract_dir: "sdk_aarch64"
 
@@ -94,3 +94,4 @@ utils:
   error_messages:
     unsupported_platform: "Unsupported DOCKER_PLATFORM: {platform}"
     supported_platforms_info: "Supported platforms: {platforms}"
+
