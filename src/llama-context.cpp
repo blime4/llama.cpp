@@ -8,6 +8,7 @@
 #include "llama-model.h"
 
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -1060,12 +1061,20 @@ int llama_context::decode(const llama_batch & batch_inp) {
             GGML_ASSERT(backend_res != nullptr);
             GGML_ASSERT(logits != nullptr);
 
+#ifdef GGML_USE_DLCU // DL-FP16
+            auto * logits_out = (decltype(t_logits->data)) (logits + n_outputs_prev * n_vocab);
+#else
             float * logits_out = logits + n_outputs_prev*n_vocab;
+#endif
 
             if (n_outputs) {
                 GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                 GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits_size);
+#ifdef GGML_USE_DLCU // DL-FP16
+                ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*ggml_element_size(t_logits));
+#else
                 ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+#endif
             }
         }
 
@@ -1079,12 +1088,20 @@ int llama_context::decode(const llama_batch & batch_inp) {
                     {
                         // extract token embeddings
                         GGML_ASSERT(embd != nullptr);
+#ifdef GGML_USE_DLCU // DL-FP16
+                        auto * embd_out = (decltype(t_embd->data)) (embd + n_outputs_prev*n_embd);
+#else
                         float * embd_out = embd + n_outputs_prev*n_embd;
+#endif
 
                         if (n_outputs) {
                             GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                             GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_size);
+#ifdef GGML_USE_DLCU // DL-FP16
+                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*ggml_element_size(t_embd));
+#else
                             ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*sizeof(float));
+#endif
                         }
                     } break;
                 case LLAMA_POOLING_TYPE_MEAN:
@@ -1099,7 +1116,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
                             const int32_t      seq_idx = ubatch.seq_idx[seq_id];
 
                             embd_seq_out[seq_id].resize(n_embd);
+#ifdef GGML_USE_DLCU // DL-FP16
+                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*ggml_element_size(t_embd), n_embd*ggml_element_size(t_embd));
+#else
                             ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
+#endif
                         }
                     } break;
                 case LLAMA_POOLING_TYPE_RANK:
@@ -1114,7 +1135,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
                             const int32_t      seq_idx = ubatch.seq_idx[seq_id];
 
                             embd_seq_out[seq_id].resize(n_cls_out);
+#ifdef GGML_USE_DLCU // DL-FP16
+                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*ggml_element_size(t_embd), n_cls_out*ggml_element_size(t_embd));
+#else
                             ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
+#endif
                         }
                     } break;
                 case LLAMA_POOLING_TYPE_UNSPECIFIED:

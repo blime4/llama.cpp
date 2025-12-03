@@ -1,7 +1,9 @@
+#include <unistd.h>
+#include "ggml.h"
 #ifdef GGML_USE_DLFA
 
 #include "dl-fattn.cuh"
-#include "dl-fattn-golden.cuh"
+#include "../../../include/ggml-dlfa.h"
 #include "ggml-cuda.h"
 #include "ggml-impl.h"
 #include "../ggml-cuda/common.cuh"
@@ -34,281 +36,70 @@ inline float to_float<ggml_bf16_t>(const ggml_bf16_t& val) {
     return ggml_bf16_to_fp32(val);
 }
 
-// ============================================================================
-// CUDA Layout Reordering Kernels for Tensor Format Conversion
-// Physical data movement (not just logical permutation)
-// ============================================================================
-//
-// Performance Impact Analysis:
-// ---------------------------
-// These kernels perform PHYSICAL data reordering (not zero-cost view changes).
-// Each Flash Attention call requires multiple complete data copies:
-//
-// Data Flow:
-//   Original DSHB  ──[physical copy]──> BSHD temp  ──[cuDNN]──> BSHD output  ──[physical copy]──> DHSB result
-//   (Q tensor)         reorder_layout              MHA/SDP                       reorder_layout
-//                      ~4 MB                                                     ~4 MB
-//
-// Per Flash Attention Call (example: D=128, S=512, H=32, B=1):
-// ┌─────────────────────┬──────────────┬──────────────┐
-// │ Operation           │ Data Size    │ Cost Type    │
-// ├─────────────────────┼──────────────┼──────────────┤
-// │ Q: DSHB→BSHD        │ 4 MB (F16)   │ Physical Copy│
-// │ K: DSHB→BSHD        │ 4 MB (F16)   │ Physical Copy│
-// │ V: DSHB→BSHD        │ 4 MB (F16)   │ Physical Copy│
-// │ cuDNN Compute       │ -            │ GPU Compute  │
-// │ Output: BSHD→DHSB   │ 4 MB (F16)   │ Physical Copy│
-// │ Mask: conversion    │ ~1 MB (opt)  │ Physical Copy│
-// ├─────────────────────┼──────────────┼──────────────┤
-// │ TOTAL               │ ~17 MB       │ 5 Full Copies│
-// └─────────────────────┴──────────────┴──────────────┘
-//
-// Potential Optimization:
-// If cuDNN supported custom strides (via descriptor), we could eliminate all
-// physical copies and achieve zero-copy operation:
-//   Original DSHB ──[descriptor only]──> cuDNN ──[descriptor only]──> DHSB output
-//
-// Optimization Space: Eliminate ~17 MB data movement, potentially save 30-50% end-to-end latency
-//
-// ============================================================================
-
-template<typename T>
-static __global__ void reorder_layout_dshb_to_bshd_kernel(
-    const T* __restrict__ input,
-    T* __restrict__ output,
-    int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3
-) {
-    /* Physical data reordering: DSHB → BSHD
-     * Input:  [dim_0=D][dim_1=S][dim_2=H][dim_3=B]  (GGML format)
-     * Output: [dim_3=B][dim_1=S][dim_2=H][dim_0=D]  (cuDNN format)
-     */
-    const size_t total_elements = static_cast<size_t>(dim_0) * dim_1 * dim_2 * dim_3;
-    size_t idx = blockIdx.y * blockDim.y + threadIdx.y;
-    idx = idx * gridDim.x * blockDim.x + blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (idx >= total_elements) return;
-
-    // calculate original DSHB coordinates
-    const int i0 = idx % dim_0;
-    const int i1 = (idx / dim_0) % dim_1;
-    const int i2 = (idx / (dim_0 * dim_1)) % dim_2;
-    const int i3 = idx / (dim_0 * dim_1 * dim_2);
-
-    // calculate BSHD index (prevent overflow)
-    const size_t out_idx =
-        static_cast<size_t>(i3) * (dim_1 * dim_2 * dim_0) +
-        static_cast<size_t>(i1) * (dim_2 * dim_0) +
-        static_cast<size_t>(i2) * dim_0 +
-        i0;
-
-    // Copy element by element (no vectorization)
-    output[out_idx] = input[idx];
-}
-
-template<typename T>
-static __host__ void call_reorder_layout_dshb_to_bshd(
-    const void* input,
-    void* output,
-    int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3,
-    cudaStream_t stream = 0
-) {
-    if (dim_0 <= 0 || dim_1 <= 0 || dim_2 <= 0 || dim_3 <= 0) return;
-
-    // 2D thread block: Adapts to seq_len and batch_size
-    struct dim3 block_dim(16, 16);  // 256 threads
-    struct dim3 grid_dim(
-        (dim_1 + block_dim.x - 1) / block_dim.x,
-        (dim_3 + block_dim.y - 1) / block_dim.y
-    );
-
-    reorder_layout_dshb_to_bshd_kernel<T><<<grid_dim, block_dim, 0, stream>>>(
-        static_cast<const T*>(input),
-        static_cast<T*>(output),
-        dim_0, dim_1, dim_2, dim_3
-    );
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Kernel launch error: %s\n", cudaGetErrorString(err));
+// Debug helper: print first N elements from a device pointer if total elements > N
+static void debug_print_first_n_device(const void * dev_ptr,
+                                       int64_t total_elements,
+                                       int print_n,
+                                       enum ggml_type type,
+                                       const char * name) {
+    if (dev_ptr == nullptr || total_elements <= print_n) {
+        return;
     }
-}
-
-template<typename T>
-static __global__ void reorder_layout_bshd_to_dhsb_kernel(
-    const T* __restrict__ input,
-    T* __restrict__ output,
-    const int64_t dim_0,
-    const int64_t dim_1,
-    const int64_t dim_2,
-    const int64_t dim_3
-) {
-    /* Physical data reordering: BSHD → DHSB
-     * Input:  [dim_0=B][dim_1=S][dim_2=H][dim_3=D]  (cuDNN format)
-     * Output: [dim_3=D][dim_2=H][dim_1=S][dim_0=B]  (GGML format)
-     * This performs complete dimension reversal [0,1,2,3] → [3,2,1,0]
-     */
-    // 1D thread block: Adapts to dim_3
-    const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t total_elements = dim_0 * dim_1 * dim_2 * dim_3;
-
-    if (idx >= total_elements) return;
-
-    // Decompose input index [dim_0][dim_1][dim_2][dim_3]
-    const int64_t i3 = idx % dim_3;
-    const int64_t i2 = (idx / dim_3) % dim_2;
-    const int64_t i1 = (idx / (dim_3 * dim_2)) % dim_1;
-    const int64_t i0 = idx / (dim_3 * dim_2 * dim_1);
-
-    // Reorder: [i0, i1, i2, i3] -> [i3, i2, i1, i0]
-    const int64_t out_idx =
-        i3 * (dim_2 * dim_1 * dim_0) +
-        i2 * (dim_1 * dim_0) +
-        i1 * dim_0 +
-        i0;
-
-    // Physical copy: element by element (no vectorization)
-    output[out_idx] = input[idx];
-}
-
-template<typename T>
-static __host__ void call_reorder_layout_bshd_to_dhsb(
-    const void* input,
-    void* output,
-    int64_t dim_0,
-    int64_t dim_1,
-    int64_t dim_2,
-    int64_t dim_3,
-    cudaStream_t stream = 0
-) {
-    if (dim_0 <= 0 || dim_1 <= 0 || dim_2 <= 0 || dim_3 <= 0) return;
-
-    // 1D thread block: Adapts to dim_3
-    const int block_size = 256;  // fixed thread block size
-    const int64_t total_elements = dim_0 * dim_1 * dim_2 * dim_3;
-    const int grid_size = (total_elements + block_size - 1) / block_size;
-
-    reorder_layout_bshd_to_dhsb_kernel<T><<<grid_size, block_size, 0, stream>>>(
-        static_cast<const T*>(input),
-        static_cast<T*>(output),
-        dim_0, dim_1, dim_2, dim_3
-    );
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "Kernel launch error: %s\n", cudaGetErrorString(err));
+    // Validate pointer is device memory accessible from current device
+    cudaPointerAttributes attrs{};
+    cudaError_t attr_err = cudaPointerGetAttributes(&attrs, dev_ptr);
+    if (attr_err != cudaSuccess) {
+        printf("[DEBUG] %s: skip print - cudaPointerGetAttributes failed: %s\n",
+               name ? name : "tensor", cudaGetErrorString(attr_err));
+        return;
     }
-}
-
-// ============================================================================
-// cuDNN Handle Management
-// ============================================================================
-
-namespace {
-    // Thread-safe cache for cuDNN handles per device
-    std::unordered_map<int, cudnnHandle_t> handle_cache;
-    std::mutex handle_cache_mutex;
-
-    cudnnHandle_t get_cached_cudnn_handle(int device_id) {
-        std::lock_guard<std::mutex> lock(handle_cache_mutex);
-        auto it = handle_cache.find(device_id);
-        if (it != handle_cache.end()) {
-            return it->second;
-        }
-
-        cudnnHandle_t handle;
-        cudnnStatus_t status = cudnnCreate(&handle);
-        if (status != CUDNN_STATUS_SUCCESS) {
-            GGML_LOG_ERROR("Failed to create cuDNN handle for device %d: %s\n",
-                          device_id, cudnnGetErrorString(status));
-            return nullptr;
-        }
-
-        handle_cache[device_id] = handle;
-        return handle;
+#if CUDART_VERSION >= 10000
+    const bool is_dev_mem = (attrs.type == cudaMemoryTypeDevice);
+    const int dev_attr = attrs.device;
+#else
+    const bool is_dev_mem = (attrs.memoryType == cudaMemoryTypeDevice);
+    const int dev_attr = attrs.device;
+#endif
+    int cur_dev = -1;
+    cudaGetDevice(&cur_dev);
+    if (!is_dev_mem || cur_dev != dev_attr) {
+        printf("[DEBUG] %s: skip print - pointer not device memory on current device (cur=%d, ptr_dev=%d)\n",
+               name ? name : "tensor", cur_dev, dev_attr);
+        return;
     }
-
-    void destroy_cudnn_handles() {
-        std::lock_guard<std::mutex> lock(handle_cache_mutex);
-        GGML_LOG_DEBUG("Destroying %zu cuDNN handles\n", handle_cache.size());
-        for (auto& pair : handle_cache) {
-            if (pair.second != nullptr) {
-                GGML_LOG_DEBUG("Destroying cuDNN handle for device %d\n", pair.first);
-
-                // Additional safety check: verify handle address is reasonable
-                if ((uintptr_t)pair.second < 0x10000 || (uintptr_t)pair.second > 0xFFFFFFFFFFFFFFFFULL) {
-                    GGML_LOG_WARN("cuDNN handle for device %d has suspicious address: %p, skipping\n",
-                                 pair.first, pair.second);
-                    continue;
-                }
-
-                // Try to destroy the handle
-                cudnnStatus_t status = cudnnDestroy(pair.second);
-                if (status != CUDNN_STATUS_SUCCESS) {
-                    GGML_LOG_WARN("Failed to destroy cuDNN handle for device %d: %s\n",
-                                 pair.first, cudnnGetErrorString(status));
-                } else {
-                    GGML_LOG_DEBUG("Successfully destroyed cuDNN handle for device %d\n", pair.first);
-                }
-            } else {
-                GGML_LOG_WARN("cuDNN handle for device %d is null\n", pair.first);
+    const size_t elem_size = ggml_type_size(type);
+    const size_t copy_bytes = (size_t) print_n * elem_size;
+    std::vector<uint8_t> host_buf(copy_bytes);
+    cudaError_t cerr = cudaMemcpy(host_buf.data(), dev_ptr, copy_bytes, cudaMemcpyDeviceToHost);
+    if (cerr != cudaSuccess) {
+        printf("[DEBUG] %s: cudaMemcpy failed: %s\n", name ? name : "tensor", cudaGetErrorString(cerr));
+        return;
+    }
+    printf("[%s] first %d elements:", name ? name : "tensor", print_n);
+    switch (type) {
+        case GGML_TYPE_F32: {
+            const float * data = reinterpret_cast<const float *>(host_buf.data());
+            for (int i = 0; i < print_n; ++i) {
+                printf(" %.6f", data[i]);
             }
-        }
-        handle_cache.clear();
-        GGML_LOG_DEBUG("cuDNN handle cleanup completed\n");
+        } break;
+        case GGML_TYPE_F16: {
+            const ggml_fp16_t * data = reinterpret_cast<const ggml_fp16_t *>(host_buf.data());
+            for (int i = 0; i < print_n; ++i) {
+                printf(" %.6f", ggml_fp16_to_fp32(data[i]));
+            }
+        } break;
+        case GGML_TYPE_BF16: {
+            const ggml_bf16_t * data = reinterpret_cast<const ggml_bf16_t *>(host_buf.data());
+            for (int i = 0; i < print_n; ++i) {
+                printf(" %.6f", ggml_bf16_to_fp32(data[i]));
+            }
+        } break;
+        default:
+            printf(" (printing not implemented for type %d)", (int) type);
+            break;
     }
-}
-
-// Cleanup function to be called at program exit
-static void cleanup_cudnn_handles() {
-    // Skip cuDNN cleanup entirely at program exit to prevent crashes
-    // The operating system will clean up resources automatically
-    GGML_LOG_DEBUG("Skipping cuDNN handle cleanup at program exit to prevent crashes\n");
-
-    // Just clear the cache without destroying handles
-    std::lock_guard<std::mutex> lock(handle_cache_mutex);
-    handle_cache.clear();
-}
-
-// Register cleanup function
-static int cleanup_registered = 0;
-static void register_cleanup() {
-    if (!cleanup_registered) {
-        std::atexit(cleanup_cudnn_handles);
-        cleanup_registered = 1;
-    }
-}
-
-#define CUDNN_CHECK(x) do { \
-    cudnnStatus_t status = (x); \
-    if (status != CUDNN_STATUS_SUCCESS) { \
-        GGML_LOG_ERROR("cuDNN error in %s\n  at %s:%d\n  %s (code: %d)\n  Failed call: %s\n", \
-                       __PRETTY_FUNCTION__, __FILE__, __LINE__, \
-                       cudnnGetErrorString(status), status, #x); \
-        GGML_ASSERT(false); \
-    } \
-} while(0)
-
-// Get cuDNN handle for current device
-static cudnnHandle_t getCudnnHandle() {
-    // Register cleanup function on first call
-    register_cleanup();
-
-    int device_id;
-    cudaError_t err = cudaGetDevice(&device_id);
-    if (err != cudaSuccess) {
-        GGML_LOG_ERROR("Failed to get current CUDA device: %s\n", cudaGetErrorString(err));
-        return nullptr;
-    }
-
-    cudnnHandle_t handle = get_cached_cudnn_handle(device_id);
-    if (handle == nullptr) {
-        return nullptr;
-    }
-
-    // Set the current CUDA stream
-    cudaStream_t stream = 0;
-    CUDNN_CHECK(cudnnSetStream(handle, stream));
-
-    return handle;
+    printf("\n");
 }
 
 // ============================================================================
@@ -326,6 +117,10 @@ static cudnnDataType_t ggml_type_to_cudnn_type(enum ggml_type type) {
     }
 }
 
+// ============================================================================
+// GGMLTensorDescriptor: Bridge between GGML and cuDNN tensor layouts
+// ============================================================================
+
 struct GGMLTensorDescriptor {
     cudnnTensorDescriptor_t desc;
 
@@ -337,39 +132,43 @@ struct GGMLTensorDescriptor {
         CUDNN_CHECK(cudnnDestroyTensorDescriptor(desc));
     }
 
-    void set_from_ggml_tensor(const struct ggml_tensor* tensor) const {
-        // adapt from SW/dl_gpgpu_alg/dlLibTest.git use cudnnSetTensorNdDescriptor to set Descriptor.
-        // BSHD format.
-        cudnnDataType_t data_type = ggml_type_to_cudnn_type(tensor->type);
-        int dims[4] = {(int)tensor->ne[3], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[0]};
-        // [batch, seq_len, heads, head_dim]
-        int strides[4] = {
-            (int)(tensor->nb[3] / sizeof(data_type)),  // batch stride
-            (int)(tensor->nb[1] / sizeof(data_type)),  // seq stride
-            (int)(tensor->nb[2] / sizeof(data_type)),  // head stride
-            (int)(tensor->nb[0] / sizeof(data_type))   // head_dim stride
+#if 0 // sdpa have problem.[1. output do support jumping stride. 2. mask do not support GQA.] do not use this.
+    void sdpa_set_from_ggml_qkv(const struct ggml_tensor* tensor, enum ggml_type target_type) const {
+        // 1. SDPA : Q/K/V Tensors (zero-copy mapping):
+        // --------------------------------------
+        // GGML format: ne[0]=D, ne[1]=S, ne[2]=H, ne[3]=B (row-major, D is innermost)
+        //   Physical offset (bytes): [d,s,h,b] = d*nb[0] + s*nb[1] + h*nb[2] + b*nb[3]
+        //   Strides: [1, nb[1]/nb[0], nb[2]/nb[0], nb[3]/nb[0]]
+        //
+        // cuDNN format: [B, H, S, D] (row-major, D is innermost)
+        //   Physical offset (bytes): [b,h,s,d] = b*nb[3] + h*nb[2] + s*nb[1] + d*nb[0]
+        //   Expected strides: [nb[3]/nb[0], nb[2]/nb[0], nb[1]/nb[0], 1]
+        //
+        cudnnDataType_t data_type = ggml_type_to_cudnn_type(target_type);
+
+        const int64_t D = tensor->ne[0];  // head_dim
+        const int64_t S = tensor->ne[1];  // seq_len
+        const int64_t H = tensor->ne[2];  // num_heads
+        const int64_t B = tensor->ne[3];  // batch_size
+
+        // cuDNN expects shape: [B, H, S, D]
+        int dims[4] = {
+            static_cast<int>(B),
+            static_cast<int>(H),
+            static_cast<int>(S),
+            static_cast<int>(D)
         };
 
-        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
-            desc,
-            data_type,
-            4,
-            dims,
-            strides
-        ));
-    }
-
-    void set_from_dims(int dim_0, int dim_1, int dim_2, int dim_3, enum ggml_type type) const {
-        // adapt from SW/dl_gpgpu_alg/dlLibTest.git use cudnnSetTensorNdDescriptor to set Descriptor.
-        // BSHD format.
-        cudnnDataType_t data_type = ggml_type_to_cudnn_type(type);
-        int dims[4] = {dim_0, dim_1, dim_2, dim_3};
         int strides[4] = {
-            dim_1 * dim_2 * dim_3,
-            dim_2 * dim_3,
-            dim_3,
+            static_cast<int>(tensor->nb[3]/tensor->nb[0]),
+            static_cast<int>(tensor->nb[2]/tensor->nb[0]),
+            static_cast<int>(tensor->nb[1]/tensor->nb[0]),
             1
         };
+
+        GGML_DL_FATTN_DEBUG_PRINT("GGMLTensorDescriptor: Q/K/V GGML [D=%ld,S=%ld,H=%ld,B=%ld] -> cuDNN dims=[%d,%d,%d,%d] strides=[%d,%d,%d,%d]\n",
+            D, S, H, B, dims[0], dims[1], dims[2], dims[3], strides[0], strides[1], strides[2], strides[3]);
+
         CUDNN_CHECK(cudnnSetTensorNdDescriptor(
             desc,
             data_type,
@@ -379,18 +178,215 @@ struct GGMLTensorDescriptor {
         ));
     }
 
+    void sdpa_set_from_ggml_output(const struct ggml_tensor* tensor, enum ggml_type target_type) const {
+        // 2. SDPA : Output O Tensor (zero-copy with special strides):
+        // -----------------------------------------------------
+        // GGML format: ne[0]=D, ne[1]=H, ne[2]=S, ne[3]=B (row-major, D is innermost)
+        //   Physical offset (bytes): [d,h,s,b] = d*nb[0] + h*nb[1] + s*nb[2] + b*nb[3]
+        //   Strides: [1, nb[1]/nb[0], nb[2]/nb[0], nb[3]/nb[0]]
+        //
+        // cuDNN format: [B, H, S, D] (same as Q/K/V output format)
+        //   Physical offset (bytes): [b,h,s,d] = b*nb[3] + h*nb[1] + s*nb[2] + d*nb[0]
+        //   Expected strides: [nb[3]/nb[0], nb[1]/nb[0], nb[2]/nb[0], 1]
+        //
+        cudnnDataType_t data_type = ggml_type_to_cudnn_type(target_type);
+        // IMPORTANT note: output is permute(0, 2, 1, 3)
+        const int64_t D = tensor->ne[0];  // head_dim
+        const int64_t H = tensor->ne[1];  // num_heads
+        const int64_t S = tensor->ne[2];  // seq_len
+        const int64_t B = tensor->ne[3];  // batch_size
+
+        // cuDNN expects shape: [B, H, S, D]
+        int dims[4] = {
+            static_cast<int>(B),
+            static_cast<int>(H),
+            static_cast<int>(S),
+            static_cast<int>(D)
+        };
+
+        int strides[4] = {
+            static_cast<int>(tensor->nb[3]/tensor->nb[0]),
+            static_cast<int>(tensor->nb[1]/tensor->nb[0]),
+            static_cast<int>(tensor->nb[2]/tensor->nb[0]),
+            1
+        };
+
+        GGML_DL_FATTN_DEBUG_PRINT("GGMLTensorDescriptor: OUTPUT GGML [D=%ld,H=%ld,S=%ld,B=%ld] -> cuDNN dims=[%d,%d,%d,%d] strides=[%d,%d,%d,%d]\n",
+            D, H, S, B, dims[0], dims[1], dims[2], dims[3], strides[0], strides[1], strides[2], strides[3]);
+
+        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
+            desc,
+            data_type,
+            4,
+            dims,
+            strides
+        ));
+    }
+
+    // DL : NOT FULLY VALIDATED YET. TODO: FULLY VALIDATE THIS.
+    void sdpa_set_from_ggml_mask(const struct ggml_tensor* tensor, enum ggml_type target_type, int64_t actual_sq) const {
+        // 3. SDPA : Output Mask Tensor (zero-copy with special strides):
+        // -------------------------------------------------------
+        // GGML format: ne[0]=Sk, ne[1]=Sq_pad, ne[2]=ne32, ne[3]=ne33 (row-major, Sk is innermost)
+        //   Physical offset (bytes): [sk,sq_pad,ne32,ne33] = sk*nb[0] + sq_pad*nb[1] + ne32*nb[2] + ne33*nb[3]
+        //   Strides: [1, nb[1]/nb[0], nb[2]/nb[0], nb[3]/nb[0]]
+        //
+        // cuDNN format: [B, H, Sq, Sk] (row-major, Sk is innermost)
+        //   Physical offset (bytes): [b,h,sq,sk] = b*nb[3] + h*nb[2] + sq*nb[1] + sk*nb[0]
+        //   Expected strides: [nb[3]/nb[0], nb[2]/nb[0], nb[1]/nb[0], 1]
+        //
+        // GGML mask format: [Sk, Sq_pad, ne32, ne33] (Sk innermost) | nowadays only support [Sk, Sq_pad, 1, 1] format.
+        // cuDNN expects: [B, H, Sq, Sk] (Sk innermost)              | [Sk, Sq_pad, 1, 1] --> [1, 1, Sq, Sk]
+        // q:    [n_embd_k, n_batch,     n_head,    ne3 ]            | [D, Sq, H, B]      --> [B, H, Sq, D]
+        // k:    [n_embd_k, n_kv,        n_head_kv, ne3 ]            | [D, Sk, H, B]      --> [B, H, Sk, D]
+        // v:    [n_embd_v, n_kv,        n_head_kv, ne3 ] !! not transposed !!
+        // mask: [n_kv,     n_batch_pad, ne32,      ne33] !! n_batch_pad = GGML_PAD(n_batch, GGML_KQ_MASK_PAD) !!
+        // res:  [n_embd_v, n_head,      n_batch,   ne3 ] !! permuted !!
+        //
+        // broadcast:
+        //   n_head % n_head_kv == 0
+        //   n_head % ne32      == 0
+        //   ne3    % ne33      == 0
+        //
+        cudnnDataType_t data_type = ggml_type_to_cudnn_type(target_type);
+
+        const int64_t Sk = tensor->ne[0];  // key_len
+        const int64_t Sq_pad = tensor->ne[1];  // seq_len_pad
+        const int64_t ne32 = tensor->ne[2];
+        const int64_t ne33 = tensor->ne[3];
+
+        // cuDNN expects shape: [B, H, S, D]
+        int dims[4] = {
+            static_cast<int>(ne33),
+            static_cast<int>(ne32),
+            static_cast<int>(actual_sq),
+            static_cast<int>(Sk)
+        };
+
+        int strides[4] = {
+            static_cast<int>(tensor->nb[3]/tensor->nb[0]),
+            static_cast<int>(tensor->nb[2]/tensor->nb[0]),
+            static_cast<int>(tensor->nb[1]/tensor->nb[0]),
+            1
+        };
+
+        GGML_DL_FATTN_DEBUG_PRINT("GGMLTensorDescriptor: MASK GGML [Sk=%ld,Sq_pad=%ld,ne32=%ld,ne33=%ld] -> cuDNN dims=[%d,%d,%d,%d] strides=[%d,%d,%d,%d]\n",
+            Sk, Sq_pad, ne32, ne33, dims[0], dims[1], dims[2], dims[3], strides[0], strides[1], strides[2], strides[3]);
+
+        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
+            desc,
+            data_type,
+            4,
+            dims,
+            strides
+        ));
+    }
+#endif
+
+    void mha_set_from_ggml_qkv(const struct ggml_tensor* tensor, enum ggml_type target_type) const {
+        // MHA : Q/K/V Tensors (zero-copy mapping for cudnnMHAForward):
+        // --------------------------------------
+        // GGML format: ne[0]=D, ne[1]=S, ne[2]=H, ne[3]=B (row-major, D is innermost)
+        //   Physical offset (bytes): [d,s,h,b] = d*nb[0] + s*nb[1] + h*nb[2] + b*nb[3]
+        //   Strides: [1, nb[1]/nb[0], nb[2]/nb[0], nb[3]/nb[0]]
+        //
+        // cuDNN MHA format: [B, S, H, D] (BSHD, row-major, D is innermost)
+        //   Physical offset (bytes): [b,s,h,d] = b*stride[0] + s*stride[1] + h*stride[2] + d*stride[3]
+        //   Mapping: b→nb[3], s→nb[1], h→nb[2], d→nb[0]
+        //   Expected strides: [nb[3]/nb[0], nb[1]/nb[0], nb[2]/nb[0], 1]
+        //
+        cudnnDataType_t data_type = ggml_type_to_cudnn_type(target_type);
+
+        const int64_t D = tensor->ne[0];  // head_dim
+        const int64_t S = tensor->ne[1];  // seq_len
+        const int64_t H = tensor->ne[2];  // num_heads
+        const int64_t B = tensor->ne[3];  // batch_size
+
+        // cuDNN MHA expects shape: [B, S, H, D] (BSHD format)
+        int dims[4] = {
+            static_cast<int>(B),
+            static_cast<int>(S),
+            static_cast<int>(H),
+            static_cast<int>(D)
+        };
+
+        int strides[4] = {
+            static_cast<int>(tensor->nb[3]/tensor->nb[0]),  // B stride
+            static_cast<int>(tensor->nb[1]/tensor->nb[0]),  // S stride
+            static_cast<int>(tensor->nb[2]/tensor->nb[0]),  // H stride
+            1                                               // D stride
+        };
+
+        GGML_DL_FATTN_DEBUG_PRINT("GGMLTensorDescriptor: MHA Q/K/V GGML [D=%ld,S=%ld,H=%ld,B=%ld] -> cuDNN BSHD dims=[%d,%d,%d,%d] strides=[%d,%d,%d,%d]\n",
+            D, S, H, B, dims[0], dims[1], dims[2], dims[3], strides[0], strides[1], strides[2], strides[3]);
+
+        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
+            desc,
+            data_type,
+            4,
+            dims,
+            strides
+        ));
+    }
+
+    void mha_set_from_ggml_output(const struct ggml_tensor* tensor, enum ggml_type target_type) const {
+        // MHA : Output O Tensor (zero-copy mapping for cudnnMHAForward):
+        // -----------------------------------------------------
+        // GGML format: ne[0]=D, ne[1]=H, ne[2]=S, ne[3]=B (row-major, D is innermost)
+        //   Physical offset (bytes): [d,h,s,b] = d*nb[0] + h*nb[1] + s*nb[2] + b*nb[3]
+        //   Strides: [1, nb[1]/nb[0], nb[2]/nb[0], nb[3]/nb[0]]
+        //
+        // cuDNN MHA format: [B, S, H, D] (BSHD, same as Q/K/V format)
+        //   Physical offset (bytes): [b,s,h,d] = b*stride[0] + s*stride[1] + h*stride[2] + d*stride[3]
+        //   Mapping: b→nb[3], s→nb[2], h→nb[1], d→nb[0]
+        //   Expected strides: [nb[3]/nb[0], nb[2]/nb[0], nb[1]/nb[0], 1]
+        //
+        cudnnDataType_t data_type = ggml_type_to_cudnn_type(target_type);
+
+        const int64_t D = tensor->ne[0];  // head_dim
+        const int64_t H = tensor->ne[1];  // num_heads
+        const int64_t S = tensor->ne[2];  // seq_len
+        const int64_t B = tensor->ne[3];  // batch_size
+
+        // cuDNN MHA expects shape: [B, S, H, D] (BSHD format)
+        int dims[4] = {
+            static_cast<int>(B),
+            static_cast<int>(S),
+            static_cast<int>(H),
+            static_cast<int>(D)
+        };
+
+        int strides[4] = {
+            static_cast<int>(tensor->nb[3]/tensor->nb[0]),  // B stride
+            static_cast<int>(tensor->nb[2]/tensor->nb[0]),  // S stride (from GGML dim 2)
+            static_cast<int>(tensor->nb[1]/tensor->nb[0]),  // H stride (from GGML dim 1)
+            1                                               // D stride
+        };
+
+        GGML_DL_FATTN_DEBUG_PRINT("GGMLTensorDescriptor: MHA OUTPUT GGML [D=%ld,H=%ld,S=%ld,B=%ld] -> cuDNN BSHD dims=[%d,%d,%d,%d] strides=[%d,%d,%d,%d]\n",
+            D, H, S, B, dims[0], dims[1], dims[2], dims[3], strides[0], strides[1], strides[2], strides[3]);
+
+        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
+            desc,
+            data_type,
+            4,
+            dims,
+            strides
+        ));
+    }
+
+    // DL : REMOVE LATER
+    // For ALiBi slopes: [batch_size, 1, num_heads]
     void set_from_dims_3d(int dim_0, int dim_1, int dim_2, enum ggml_type type) const {
-        // Set 3D tensor descriptor for ALiBi slopes: [batch_size, 1, num_heads]
         cudnnDataType_t data_type = ggml_type_to_cudnn_type(type);
         int dims[3] = {dim_0, dim_1, dim_2};
         int strides[3] = {
             dim_1 * dim_2,  // batch stride
-            dim_2,         // seq_len stride (should be 1 for ALiBi)
-            1             // num_heads stride
+            dim_2,          // seq_len stride (should be 1 for ALiBi)
+            1               // num_heads stride
         };
 
-        // For debugging: print the dimensions and strides
-        printf("Setting 3D descriptor: dims=[%d, %d, %d], strides=[%d, %d, %d]\n",
+        GGML_DL_FATTN_DEBUG_PRINT("Setting 3D descriptor: dims=[%d, %d, %d], strides=[%d, %d, %d]\n",
                       dims[0], dims[1], dims[2], strides[0], strides[1], strides[2]);
 
         CUDNN_CHECK(cudnnSetTensorNdDescriptor(
@@ -405,6 +401,37 @@ struct GGMLTensorDescriptor {
     cudnnTensorDescriptor_t get() const { return desc; }
 };
 
+struct dldnn_mha_qkvo_pack {
+    ggml_tensor * KQV;
+    const ggml_tensor * Q;
+    const ggml_tensor * K;
+    const ggml_tensor * V;
+    const void * q_data;
+    const void * k_data;
+    const void * v_data;
+    GGMLTensorDescriptor q_desc;
+    GGMLTensorDescriptor k_desc;
+    GGMLTensorDescriptor v_desc;
+    GGMLTensorDescriptor out_desc;
+
+    explicit dldnn_mha_qkvo_pack(ggml_tensor * dst)
+        : KQV(dst),
+          Q(dst->src[0]),
+          K(dst->src[1]),
+          V(dst->src[2]),
+          q_data(Q->data),
+          k_data(K->data),
+          v_data(V->data) {
+        q_desc.mha_set_from_ggml_qkv(Q, Q->type);
+        k_desc.mha_set_from_ggml_qkv(K, K->type);
+        v_desc.mha_set_from_ggml_qkv(V, V->type);
+        out_desc.mha_set_from_ggml_output(KQV, KQV->type);
+    }
+
+    dldnn_mha_qkvo_pack(const dldnn_mha_qkvo_pack &) = delete;
+    dldnn_mha_qkvo_pack & operator=(const dldnn_mha_qkvo_pack &) = delete;
+};
+
 // ============================================================================
 // ALiBi Slopes Helper
 // ============================================================================
@@ -412,13 +439,13 @@ struct GGMLTensorDescriptor {
 // Helper function to expand ALiBi slopes to 3D format for cuDNN
 // Similar to expandTo3D in flash-attention
 static void* expand_alibi_slopes_to_3d(
+    ggml_cuda_pool_alloc<float>& mem_pool,
     const struct ggml_tensor* mask,
     float max_bias,
     const uint32_t n_head,
     const uint32_t n_head_log2,
     const float m0,
     const float m1,
-    enum ggml_type target_type,
     cudaStream_t stream
 ) {
     if (mask == nullptr || max_bias <= 0.0f) {
@@ -447,7 +474,7 @@ static void* expand_alibi_slopes_to_3d(
     // Allocate GPU memory for slopes: just need n_head floats
     // The 3D format is handled by the descriptor, not the actual memory layout
     void* slopes_gpu = nullptr;
-    CUDA_CHECK(cudaMalloc(&slopes_gpu, slopes_size));
+    slopes_gpu = mem_pool.alloc(n_head);
 
     // Copy slopes to GPU
     CUDA_CHECK(cudaMemcpyAsync(slopes_gpu, slopes_cpu, slopes_size, cudaMemcpyHostToDevice, stream));
@@ -463,10 +490,13 @@ static void* expand_alibi_slopes_to_3d(
 // ============================================================================
 
 // MHA Forward implementation for ALiBi support
-static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING flash_attn_ext_dldnn_mha_forward ==========\n");
+static void flash_attn_ext_dldnn_mha_forward_for_alibi(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING %s ==========\n", __FUNCTION__);
 
-    bool ok = true;
+    const int id = ggml_cuda_get_device();
+    ggml_cuda_pool_alloc<float> alibi_slopes_mem(ctx.pool(id));
+    ggml_cuda_pool_alloc<uint8_t> workspace_mem(ctx.pool(id));
+
     const struct ggml_tensor * KQV  = dst;
     const struct ggml_tensor * Q    = dst->src[0];
     const struct ggml_tensor * K    = dst->src[1];
@@ -485,7 +515,8 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Current CUDA device: %d\n", device_id);
 
     // Check GPU memory status
-    size_t free_mem, total_mem;
+    size_t free_mem=0;
+    size_t total_mem=0;
     cuda_err = cudaMemGetInfo(&free_mem, &total_mem);
     if (cuda_err == cudaSuccess) {
         GGML_DL_FATTN_DEBUG_PRINT("DEBUG: GPU memory - Free: %.2f MB / Total: %.2f MB (%.1f%% free)\n",
@@ -494,156 +525,40 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                100.0 * free_mem / total_mem);
     }
 
-    cudnnHandle_t cudnn_handle = getCudnnHandle();
-    if (cudnn_handle == nullptr) {
-        GGML_LOG_ERROR("Failed to get cuDNN handle for MHA Forward\n");
-        return;
-    }
-
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cuDNN handle obtained successfully: %p\n", (void*)cudnn_handle);
+    cudnnHandle_t cudnn_handle = ctx.cudnn_handle();
+    CUDNN_CHECK(cudnnSetStream(cudnn_handle, ctx.stream()));
 
     // Get cuDNN version
     size_t cudnn_version = cudnnGetVersion();
     GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cuDNN version: %zu\n", cudnn_version);
 
-    // Determine target_type based on Q, K, V
-    enum ggml_type target_type = GGML_TYPE_F16; // Default to F16
-    if (Q->type == GGML_TYPE_F32 || K->type == GGML_TYPE_F32 || V->type == GGML_TYPE_F32) {
-        target_type = GGML_TYPE_F32;
-    } else if (Q->type == GGML_TYPE_BF16 || K->type == GGML_TYPE_BF16 || V->type == GGML_TYPE_BF16) {
-        target_type = GGML_TYPE_BF16;
-    }
-
     // Pointers to the actual data, either original or converted
-    const void* q_data_source = Q->data;
-    const void* k_data_source = K->data;
-    const void* v_data_source = V->data;
-
-    // Temporary buffers for converted Q, K, V data if needed
-    void* q_converted_gpu = nullptr;
-    void* k_converted_gpu = nullptr;
-    void* v_converted_gpu = nullptr;
-
-    // Convert Q to target_type if its type differs
-    if (Q->type != target_type) {
-        GGML_DL_FATTN_DEBUG_PRINT("Converting Q from %s to %s for DLDNN attention.\n", ggml_type_name(Q->type),
-        ggml_type_name(target_type));
-        size_t q_converted_size = Q->ne[0] * Q->ne[1] * Q->ne[2] * Q->ne[3] * ggml_type_size(target_type);
-        CUDA_CHECK(cudaMalloc(&q_converted_gpu, q_converted_size));
-        ggml_dl::convert_tensor_data(Q->data, q_converted_gpu, Q, target_type, ctx.stream());
-        q_data_source = q_converted_gpu;
-    }
-
-    // Convert K to target_type if its type differs
-    if (K->type != target_type) {
-        GGML_DL_FATTN_DEBUG_PRINT("Converting K from %s to %s for DLDNN attention.\n", ggml_type_name(K->type),
-        ggml_type_name(target_type));
-        size_t k_converted_size = K->ne[0] * K->ne[1] * K->ne[2] * K->ne[3] * ggml_type_size(target_type);
-        CUDA_CHECK(cudaMalloc(&k_converted_gpu, k_converted_size));
-        ggml_dl::convert_tensor_data(K->data, k_converted_gpu, K, target_type, ctx.stream());
-        k_data_source = k_converted_gpu;
-    }
-
-    // Convert V to target_type if its type differs
-    if (V->type != target_type) {
-        GGML_DL_FATTN_DEBUG_PRINT("Converting V from %s to %s for DLDNN attention.\n", ggml_type_name(V->type),
-        ggml_type_name(target_type));
-        size_t v_converted_size = V->ne[0] * V->ne[1] * V->ne[2] * V->ne[3] * ggml_type_size(target_type);
-        CUDA_CHECK(cudaMalloc(&v_converted_gpu, v_converted_size));
-        ggml_dl::convert_tensor_data(V->data, v_converted_gpu, V, target_type, ctx.stream());
-        v_data_source = v_converted_gpu;
-    }
+    const void* q_data = Q->data;
+    const void* k_data = K->data;
+    const void* v_data = V->data;
 
     GGMLTensorDescriptor q_desc = GGMLTensorDescriptor();
     GGMLTensorDescriptor k_desc = GGMLTensorDescriptor();
     GGMLTensorDescriptor v_desc = GGMLTensorDescriptor();
-    GGMLTensorDescriptor temp_out_desc = GGMLTensorDescriptor();
+    GGMLTensorDescriptor out_desc = GGMLTensorDescriptor();
     GGMLTensorDescriptor alibi_slopes_desc = GGMLTensorDescriptor();
 
-    // Convert Q, K, V data from DHSB to BSHD format for cuDNN
-    void* q_bshd = nullptr;
-    void* k_bshd = nullptr;
-    void* v_bshd = nullptr;
+    // Use zero-copy descriptors: directly map GGML format to cuDNN format via strides
+    // No physical data reordering needed
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Setting up zero-copy descriptors for MHA...\n");
 
-    // Allocate temporary buffers for BSHD format data, using target_type for size
-    size_t q_bshd_size = Q->ne[0] * Q->ne[1] * Q->ne[2] * Q->ne[3] * ggml_type_size(target_type);
-    size_t k_bshd_size = K->ne[0] * K->ne[1] * K->ne[2] * K->ne[3] * ggml_type_size(target_type);
-    size_t v_bshd_size = V->ne[0] * V->ne[1] * V->ne[2] * V->ne[3] * ggml_type_size(target_type);
+    // For Q/K/V: GGML [D,S,H,B] -> cuDNN [B,S,H,D] via stride mapping
+    // If type conversion occurred, converted data is contiguous, so use original tensor's stride
+    // (convert_tensor_data preserves layout, so stride should match)
+    q_desc.mha_set_from_ggml_qkv(Q, Q->type);
+    k_desc.mha_set_from_ggml_qkv(K, K->type);
+    v_desc.mha_set_from_ggml_qkv(V, V->type);
 
-    CUDA_CHECK(cudaMalloc(&q_bshd, q_bshd_size));
-    CUDA_CHECK(cudaMalloc(&k_bshd, k_bshd_size));
-    CUDA_CHECK(cudaMalloc(&v_bshd, v_bshd_size));
+    // For output: GGML [D,H,S,B] -> cuDNN [B,S,H,D] via stride mapping
+    // Directly write to final output tensor, no temporary buffer needed
+    out_desc.mha_set_from_ggml_output(KQV, KQV->type);
 
-    // Convert data from DSHB -> BSHD format using the correct source pointers and target_type
-    auto convert_to_bshd = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
-        switch (type) {
-            case GGML_TYPE_F16:
-                call_reorder_layout_dshb_to_bshd<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            case GGML_TYPE_F32:
-                call_reorder_layout_dshb_to_bshd<float>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            case GGML_TYPE_BF16:
-                call_reorder_layout_dshb_to_bshd<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            default:
-                // This case should ideally not be reached if type conversion is handled prior to this.
-                // If it is reached, it means an unsupported type made it through for data reordering.
-                GGML_LOG_ERROR("Unsupported data type %s for reorder_layout_dshb_to_bshd.\n", ggml_type_name(type));
-                return false;
-        }
-    };
-
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering Q layout to BSHD format...\n");
-    if (!convert_to_bshd(q_data_source, q_bshd, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to reorder Q data layout to BSHD format with type %s.\n", ggml_type_name(target_type));
-        ok = false;
-    }
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Q layout reordering completed.\n");
-
-    if (ok) {
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering K layout to BSHD format...\n");
-        if (!convert_to_bshd(k_data_source, k_bshd, K->ne[0], K->ne[1], K->ne[2], K->ne[3], target_type)) {
-            GGML_LOG_ERROR("Failed to reorder K data layout to BSHD format with type %s.\n", ggml_type_name(target_type));
-            ok = false;
-        }
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: K layout reordering completed.\n");
-    }
-
-    if (ok) {
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering V layout to BSHD format...\n");
-        if (!convert_to_bshd(v_data_source, v_bshd, V->ne[0], V->ne[1], V->ne[2], V->ne[3], target_type)) {
-            GGML_LOG_ERROR("Failed to reorder V data layout to BSHD format with type %s.\n", ggml_type_name(target_type));
-            ok = false;
-        }
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: V layout reordering completed.\n");
-    }
-
-    if (ok) {
-    // TODO : DLDNN impl this. return the DHSB format output directly.
-    // create temp_output tensor
-    // DLDNN expected format: BSHD
-    int64_t temp_ne[4] = {
-        Q->ne[3], // batch_size
-        Q->ne[1], // seq_len
-        Q->ne[2], // num_heads
-        V->ne[0], // head_dim
-    };
-
-    // allocate temp_output tensor on GPU using the determined target_type
-    void* temp_output = nullptr;
-    size_t temp_output_size = temp_ne[0] * temp_ne[1] * temp_ne[2] * temp_ne[3] * ggml_type_size(target_type);
-    CUDA_CHECK(cudaMalloc(&temp_output, temp_output_size));
-
-    // Use the determined target_type for descriptors
-    enum ggml_type data_type = target_type; // Use the determined target_type
-
-    // Set all descriptors to BSHD format for consistency
-    // BSHD: (batch_size, seq_len, num_heads, head_dim)
-    q_desc.set_from_dims(Q->ne[3], Q->ne[1], Q->ne[2], Q->ne[0], data_type);
-    k_desc.set_from_dims(K->ne[3], K->ne[1], K->ne[2], K->ne[0], data_type);
-    v_desc.set_from_dims(V->ne[3], V->ne[1], V->ne[2], V->ne[0], data_type);
-    temp_out_desc.set_from_dims(temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], data_type);
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Zero-copy descriptors created successfully.\n");
 
     // TODO : add more check
     // head_num % head_num_k == 0
@@ -671,7 +586,8 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
 
     void* alibi_slopes_ptr = expand_alibi_slopes_to_3d(
-        mask, max_bias, n_head, n_head_log2, m0, m1, target_type, ctx.stream()
+        alibi_slopes_mem,
+        mask, max_bias, n_head, n_head_log2, m0, m1, ctx.stream()
     );
 
 
@@ -690,7 +606,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     CUDNN_CHECK(cudnnGetMHAForwardWorkspaceSize(
         cudnn_handle, q_desc.get(), k_desc.get(), v_desc.get(),
         alibi_slopes_ptr != nullptr ? alibi_slopes_desc.get() : nullptr, // Pass nullptr if no ALiBi
-        temp_out_desc.get(), nullptr, nullptr,
+        out_desc.get(), nullptr, nullptr,
         0.0f, scale,
         false, -1, -1,
         false,
@@ -704,7 +620,7 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Allocating workspace memory: %zu bytes (%.2f MB)...\n",
                workspace_size, workspace_size / (1024.0 * 1024.0));
 
-        CUDA_CHECK(cudaMalloc(&workspace, workspace_size));
+        workspace = workspace_mem.alloc(workspace_size);
 
         GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Workspace allocated successfully at %p\n", workspace);
     } else {
@@ -732,19 +648,25 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     GGML_DL_FATTN_DEBUG_PRINT("  Has ALiBi: %s\n", alibi_slopes_ptr ? "yes" : "no");
     GGML_DL_FATTN_DEBUG_PRINT("Memory info:\n");
     GGML_DL_FATTN_DEBUG_PRINT("  Workspace size: %zu bytes (%.2f MB)\n", workspace_size, workspace_size / (1024.0 * 1024.0));
-    GGML_DL_FATTN_DEBUG_PRINT("  Data type: %s\n", ggml_type_name(target_type));
-    GGML_DL_FATTN_DEBUG_PRINT("GPU pointers:\n");
-    GGML_DL_FATTN_DEBUG_PRINT("  q_bshd=%p, k_bshd=%p, v_bshd=%p\n", q_bshd, k_bshd, v_bshd);
-    GGML_DL_FATTN_DEBUG_PRINT("  temp_output=%p, workspace=%p\n", temp_output, workspace);
+    GGML_DL_FATTN_DEBUG_PRINT("  Data type: %s\n", ggml_type_name(KQV->type));
+    GGML_DL_FATTN_DEBUG_PRINT("GPU pointers (zero-copy):\n");
+    GGML_DL_FATTN_DEBUG_PRINT("  q_data=%p (direct GGML [D,S,H,B] via strides)\n", q_data);
+    GGML_DL_FATTN_DEBUG_PRINT("  k_data=%p (direct GGML [D,S,H,B] via strides)\n", k_data);
+    GGML_DL_FATTN_DEBUG_PRINT("  v_data=%p (direct GGML [D,S,H,B] via strides)\n", v_data);
+    GGML_DL_FATTN_DEBUG_PRINT("  output=%p (direct GGML [D,H,S,B] via strides)\n", KQV->data);
+    GGML_DL_FATTN_DEBUG_PRINT("  workspace=%p\n", workspace);
     GGML_DL_FATTN_DEBUG_PRINT("  alibi_slopes=%p\n", alibi_slopes_ptr);
-    GGML_DL_FATTN_DEBUG_PRINT("\n>>> Calling cudnnMHAForward (this is the critical call)...\n");
+    GGML_DL_FATTN_DEBUG_PRINT("\n>>> Calling cudnnMHAForward (zero-copy mode)...\n");
 
+    // Call cuDNN MHA Forward with zero-copy pointers
+    // Q/K/V: GGML [D,S,H,B] read as cuDNN [B,S,H,D] (BSHD) via strides
+    // Output: cuDNN [B,S,H,D] (BSHD) written as GGML [D,H,S,B] via strides
     CUDNN_CHECK(cudnnMHAForward(
-        cudnn_handle, q_desc.get(), q_bshd,
-        k_desc.get(), k_bshd, v_desc.get(), v_bshd,
+        cudnn_handle, q_desc.get(), q_data,
+        k_desc.get(), k_data, v_desc.get(), v_data,
         alibi_slopes_ptr != nullptr ? alibi_slopes_desc.get() : nullptr,
         alibi_slopes_ptr, // This will be nullptr if no ALiBi
-        temp_out_desc.get(), temp_output,
+        out_desc.get(), KQV->data,  // Direct output to final tensor
         nullptr, nullptr,
         nullptr, nullptr,
         0.0f, scale,
@@ -754,232 +676,287 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         workspace, workspace_size
     ));
 
-    GGML_DL_FATTN_DEBUG_PRINT("cudnnMHAForward completed successfully.\n");
+    GGML_DL_FATTN_DEBUG_PRINT("cudnnMHAForward completed successfully (zero-copy mode).\n");
 
-    if (workspace != nullptr) {
-        CUDA_CHECK(cudaFree(workspace));
-    }
-
-    // Verify cudnnMHAForward output if requested
-    const char *env_verify_any = getenv("GGML_CUDNN_VERIFY_ANY_ATTENTION");
-    if (env_verify_any != nullptr && strcmp(env_verify_any, "1") == 0) {
-        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Verifying cudnnMHAForward output...\n");
-
-        // Copy data from GPU to CPU for verification
-        const int B = Q->ne[3];
-        const int H = Q->ne[2];
-        const int Sq = Q->ne[1];
-        const int Sk = K->ne[1];
-        const int D = Q->ne[0];
-
-        // Calculate sizes for output tensor
-        const size_t output_size = B * Sq * H * D * ggml_type_size(target_type);
-
-        // Debug info
-        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
-        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Memory sizes: output=%zu bytes\n", output_size);
-
-        // Allocate CPU buffer for output only
-        void* output_cpu = malloc(output_size);
-
-        if (output_cpu) {
-            // Copy MHA output from GPU to CPU (BSHD format from MHA)
-            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Copying MHA output (BSHD format)...\n");
-            CUDA_CHECK(cudaMemcpy(output_cpu, temp_output, output_size, cudaMemcpyDeviceToHost));
-
-            // Debug: MHA verification uses original Q, K, V data directly
-
-            // Debug: Print first few values from cudnn output (more details)
-            if (target_type == GGML_TYPE_F16) {
-                const ggml_fp16_t* cudnn_output_data = static_cast<const ggml_fp16_t*>(output_cpu);
-                GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: cuDNN MHA Output[0:10] = %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f, %.3f\n",
-                              to_float(cudnn_output_data[0]), to_float(cudnn_output_data[1]), to_float(cudnn_output_data[2]),
-                              to_float(cudnn_output_data[3]), to_float(cudnn_output_data[4]), to_float(cudnn_output_data[5]),
-                              to_float(cudnn_output_data[6]), to_float(cudnn_output_data[7]), to_float(cudnn_output_data[8]),
-                              to_float(cudnn_output_data[9]));
-
-                // Check if all values are the same (which would be very suspicious)
-                bool all_same = true;
-                float first_val = to_float(cudnn_output_data[0]);
-                for (int i = 1; i < std::min(128, (int)(output_size / sizeof(ggml_fp16_t))); i++) {
-                    if (std::abs(to_float(cudnn_output_data[i]) - first_val) > 1e-6) {
-                        all_same = false;
-                        break;
-                    }
-                }
-                GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: MHA output analysis - all_same=%s, first_val=%.3f\n",
-                              all_same ? "TRUE" : "FALSE", first_val);
-            }
-
-            // Run verification based on data type
-            bool verify_result = false;
-
-            // Copy GPU tensors to CPU for verification
-            const size_t q_nelements = B * H * Sq * D;
-            const size_t k_nelements = B * H * Sk * D;
-            const size_t v_nelements = B * H * Sk * D;
-
-            switch (target_type) {
-                case GGML_TYPE_F16: {
-                    std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
-                    std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
-                    std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
-
-                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
-
-                    verify_result = verify_attention_golden<ggml_fp16_t, ggml_fp16_t>(
-                        q_cpu_data.data(),
-                        k_cpu_data.data(),
-                        v_cpu_data.data(),
-                        nullptr, // No explicit mask for MHA (uses ALiBi or causal)
-                        static_cast<const ggml_fp16_t*>(output_cpu),
-                        B, H, Sq, Sk, D, scale, false // MHA is not causal (confirmed)
-                    );
-                    break;
-                }
-                case GGML_TYPE_F32: {
-                    std::vector<float> q_cpu_data(q_nelements);
-                    std::vector<float> k_cpu_data(k_nelements);
-                    std::vector<float> v_cpu_data(v_nelements);
-
-                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
-
-                    verify_result = verify_attention_golden<float, float>(
-                        q_cpu_data.data(),
-                        k_cpu_data.data(),
-                        v_cpu_data.data(),
-                        nullptr,
-                        static_cast<const float*>(output_cpu),
-                        B, H, Sq, Sk, D, scale, false // MHA is not causal (confirmed)
-                    );
-                    break;
-                }
-                case GGML_TYPE_BF16: {
-                    std::vector<ggml_bf16_t> q_cpu_data(q_nelements);
-                    std::vector<ggml_bf16_t> k_cpu_data(k_nelements);
-                    std::vector<ggml_bf16_t> v_cpu_data(v_nelements);
-
-                    CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
-
-                    verify_result = verify_attention_golden<ggml_bf16_t, ggml_bf16_t>(
-                        q_cpu_data.data(),
-                        k_cpu_data.data(),
-                        v_cpu_data.data(),
-                        nullptr,
-                        static_cast<const ggml_bf16_t*>(output_cpu),
-                        B, H, Sq, Sk, D, scale, false // MHA is not causal (confirmed)
-                    );
-                    break;
-                }
-                default:
-                    GGML_LOG_WARN("CUDNN_VERIFICATION: Unsupported data type for MHA verification\n");
-                    break;
-            }
-
-            if (verify_result) {
-                GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: cudnnMHAForward verification PASSED!\n");
-            } else {
-                GGML_LOG_ERROR("CUDNN_VERIFICATION: cudnnMHAForward verification FAILED!\n");
-                GGML_DL_FATTN_DEBUG_PRINT("MHA Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, has_alibi=%s\n",
-                             B, H, Sq, Sk, D, scale, (max_bias > 0.0f) ? "true" : "false");
-            }
-        } else {
-            GGML_LOG_ERROR("CUDNN_VERIFICATION: Failed to allocate CPU memory for MHA verification\n");
-        }
-
-        // Cleanup CPU buffer
-        if (output_cpu) free(output_cpu);
-    }
-
-    // Reorder temp_output layout to final KQV format (physical data movement)
-    // from BSHD - DLDNN output format
-    // to DHSB   - llama.cpp expected format
-
-    // Call layout reordering kernel according to data_type
-    auto convert_bhsd_to_dhsb = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
-        switch (type) {
-            case GGML_TYPE_F16:
-                call_reorder_layout_bshd_to_dhsb<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            case GGML_TYPE_F32:
-                call_reorder_layout_bshd_to_dhsb<float>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            case GGML_TYPE_BF16:
-                call_reorder_layout_bshd_to_dhsb<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            default:
-                return false;
-        }
-    };
-
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Reordering output layout from BSHD to DHSB format...\n");
-
-    if (!convert_bhsd_to_dhsb(temp_output, KQV->data, temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], data_type)) {
-        GGML_LOG_ERROR("Unsupported data type for layout reordering: %d\n", data_type);
-        // free temp_output
-        if (temp_output != nullptr) {
-            CUDA_CHECK(cudaFree(temp_output));
-        }
-        ok = false;
-    }
-
-    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Output layout reordering completed.\n");
-
-    if (ok) {
-        // check kernel execution
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Checking CUDA errors and synchronizing device...\n");
-
-        CUDA_CHECK(cudaGetLastError());
-
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: About to call cudaDeviceSynchronize()...\n");
-
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        GGML_DL_FATTN_DEBUG_PRINT("DEBUG: cudaDeviceSynchronize() completed successfully.\n");
-    }
-
-    // free temp_output
-    if (temp_output != nullptr) {
-        CUDA_CHECK(cudaFree(temp_output));
-    }
-
-    // Clean up temporary BSHD format data
-    if (q_bshd != nullptr) {
-        CUDA_CHECK(cudaFree(q_bshd));
-    }
-    if (k_bshd != nullptr) {
-        CUDA_CHECK(cudaFree(k_bshd));
-    }
-    if (v_bshd != nullptr) {
-        CUDA_CHECK(cudaFree(v_bshd));
-    }
-
-    // Clean up ALiBi slopes memory
-    if (alibi_slopes_ptr != nullptr) {
-        CUDA_CHECK(cudaFree(alibi_slopes_ptr));
-    }
-
-    if (q_converted_gpu != nullptr) {
-        CUDA_CHECK(cudaFree(q_converted_gpu));
-    }
-    if (k_converted_gpu != nullptr) {
-        CUDA_CHECK(cudaFree(k_converted_gpu));
-    }
-    if (v_converted_gpu != nullptr) {
-        CUDA_CHECK(cudaFree(v_converted_gpu));
-    }
-    }
+    // Check kernel execution
+    GGML_DL_FATTN_DEBUG_PRINT("DEBUG: Checking CUDA errors...\n");
+    CUDA_CHECK(cudaGetLastError());
 }
 
-// ScaledDotProductAttention implementation for mask support
+// MHA Forward implementation when mask semantic can use window/causal parameters
+static void flash_attn_ext_dldnn_mha_forward_for_mask(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING %s ==========\n", __FUNCTION__);
+
+    const int id = ggml_cuda_get_device();
+    ggml_cuda_pool_alloc<float> softmax_lse_mem(ctx.pool(id));
+    ggml_cuda_pool_alloc<uint8_t> workspace_mem(ctx.pool(id));
+
+    const ggml_tensor * mask = dst->src[3];
+    ggml_flash_attn_mask_params mask_info = {
+        /*.present          =*/ mask != nullptr,
+        /*.is_causal        =*/ false,
+        /*.window_left      =*/ -1,
+        /*.window_right     =*/ -1,
+        /*.per_token_window =*/ false,
+        /*.multi_sequence   =*/ false,
+        /*.has_alibi_bias   =*/ false,
+    };
+    ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
+
+    const char* env_dl_fattn_debug = getenv("GGML_DL_FATTN_DEBUG");
+    if (env_dl_fattn_debug != nullptr && strcmp(env_dl_fattn_debug, "1") == 0)
+    { // debug code.
+        const ggml_tensor * Q    = dst->src[0];
+        const ggml_tensor * K    = dst->src[1];
+        const ggml_tensor * V    = dst->src[2];
+
+        printf("Mask metadata summary:\n");
+        printf("  Q=[D:%ld,S:%ld,H:%ld,B:%ld] %s\n",
+            Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], ggml_type_name(Q->type));
+        printf("  K=[D:%ld,S:%ld,H:%ld,B:%ld] %s\n",
+            K->ne[0], K->ne[1], K->ne[2], K->ne[3], ggml_type_name(K->type));
+        printf("  V=[D:%ld,S:%ld,H:%ld,B:%ld] %s\n",
+            V->ne[0], V->ne[1], V->ne[2], V->ne[3], ggml_type_name(V->type));
+        printf("  Output=[D:%ld,H:%ld,S:%ld,B:%ld] %s\n",
+            dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3], ggml_type_name(dst->type));
+        if (mask) {
+            printf("  mask shape=[%ld,%ld,%ld,%ld] type=%s\n",
+                mask->ne[0], mask->ne[1], mask->ne[2], mask->ne[3], ggml_type_name(mask->type));
+        } else {
+            printf("  mask=nullptr\n");
+        }
+        printf("  meta: present=%d, causal=%d, window_left=%d, window_right=%d, per_token=%d, multi_seq=%d, has_alibi=%d\n",
+            mask_info.present ? 1 : 0,
+            mask_info.is_causal ? 1 : 0,
+            mask_info.window_left,
+            mask_info.window_right,
+            mask_info.per_token_window ? 1 : 0,
+            mask_info.multi_sequence ? 1 : 0,
+            mask_info.has_alibi_bias ? 1 : 0);
+
+        if (mask) {
+            const int64_t mask_sk = mask->ne[0];
+            const int64_t mask_sq_pad = mask->ne[1];
+            const int64_t max_rows = std::min<int64_t>(mask_sq_pad, (int64_t) 4);
+            const int64_t max_cols = std::min<int64_t>(mask_sk, (int64_t) 16);
+            const size_t elem_size = ggml_type_size(mask->type);
+            const size_t row_bytes = mask_sk * elem_size;
+            std::vector<uint8_t> row_buf(row_bytes);
+
+            printf("  mask preview (sq=%lld, sk=%lld):\n", (long long) mask_sq_pad, (long long) mask_sk);
+            for (int64_t r = 0; r < max_rows; ++r) {
+                printf("    row %lld:", (long long) r);
+                ggml_backend_tensor_get(mask, row_buf.data(), r * mask->nb[1], row_bytes);
+
+                for (int64_t c = 0; c < max_cols; ++c) {
+                    float val = 0.0f;
+                    switch (mask->type) {
+                        case GGML_TYPE_F32:
+                            val = reinterpret_cast<float *>(row_buf.data())[c];
+                            break;
+                        case GGML_TYPE_F16:
+                            val = ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[c]);
+                            break;
+                        case GGML_TYPE_BF16:
+                            val = ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[c]);
+                            break;
+                        default:
+                            val = to_float(reinterpret_cast<float *>(row_buf.data())[c]);
+                            break;
+                    }
+
+                    if (std::isinf(val) && val < 0) {
+                        printf("  -INF");
+                    } else {
+                        printf(" %6.2f", val);
+                    }
+                }
+                if (mask_sk > max_cols) {
+                    printf(" ...");
+                }
+                printf("\n");
+            }
+            if (mask_sq_pad > max_rows) {
+                printf("    ...\n");
+            }
+        }
+    }
+    const bool mask_supports_cudnn = mask_info.present && !mask_info.per_token_window && !mask_info.multi_sequence;
+    if (!mask_supports_cudnn || mask_info.has_alibi_bias) {
+        if (!mask_info.present) {
+            GGML_DL_FATTN_DEBUG_PRINT("INFO: mask metadata not present\n");
+        } else if (mask_info.per_token_window || mask_info.multi_sequence) {
+            GGML_DL_FATTN_DEBUG_PRINT(
+                "INFO: mask_metadata has unsupported configuration (per_token_window=%d, multi_sequence=%d)\n",
+                mask_info.per_token_window, mask_info.multi_sequence);
+        } else if (mask_info.has_alibi_bias) {
+            GGML_DL_FATTN_DEBUG_PRINT("INFO: mask_metadata->has_alibi_bias is true\n");
+        }
+    }
+
+    cudnnHandle_t cudnn_handle = ctx.cudnn_handle();
+    CUDNN_CHECK(cudnnSetStream(cudnn_handle, ctx.stream()));
+
+    dldnn_mha_qkvo_pack pack(dst);
+
+    const int64_t seq_q = pack.Q->ne[1];
+    const int64_t seq_k = pack.K->ne[1];
+
+    // Track the real (unpadded) key length during decode using the shared
+    // thread-local state so tests can reset it between runs.
+    int64_t & seq_k_real = ggml_dl::flash_attn_ext_dldnn_decode_state().seq_k_real;
+
+    GGMLTensorDescriptor k_desc_trunc;
+    GGMLTensorDescriptor v_desc_trunc;
+    const GGMLTensorDescriptor * k_desc_ptr = &pack.k_desc;
+    const GGMLTensorDescriptor * v_desc_ptr = &pack.v_desc;
+
+    // cauase seq_k(256) will padding [DSHB] --> BHSD
+    if (mask != nullptr) {
+        auto set_trunc_desc = [&](const ggml_tensor * tensor, GGMLTensorDescriptor & desc, int64_t trunc_seq_len) {
+            const int64_t clamped_seq = std::min<int64_t>(trunc_seq_len, tensor->ne[1]);
+            GGML_ASSERT(clamped_seq > 0);
+            int dims[4] = {
+                (int) tensor->ne[3],
+                (int) clamped_seq,
+                (int) tensor->ne[2],
+                (int) tensor->ne[0],
+            };
+            int strides[4] = {
+                (int) (tensor->nb[3]/tensor->nb[0]),
+                (int) (tensor->nb[1]/tensor->nb[0]),
+                (int) (tensor->nb[2]/tensor->nb[0]),
+                1,
+            };
+            CUDNN_CHECK(cudnnSetTensorNdDescriptor(
+                desc.get(),
+                ggml_type_to_cudnn_type(tensor->type),
+                4,
+                dims,
+                strides));
+        };
+
+        if (seq_q != 1) {
+            // Prefill: real key length matches the prompt length.
+            seq_k_real = std::min<int64_t>(seq_q, seq_k);
+            set_trunc_desc(pack.K, k_desc_trunc, seq_k_real);
+            set_trunc_desc(pack.V, v_desc_trunc, seq_k_real);
+            k_desc_ptr = &k_desc_trunc;
+            v_desc_ptr = &v_desc_trunc;
+        } else {
+            // Decode: grow the real key length one token at a time.
+            if (pack.K->ne[3] != 1) {
+                GGML_ABORT(
+                    "decode path currently supports batch=1 (got %lld); falling back to padded descriptors\n",
+                    (long long) pack.K->ne[3]);
+            } else {
+                if (seq_k_real <= 0 || seq_k_real > seq_k) {
+                    // First decode step or stale state (e.g. after reset). Start from current prompt len.
+                    seq_k_real = std::min<int64_t>(seq_q, seq_k);
+                }
+                const int64_t prev_seq_k_real = seq_k_real;
+                const int64_t new_seq_k_real = std::min<int64_t>(prev_seq_k_real + seq_q, seq_k);
+
+                set_trunc_desc(pack.K, k_desc_trunc, new_seq_k_real);
+                set_trunc_desc(pack.V, v_desc_trunc, new_seq_k_real);
+                k_desc_ptr = &k_desc_trunc;
+                v_desc_ptr = &v_desc_trunc;
+
+                seq_k_real = new_seq_k_real;
+                GGML_DL_FATTN_DEBUG_PRINT(
+                    "decode seq_k_real updated: prev=%lld new=%lld (max=%lld)\n",
+                    (long long) prev_seq_k_real,
+                    (long long) seq_k_real,
+                    (long long) seq_k);
+            }
+        }
+    }
+
+    float scale;
+    float max_bias;
+    float logit_softcap;
+    memcpy(&scale,         ((const int32_t *) dst->op_params) + 0, sizeof(scale));
+    memcpy(&max_bias,      ((const int32_t *) dst->op_params) + 1, sizeof(max_bias));
+    memcpy(&logit_softcap, ((const int32_t *) dst->op_params) + 2, sizeof(logit_softcap));
+    GGML_UNUSED(max_bias);
+    GGML_UNUSED(logit_softcap);
+
+    GGML_DL_FATTN_DEBUG_PRINT("calling cudnnGetMHAForwardWorkspaceSize...\n");
+    GGML_DL_FATTN_DEBUG_PRINT("INFO: params scale=%.6f max_bias=%.6f logit_softcap=%.6f\n", scale, max_bias, logit_softcap);
+    GGML_DL_FATTN_DEBUG_PRINT("INFO: is_causal=%d, window_left=%d, window_right=%d\n", mask_info.is_causal, mask_info.window_left, mask_info.window_right);
+
+    // cuDNN requires a tensor descriptor and storage for the softmax log-sum-exp output.
+    const int64_t batch = pack.Q->ne[3];
+    const int64_t n_heads = pack.Q->ne[2];
+    GGMLTensorDescriptor softmax_lse_desc;
+    {
+        int dims[3] = {
+            (int) batch,
+            (int) n_heads,
+            (int) seq_q,
+        };
+        int strides[3] = {
+            (int) (n_heads * seq_q),
+            (int) seq_q,
+            1,
+        };
+        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
+            softmax_lse_desc.get(),
+            CUDNN_DATA_FLOAT,
+            3,
+            dims,
+            strides));
+    }
+
+    float * softmax_lse = nullptr;
+    softmax_lse = softmax_lse_mem.alloc(batch * n_heads * seq_q);
+
+    size_t workspace_size = 0;
+    CUDNN_CHECK(cudnnGetMHAForwardWorkspaceSize(
+        cudnn_handle,
+        pack.q_desc.get(), k_desc_ptr->get(), v_desc_ptr->get(),
+        nullptr,
+        pack.out_desc.get(), softmax_lse_desc.get(), nullptr,
+        0.0f, scale,
+        mask_info.is_causal,
+        mask_info.window_left,
+        mask_info.window_right,
+        false,
+        &workspace_size));
+
+    void * workspace = nullptr;
+    if (workspace_size > 0) {
+        workspace = workspace_mem.alloc(workspace_size);
+    }
+
+    unsigned long long philox_seed = 0;
+    unsigned long long philox_offset = 0;
+
+    CUDNN_CHECK(cudnnMHAForward(
+        cudnn_handle,
+        pack.q_desc.get(), pack.q_data,
+        k_desc_ptr->get(), pack.k_data,
+        v_desc_ptr->get(), pack.v_data,
+        nullptr, nullptr,
+        pack.out_desc.get(), pack.KQV->data,
+        softmax_lse_desc.get(), softmax_lse,
+        nullptr, nullptr,
+        0.0f,
+        scale,
+        mask_info.is_causal,
+        mask_info.window_left,
+        mask_info.window_right,
+        false,
+        &philox_seed, &philox_offset,
+        workspace, workspace_size));
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
+#if 0 // sdpa have problem.[1. output do support jumping stride. 2. mask do not support GQA.] do not use this.
 static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING flash_attn_ext_dldnn_scaled_dot_product ==========\n");
+    GGML_UNUSED(ctx);
+    GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING %s ==========\n", __FUNCTION__);
     bool ok = true;
     const struct ggml_tensor * KQV  = dst;
     const struct ggml_tensor * Q    = dst->src[0];
@@ -987,11 +964,8 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
     const struct ggml_tensor * V    = dst->src[2];
     const struct ggml_tensor * mask = dst->src[3];
 
-    cudnnHandle_t cudnn_handle = getCudnnHandle();
-    if (cudnn_handle == nullptr) {
-        GGML_LOG_ERROR("Failed to get cuDNN handle for ScaledDotProductAttention\n");
-        return;
-    }
+    cudnnHandle_t cudnn_handle = ctx.cudnn_handle();
+    CUDNN_CHECK(cudnnSetStream(cudnn_handle, ctx.stream()));
 
     // Extract parameters
     float scale;
@@ -1001,705 +975,200 @@ static void flash_attn_ext_dldnn_scaled_dot_product(ggml_backend_cuda_context & 
     memcpy(&max_bias,      ((const int32_t *) dst->op_params) + 1, sizeof(max_bias));
     memcpy(&logit_softcap, ((const int32_t *) dst->op_params) + 2, sizeof(logit_softcap));
 
-    // Determine target_type based on Q, K, V
-    enum ggml_type target_type = GGML_TYPE_F16; // Default to F16
-    if (Q->type == GGML_TYPE_F32 || K->type == GGML_TYPE_F32 || V->type == GGML_TYPE_F32) {
-        target_type = GGML_TYPE_F32;
-    } else if (Q->type == GGML_TYPE_BF16 || K->type == GGML_TYPE_BF16 || V->type == GGML_TYPE_BF16) {
-        target_type = GGML_TYPE_BF16;
+    // Tensor dimensions (GGML format: [D, S, H, B])
+    const int64_t D_q = Q->ne[0];   // head_dim
+    const int64_t S_q = Q->ne[1];   // query seq_len
+    const int64_t H_q = Q->ne[2];   // num query heads
+    const int64_t B   = Q->ne[3];   // batch_size
+
+    const int64_t D_k = K->ne[0];
+    const int64_t S_k = K->ne[1];   // key seq_len
+    const int64_t H_k = K->ne[2];   // num key heads (may differ for GQA)
+
+    const int64_t D_v = V->ne[0];
+    const int64_t H_v = V->ne[2];   // num value heads (may differ for GQA)
+
+    GGML_DL_FATTN_DEBUG_PRINT("Q: [D=%ld, Sq=%ld, Hq=%ld, B=%ld], K: [D=%ld, Sk=%ld, Hk=%ld, B=%ld], V: [D=%ld, _, Hv=%ld, B=%ld]\n",
+        D_q, S_q, H_q, B, D_k, S_k, H_k, B, D_v, H_v, B);
+
+    // Type conversion if needed (only time we might copy data)
+    const void* q_data = Q->data;
+    const void* k_data = K->data;
+    const void* v_data = V->data;
+    const void* mask_data = (mask != nullptr) ? mask->data : nullptr;
+
+    // DL : REMOVE LATER
+    GGML_DL_FATTN_DEBUG_PRINT("type : KQV=%d, Q=%d, K=%d, V=%d\n", KQV->type, Q->type, K->type, V->type);
+
+    // Check GQA (Grouped Query Attention) - K and V may have fewer heads than Q
+    if (H_q != H_k || H_q != H_v) {
+        GGML_DL_FATTN_DEBUG_PRINT("GQA detected: Q_heads=%ld, K_heads=%ld, V_heads=%ld\n", H_q, H_k, H_v);
     }
 
-    // Convert Q, K, V to target type if needed
-    const void* q_data_source = Q->data;
-    const void* k_data_source = K->data;
-    const void* v_data_source = V->data;
-    void* q_converted_gpu = nullptr;
-    void* k_converted_gpu = nullptr;
-    void* v_converted_gpu = nullptr;
+    // nowadays QKVO must have the same data type.
+    // but in llama.cpp. O can be different from QKV.
+    // out_desc is the temporary descriptor for the cudnn expected output.
+    // we will convert the output to the expected type in the end.
+    GGMLTensorDescriptor q_desc;
+    GGMLTensorDescriptor k_desc;
+    GGMLTensorDescriptor v_desc;
+    GGMLTensorDescriptor out_desc;
+    GGMLTensorDescriptor mask_desc;
 
-    if (Q->type != target_type) {
-        size_t q_converted_size = Q->ne[0] * Q->ne[1] * Q->ne[2] * Q->ne[3] * ggml_type_size(target_type);
-        CUDA_CHECK(cudaMalloc(&q_converted_gpu, q_converted_size));
-        ggml_dl::convert_tensor_data(Q->data, q_converted_gpu, Q, target_type, ctx.stream());
-        q_data_source = q_converted_gpu;
-    }
-    if (K->type != target_type) {
-        size_t k_converted_size = K->ne[0] * K->ne[1] * K->ne[2] * K->ne[3] * ggml_type_size(target_type);
-        CUDA_CHECK(cudaMalloc(&k_converted_gpu, k_converted_size));
-        ggml_dl::convert_tensor_data(K->data, k_converted_gpu, K, target_type, ctx.stream());
-        k_data_source = k_converted_gpu;
-    }
-    if (V->type != target_type) {
-        size_t v_converted_size = V->ne[0] * V->ne[1] * V->ne[2] * V->ne[3] * ggml_type_size(target_type);
-        CUDA_CHECK(cudaMalloc(&v_converted_gpu, v_converted_size));
-        ggml_dl::convert_tensor_data(V->data, v_converted_gpu, V, target_type, ctx.stream());
-        v_data_source = v_converted_gpu;
-    }
+    // cudnnScaledDotProductAttention only support QKVO are the same type.
+    GGML_ASSERT(Q->type == K->type && Q->type == V->type && Q->type == KQV->type);
+    q_desc.sdpa_set_from_ggml_qkv(Q, Q->type);         // [D,S,H,B] -> [B,H,S,D]
+    k_desc.sdpa_set_from_ggml_qkv(K, K->type);         // [D,S,H,B] -> [B,H,S,D]
+    v_desc.sdpa_set_from_ggml_qkv(V, V->type);         // [D,S,H,B] -> [B,H,S,D]
+    out_desc.sdpa_set_from_ggml_output(KQV, Q->type);  // [D,H,S,B] -> [B,H,S,D]
+    // bugid : 16411, need to support output Unconventional stride.
+    // out_desc.sdpa_set_from_ggml_qkv(KQV, KQV->type);  // [D,H,S,B] -> [B,H,S,D]
 
-    // Convert data from DHSB to BHSD format for cudnnScaledDotProductAttention
-    void* q_bhsd = nullptr;
-    void* k_bhsd = nullptr;
-    void* v_bhsd = nullptr;
+    GGML_DL_FATTN_DEBUG_PRINT("Zero-copy descriptors created: Q/K/V[D=%ld,S=%ld,H=%ld,B=%ld], O[D=%ld,H=%ld,S=%ld,B=%ld]\n",
+        D_q, S_q, H_q, B, D_q, H_q, S_q, B);
 
-    size_t q_bhsd_size = Q->ne[0] * Q->ne[1] * Q->ne[2] * Q->ne[3] * ggml_type_size(target_type);
-    size_t k_bhsd_size = K->ne[0] * K->ne[1] * K->ne[2] * K->ne[3] * ggml_type_size(target_type);
-    size_t v_bhsd_size = V->ne[0] * V->ne[1] * V->ne[2] * V->ne[3] * ggml_type_size(target_type);
+    bool is_causal = false;
 
-    CUDA_CHECK(cudaMalloc(&q_bhsd, q_bhsd_size));
-    CUDA_CHECK(cudaMalloc(&k_bhsd, k_bhsd_size));
-    CUDA_CHECK(cudaMalloc(&v_bhsd, v_bhsd_size));
+    if (mask != nullptr) {
+        // GGML mask format: [Sk, Sq_pad, ne32, ne33] (Sk innermost) | nowadays only support [Sk, Sq_pad, 1, 1] format.
+        // cuDNN expects: [B, H, Sq, Sk] (Sk innermost)              | [Sk, Sq_pad, 1, 1] --> [1, 1, Sq, Sk]
+        // q:    [n_embd_k, n_batch,     n_head,    ne3 ]            | [D, Sq, H, B]      --> [B, H, Sq, D]
+        // k:    [n_embd_k, n_kv,        n_head_kv, ne3 ]            | [D, Sk, H, B]      --> [B, H, Sk, D]
+        // v:    [n_embd_v, n_kv,        n_head_kv, ne3 ] !! not transposed !!
+        // mask: [n_kv,     n_batch_pad, ne32,      ne33] !! n_batch_pad = GGML_PAD(n_batch, GGML_KQ_MASK_PAD) !!
+        // res:  [n_embd_v, n_head,      n_batch,   ne3 ] !! permuted !!
+        //
+        // broadcast:
+        //   n_head % n_head_kv == 0
+        //   n_head % ne32      == 0
+        //   ne3    % ne33      == 0
+        //
 
-    auto reorder_bshd_to_dhsb = [](const void* input, void* output, int64_t dim_0, int64_t dim_1, int64_t dim_2, int64_t dim_3, enum ggml_type type) -> bool {
-        switch (type) {
-            case GGML_TYPE_F16:
-                call_reorder_layout_bshd_to_dhsb<ggml_fp16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            case GGML_TYPE_F32:
-                call_reorder_layout_bshd_to_dhsb<float>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            case GGML_TYPE_BF16:
-                call_reorder_layout_bshd_to_dhsb<ggml_bf16_t>(input, output, dim_0, dim_1, dim_2, dim_3);
-                return true;
-            default:
-                return false;
-        }
-    };
+        const int64_t mask_sk = mask->ne[0];      // key sequence length
+        const int64_t mask_sq_pad = mask->ne[1];  // padded query sequence length
+        const int64_t mask_dim2 = mask->ne[2];
+        const int64_t mask_dim3 = mask->ne[3];
+        const int64_t actual_sq = S_q;            // actual query sequence length
+        const int64_t actual_sk = S_k;            // actual key sequence length
 
-    // Reorder to BSHD format: DSHB -> BSHD (physical data movement)
-    // GGML: [head_dim, seq_len, num_heads, batch_size] (DSHB)
-    // cuDNN: [batch_size, seq_len, num_heads, head_dim] (BSHD)
-    // Reordering pattern: [i0=D, i1=S, i2=H, i3=B] -> [i3=B, i1=S, i2=H, i0=D]
-    auto reorder_dshb_to_bshd = [](const void* input, void* output, int64_t D, int64_t S, int64_t H, int64_t B, enum ggml_type type) -> bool {
-        switch (type) {
-            case GGML_TYPE_F16:
-                call_reorder_layout_dshb_to_bshd<ggml_fp16_t>(input, output, D, S, H, B);
-                return true;
-            case GGML_TYPE_F32:
-                call_reorder_layout_dshb_to_bshd<float>(input, output, D, S, H, B);
-                return true;
-            case GGML_TYPE_BF16:
-                call_reorder_layout_dshb_to_bshd<ggml_bf16_t>(input, output, D, S, H, B);
-                return true;
-            default:
-                return false;
-        }
-    };
+        GGML_DL_FATTN_DEBUG_PRINT("Mask dimensions: GGML [Sk=%ld, Sq_pad=%ld, %ld, %ld], need cuDNN [1, 1, Sq=%ld, Sk=%ld]\n",
+               mask_sk, mask_sq_pad, mask_dim2, mask_dim3, actual_sq, actual_sk);
 
-    if (!reorder_dshb_to_bshd(q_data_source, q_bhsd, Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to reorder Q data layout to BSHD format\n");
-        ok = false;
-    }
-    if (ok && !reorder_dshb_to_bshd(k_data_source, k_bhsd, K->ne[0], K->ne[1], K->ne[2], K->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to reorder K data layout to BSHD format\n");
-        ok = false;
-    }
-    if (ok && !reorder_dshb_to_bshd(v_data_source, v_bhsd, V->ne[0], V->ne[1], V->ne[2], V->ne[3], target_type)) {
-        GGML_LOG_ERROR("Failed to reorder V data layout to BSHD format\n");
-        ok = false;
-    }
-
-    if (ok) {
-        // Handle GQA (Grouped Query Attention) - K and V may have fewer heads than Q
-        const int64_t q_heads = Q->ne[2];
-        const int64_t k_heads = K->ne[2];
-        const int64_t v_heads = V->ne[2];
-
-        // Check if this is GQA
-        if (q_heads != k_heads || q_heads != v_heads) {
-            GGML_DL_FATTN_DEBUG_PRINT("GQA detected in ScaledDotProduct path: Q heads=%ld, K heads=%ld, V heads=%ld\n", q_heads, k_heads, v_heads);
-            // SDK now supports GQA - let's try it
-            GGML_DL_FATTN_DEBUG_PRINT("Attempting cudnnScaledDotProductAttention with GQA (SDK updated)...\n");
-            // If it fails, the error will be caught by cudnnStatus_t check
+        // Validate mask dimensions
+        if (mask_dim2 != 1 || mask_dim3 != 1) {
+            GGML_LOG_WARN("[bugid : 16426. cudnnScaledDotProductAttention mask need to support GQA. remove when support.] "
+                "DLDNN: Mask with dimensions [%ld, %ld, %ld, %ld] not supported. Only [Sk, Sq, 1, 1] format supported. Falling back.\n",
+                         mask_sk, mask_sq_pad, mask_dim2, mask_dim3);
+            ok = false;
         }
 
         if (ok) {
-            // Create tensor descriptors
-            GGMLTensorDescriptor q_desc, k_desc, v_desc, out_desc, mask_desc;
+            GGML_DL_FATTN_DEBUG_PRINT("mask dtype : %d.\n", mask->type);
+            mask_desc.sdpa_set_from_ggml_mask(mask, mask->type, actual_sq);
+        }
+    } else {
+        // No explicit mask, use causal attention
+        is_causal = true;
+        GGML_DL_FATTN_DEBUG_PRINT("No explicit mask provided, using causal attention\n");
+    }
 
-            // BHSD format: (batch_size, num_heads, seq_len, head_dim)
-            q_desc.set_from_dims(Q->ne[3], Q->ne[2], Q->ne[1], Q->ne[0], target_type);
-            k_desc.set_from_dims(K->ne[3], K->ne[2], K->ne[1], K->ne[0], target_type);
-            v_desc.set_from_dims(V->ne[3], V->ne[2], V->ne[1], V->ne[0], target_type);
+    // Get cuDNN workspace size
+    if (ok) {
+        size_t workspace_size = 0;
+        CUDNN_CHECK(cudnnGetScaledDotProductAttentionWorkspaceSize(
+            cudnn_handle,
+            q_desc.get(),
+            k_desc.get(),
+            v_desc.get(),
+            mask ? mask_desc.get() : nullptr,
+            out_desc.get(),
+            0.0f,
+            is_causal,
+            scale,
+            &workspace_size
+        ));
 
-            // Allocate output buffer in BHSD format
-            int64_t temp_ne[4] = { Q->ne[3], Q->ne[2], Q->ne[1], V->ne[0] }; // [batch_size, num_heads, seq_len, head_dim]
-            size_t temp_output_size = temp_ne[0] * temp_ne[1] * temp_ne[2] * temp_ne[3] * ggml_type_size(target_type);
-            void* temp_output = nullptr;
-            CUDA_CHECK(cudaMalloc(&temp_output, temp_output_size));
+        GGML_DL_FATTN_DEBUG_PRINT("cuDNN workspace size: %zu bytes\n", workspace_size);
 
-            out_desc.set_from_dims(temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], target_type);
+        // Allocate workspace
+        void* workspace = nullptr;
+        if (workspace_size > 0) {
+            CUDA_CHECK(cudaMalloc(&workspace, workspace_size));
+        }
 
-            // Handle mask
-            void* mask_dldnn = nullptr;
-            bool is_causal = false;
+        CUDA_CHECK(cudaGetLastError());
 
-            if (mask != nullptr) {
-                // GGML mask format: [n_kv, n_batch_pad, ?, ?] = [Sk, Sq_pad, ?, ?]
-                // cuDNN expects: [B, H, Sq, Sk] , [1, 1, Sq, Sk]
+        GGML_DL_FATTN_DEBUG_PRINT("Calling cudnnScaledDotProductAttention:\n");
+        GGML_DL_FATTN_DEBUG_PRINT("  Q ptr: %p (direct GGML [D,S,H,B] via strides)\n", q_data);
+        GGML_DL_FATTN_DEBUG_PRINT("  K ptr: %p (direct GGML [D,S,H,B] via strides)\n", k_data);
+        GGML_DL_FATTN_DEBUG_PRINT("  V ptr: %p (direct GGML [D,S,H,B] via strides)\n", v_data);
+        GGML_DL_FATTN_DEBUG_PRINT("  mask ptr: %p %s\n", mask_data, mask ? "(direct GGML [Sk, Sq_pad, ne32, ne33])" : "(causal)");
+        GGML_DL_FATTN_DEBUG_PRINT("  output ptr: %p (direct GGML [D,H,S,B] via special strides)\n", KQV->data);
+        GGML_DL_FATTN_DEBUG_PRINT("  dropout: %.6f, is_causal: %s, scale: %.6f\n",
+            0.0f, is_causal ? "true" : "false", scale);
 
-                const int64_t mask_sk = mask->ne[0];      // key sequence length
-                const int64_t mask_sq_pad = mask->ne[1];  // padded query sequence length
-                const int64_t mask_dim2 = mask->ne[2];    // should be 1 or nr23[0]
-                const int64_t mask_dim3 = mask->ne[3];    // should be 1 or batch
-                const int64_t actual_sq = Q->ne[1];       // actual query sequence length
-                const int64_t actual_sk = K->ne[1];       // actual key sequence length
-
-                GGML_DL_FATTN_DEBUG_PRINT("Mask dimensions: [%ld, %ld, %ld, %ld], Q: [%ld, %ld, %ld, %ld], K: [%ld, %ld, %ld, %ld]\n",
-                       mask_sk, mask_sq_pad, mask_dim2, mask_dim3,
-                       Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3],
-                       K->ne[0], K->ne[1], K->ne[2], K->ne[3]);
-
-                // Check if mask dimensions beyond [Sk, Sq_pad] are supported
-                if (mask_dim2 != 1 || mask_dim3 != 1) {
-                    GGML_LOG_WARN("DLDNN: Mask with dimensions [%ld, %ld, %ld, %ld] not fully supported. Only [Sk, Sq, 1, 1] format is supported. Falling back.\n",
-                                 mask_sk, mask_sq_pad, mask_dim2, mask_dim3);
-                    ok = false;
-                }
-
-                // Verify mask dimensions match attention dimensions
-                if (ok && mask_sk != actual_sk) {
-                    GGML_LOG_ERROR("Mask key dimension mismatch: mask_sk=%ld, actual_sk=%ld\n", mask_sk, actual_sk);
-                    ok = false;
-                }
-
-                if (ok) {
-                    // Allocate memory for converted mask in [1, 1, Sq, Sk] format
-                    size_t mask_size = 1 * 1 * actual_sq * actual_sk * ggml_type_size(target_type);
-                    CUDA_CHECK(cudaMalloc(&mask_dldnn, mask_size));
-
-                    // Convert mask: [Sk, Sq_pad, 1, 1] -> [1, 1, Sq, Sk] (removing padding, physical data reordering)
-                    // reorder_bshd_to_dhsb expects: input[dim_0, dim_1, dim_2, dim_3] -> output[dim_3, dim_2, dim_1, dim_0]
-                    // For mask[Sk, Sq, 1, 1] -> [1, 1, Sq, Sk]: dim_0=Sk, dim_1=Sq, dim_2=1, dim_3=1
-                    if (mask_sq_pad == actual_sq) {
-                        // No padding, direct reordering
-                        // Input: [Sk, Sq, 1, 1] with dim_0=Sk, dim_1=Sq, dim_2=1, dim_3=1
-                        // Output: [1, 1, Sq, Sk]
-                        reorder_bshd_to_dhsb(mask->data, mask_dldnn, mask_sk, mask_sq_pad, 1, 1, target_type);
-                    } else {
-                        // Has padding, need to extract valid portion first
-                        // Create intermediate buffer for valid mask [Sk, Sq, 1, 1] (no padding)
-                        GGML_DL_FATTN_DEBUG_PRINT("Mask padding detected: mask_sq_pad=%ld, actual_sq=%ld. Removing padding before reordering.\n",
-                            mask_sq_pad, actual_sq);
-
-                        // Copy valid portion: extract [Sk, Sq] from [Sk, Sq_pad]
-                        // This is a 2D copy operation for each Sk row
-                        const size_t element_size = ggml_type_size(target_type);
-                        void* mask_no_pad = nullptr;
-                        size_t no_pad_size = mask_sk * actual_sq * element_size;
-                        CUDA_CHECK(cudaMalloc(&mask_no_pad, no_pad_size));
-                        for (int64_t sk_idx = 0; sk_idx < mask_sk; sk_idx++) {
-                            const void* src_row = (const char*)mask->data + sk_idx * mask_sq_pad * element_size;
-                            void* dst_row = (char*)mask_no_pad + sk_idx * actual_sq * element_size;
-                            CUDA_CHECK(cudaMemcpyAsync(dst_row, src_row, actual_sq * element_size, cudaMemcpyDeviceToDevice));
-                        }
-
-                        // Now reorder the no-pad mask [Sk, Sq] conceptually as [Sk, Sq, 1, 1] -> [1, 1, Sq, Sk]
-                        // Input: [Sk, Sq, 1, 1] with dim_0=Sk, dim_1=Sq, dim_2=1, dim_3=1
-                        // Output: [1, 1, Sq, Sk]
-                        reorder_bshd_to_dhsb(mask_no_pad, mask_dldnn, mask_sk, actual_sq, 1, 1, target_type);
-
-                        // Clean up intermediate buffer
-                        CUDA_CHECK(cudaFree(mask_no_pad));
-                    }
-
-                    // Set mask descriptor for [1, 1, Sq, Sk] format (no padding)
-                    mask_desc.set_from_dims(1, 1, actual_sq, actual_sk, target_type);
-                }
-            } else {
-                // No explicit mask, use causal attention
-                is_causal = true;
-                GGML_DL_FATTN_DEBUG_PRINT("No explicit mask provided, using causal attention\n");
+        // Print first 10 elements for Q/K/V/Mask/Output if element count > 10
+        {
+            const int print_n = 10;
+            const int64_t q_elems = D_q * S_q * H_q * B;
+            const int64_t k_elems = D_k * S_k * H_k * B;
+            const int64_t v_elems = D_v * S_k * H_v * B; // V shares S_k, H_v
+            const int64_t o_elems = D_q * H_q * S_q * B;
+            debug_print_first_n_device(q_data, q_elems, print_n, Q->type, "Q");
+            debug_print_first_n_device(k_data, k_elems, print_n, K->type, "K");
+            debug_print_first_n_device(v_data, v_elems, print_n, V->type, "V");
+            if (mask) {
+                const int64_t mask_elems = mask->ne[0] * mask->ne[1] * mask->ne[2] * mask->ne[3];
+                debug_print_first_n_device(mask_data, mask_elems, print_n, mask->type, "Mask");
             }
+            debug_print_first_n_device(KQV->data, o_elems, print_n, KQV->type, "O(pre)");
+        }
 
-            // Get workspace size first
-            size_t workspace_size = 0;
-            CUDNN_CHECK(cudnnGetScaledDotProductAttentionWorkspaceSize(
-                cudnn_handle,
-                q_desc.get(),
-                k_desc.get(),
-                v_desc.get(),
-                mask_dldnn ? mask_desc.get() : nullptr,
-                out_desc.get(),
-                0.0f,
-                is_causal,
-                scale,
-                &workspace_size
-            ));
+        CUDA_CHECK(cudaGetLastError());
 
-            // Allocate workspace
-            void* workspace = nullptr;
-            if (workspace_size > 0) {
-                CUDA_CHECK(cudaMalloc(&workspace, workspace_size));
-            }
+        // Call cuDNN Flash Attention with zero-copy pointers
+        cudnnStatus_t status = cudnnScaledDotProductAttention(
+            cudnn_handle,
+            q_desc.get(), q_data,    // Q: GGML [D,S,H,B] read as cuDNN [B,H,S,D] via strides
+            k_desc.get(), k_data,    // K: GGML [D,S,H,B] read as cuDNN [B,H,S,D] via strides
+            v_desc.get(), v_data,    // V: GGML [D,S,H,B] read as cuDNN [B,H,S,D] via strides
+            mask_data ? mask_desc.get() : nullptr, mask_data,  // mask: physically transposed
+            0.0f,                    // dropout probability
+            is_causal,               // causal attention flag
+            scale,                   // attention scale factor
+            workspace, workspace_size,
+            out_desc.get(), KQV->data  // O: cuDNN [B,H,S,D] written as GGML [D,H,S,B] via strides!
+        );
 
-            // Debug: Print cuDNN call parameters
-            GGML_DL_FATTN_DEBUG_PRINT("cuDNN API call parameters:\n");
-            GGML_DL_FATTN_DEBUG_PRINT("  dropout: %.6f\n", 0.0f);
-            GGML_DL_FATTN_DEBUG_PRINT("  is_causal: %s\n", is_causal ? "true" : "false");
-            GGML_DL_FATTN_DEBUG_PRINT("  scale: %.6f\n", scale);
-            GGML_DL_FATTN_DEBUG_PRINT("  mask_desc: %s\n", mask_dldnn ? "provided" : "nullptr");
-            GGML_DL_FATTN_DEBUG_PRINT("  workspace_size: %zu bytes\n", workspace_size);
+        CUDA_CHECK(cudaGetLastError());
 
-            // Call cudnnScaledDotProductAttention
-            cudnnStatus_t status = cudnnScaledDotProductAttention(
-                cudnn_handle,
-                q_desc.get(), q_bhsd,
-                k_desc.get(), k_bhsd,
-                v_desc.get(), v_bhsd,
-                mask_dldnn ? mask_desc.get() : nullptr, mask_dldnn,
-                0.0f,
-                is_causal,
-                scale,
-                workspace, workspace_size,
-                out_desc.get(), temp_output
-            );
+        // Cleanup workspace
+        if (workspace) {
+            CUDA_CHECK(cudaFree(workspace));
+        }
 
-            if (status != CUDNN_STATUS_SUCCESS) {
-                GGML_LOG_ERROR("cudnnScaledDotProductAttention failed: %s\n", cudnnGetErrorString(status));
-                ok = false;
-            }
+        CUDA_CHECK(cudaGetLastError());
 
-            // Verify cudnnScaledDotProductAttention output if requested
-            if (ok) {
-                const char *env_verify = getenv("GGML_CUDNN_VERIFY_SDP_ATTENTION");
-                const char *env_verify_any = getenv("GGML_CUDNN_VERIFY_ANY_ATTENTION");
-                if ((env_verify != nullptr && strcmp(env_verify, "1") == 0) ||
-                    (env_verify_any != nullptr && strcmp(env_verify_any, "1") == 0)) {
-                    GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Verifying cudnnScaledDotProductAttention output...\n");
 
-                    // Q: [head_dim, seq_len, num_heads, batch_size] --> [D, Sq, H, B]
-                    // K: [head_dim, seq_len, num_heads, batch_size] --> [D, Sk, H, B]
-                    // Copy data from GPU to CPU for verification
-                    const int B = Q->ne[3];
-                    const int H = Q->ne[2];
-                    const int Sq = Q->ne[1];
-                    const int Sk = K->ne[1];
-                    const int D = Q->ne[0];
-
-                    // Calculate sizes for output and mask tensors only
-                    const size_t output_size = B * H * Sq * D * ggml_type_size(target_type);
-                    const size_t mask_size = mask_dldnn ? 1 * 1 * Sq * Sk * ggml_type_size(target_type) : 0;
-
-                    // Debug info
-                    GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Tensor dimensions: B=%d, H=%d, Sq=%d, Sk=%d, D=%d\n", B, H, Sq, Sk, D);
-                    GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Memory sizes: output=%zu, mask=%zu bytes\n", output_size, mask_size);
-
-                    // Allocate CPU buffers for output and mask only
-                    void* mask_cpu = mask_dldnn ? malloc(mask_size) : nullptr;
-                    void* output_cpu = malloc(output_size);
-
-                    if (output_cpu && (!mask_dldnn || mask_cpu)) {
-
-                        // Verify GPU pointers are valid
-                        if (!temp_output) {
-                            GGML_LOG_ERROR("CUDNN_VERIFICATION: Invalid GPU output pointer detected\n");
-                            goto cleanup_verification;
-                        }
-
-                        // Copy output and mask from GPU to CPU only
-                        if (mask_dldnn) {
-                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Copying mask tensor (%zu bytes)...\n", mask_size);
-                            CUDA_CHECK(cudaMemcpy(mask_cpu, mask_dldnn, mask_size, cudaMemcpyDeviceToHost));
-                        }
-
-                        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Copying output tensor (%zu bytes)...\n", output_size);
-                        CUDA_CHECK(cudaMemcpy(output_cpu, temp_output, output_size, cudaMemcpyDeviceToHost));
-
-                        // Debug: Print output values for analysis
-                        GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Analyzing output values...\n");
-                        if (target_type == GGML_TYPE_F16) {
-                            const ggml_fp16_t* output_data = static_cast<const ggml_fp16_t*>(output_cpu);
-                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: cuDNN Output[0:5] = %.3f, %.3f, %.3f, %.3f, %.3f\n",
-                                         to_float(output_data[0]), to_float(output_data[1]), to_float(output_data[2]),
-                                         to_float(output_data[3]), to_float(output_data[4]));
-                        }
-
-                        // Special analysis for causal case with Sq=1
-                        if (is_causal && Sq == 1) {
-                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: Special case - Causal attention with single query (Sq=1, Sk=%d)\n", Sk);
-                            GGML_DL_FATTN_DEBUG_PRINT("CUDNN_VERIFICATION: In this case, query can only attend to position 0 of key sequence\n");
-                        }
-
-                        // Run verification based on data type
-                        bool verify_result = false;
-
-                        // Copy GPU tensors to CPU for verification
-                        const size_t q_nelements = B * H * Sq * D;
-                        const size_t k_nelements = B * H * Sk * D;
-                        const size_t v_nelements = B * H * Sk * D;
-
-                        switch (target_type) {
-                            case GGML_TYPE_F16: {
-                                std::vector<ggml_fp16_t> q_cpu_data(q_nelements);
-                                std::vector<ggml_fp16_t> k_cpu_data(k_nelements);
-                                std::vector<ggml_fp16_t> v_cpu_data(v_nelements);
-
-                                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
-                                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
-                                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_fp16_t), cudaMemcpyDeviceToHost));
-
-                                verify_result = verify_attention_golden<ggml_fp16_t, ggml_fp16_t>(
-                                    q_cpu_data.data(),
-                                    k_cpu_data.data(),
-                                    v_cpu_data.data(),
-                                    static_cast<const ggml_fp16_t*>(mask_cpu),
-                                    static_cast<const ggml_fp16_t*>(output_cpu),
-                                    B, H, Sq, Sk, D, scale, is_causal
-                                );
-                                break;
-                            }
-                            case GGML_TYPE_F32: {
-                                std::vector<float> q_cpu_data(q_nelements);
-                                std::vector<float> k_cpu_data(k_nelements);
-                                std::vector<float> v_cpu_data(v_nelements);
-
-                                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(float), cudaMemcpyDeviceToHost));
-                                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(float), cudaMemcpyDeviceToHost));
-                                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(float), cudaMemcpyDeviceToHost));
-
-                                verify_result = verify_attention_golden<float, float>(
-                                    q_cpu_data.data(),
-                                    k_cpu_data.data(),
-                                    v_cpu_data.data(),
-                                    static_cast<const float*>(mask_cpu),
-                                    static_cast<const float*>(output_cpu),
-                                    B, H, Sq, Sk, D, scale, is_causal
-                                );
-                                break;
-                            }
-                            case GGML_TYPE_BF16: {
-                                std::vector<ggml_bf16_t> q_cpu_data(q_nelements);
-                                std::vector<ggml_bf16_t> k_cpu_data(k_nelements);
-                                std::vector<ggml_bf16_t> v_cpu_data(v_nelements);
-
-                                CUDA_CHECK(cudaMemcpy(q_cpu_data.data(), Q->data, q_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
-                                CUDA_CHECK(cudaMemcpy(k_cpu_data.data(), K->data, k_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
-                                CUDA_CHECK(cudaMemcpy(v_cpu_data.data(), V->data, v_nelements * sizeof(ggml_bf16_t), cudaMemcpyDeviceToHost));
-
-                                verify_result = verify_attention_golden<ggml_bf16_t, ggml_bf16_t>(
-                                    q_cpu_data.data(),
-                                    k_cpu_data.data(),
-                                    v_cpu_data.data(),
-                                    static_cast<const ggml_bf16_t*>(mask_cpu),
-                                    static_cast<const ggml_bf16_t*>(output_cpu),
-                                    B, H, Sq, Sk, D, scale, is_causal
-                                );
-                                break;
-                            }
-                            default:
-                                GGML_LOG_WARN("CUDNN_VERIFICATION: Unsupported data type for verification\n");
-                                break;
-                        }
-
-                        if (!verify_result) {
-                            GGML_LOG_ERROR("CUDNN_VERIFICATION: cudnnScaledDotProductAttention verification failed!\n");
-                            GGML_DL_FATTN_DEBUG_PRINT("Test parameters: B=%d, H=%d, Sq=%d, Sk=%d, D=%d, scale=%.6f, is_causal=%s, has_mask=%s\n",
-                                         B, H, Sq, Sk, D, scale, is_causal ? "true" : "false", mask_dldnn ? "true" : "false");
-                        }
-                    } else {
-                        GGML_LOG_ERROR("CUDNN_VERIFICATION: Failed to allocate CPU memory for verification\n");
-                    }
-
-                    cleanup_verification:
-                    // Cleanup CPU buffers
-                    if (mask_cpu) free(mask_cpu);
-                    if (output_cpu) free(output_cpu);
-                }
-            }
-
-            if (ok) {
-                // Reorder output layout from BSHD back to DHSB format (physical data movement)
-                // cuDNN outputs BSHD: [batch_size, seq_len, num_heads, head_dim]
-                // GGML needs DHSB: [head_dim, num_heads, seq_len, batch_size]
-                // This requires complete dimension reversal: [i0, i1, i2, i3] -> [i3, i2, i1, i0]
-                if (!reorder_bshd_to_dhsb(temp_output, KQV->data, temp_ne[0], temp_ne[1], temp_ne[2], temp_ne[3], target_type)) {
-                    GGML_LOG_ERROR("Failed to reorder output layout from BSHD to DHSB format\n");
-                    ok = false;
-                }
-            }
-
-            // Cleanup
-            if (temp_output) CUDA_CHECK(cudaFree(temp_output));
-            if (mask_dldnn) CUDA_CHECK(cudaFree(mask_dldnn));
-            if (workspace) CUDA_CHECK(cudaFree(workspace));
+        if (status != CUDNN_STATUS_SUCCESS) {
+            GGML_LOG_ERROR("cudnnScaledDotProductAttention failed: %s\n", cudnnGetErrorString(status));
+            ok = false;
+        } else {
+            GGML_DL_FATTN_DEBUG_PRINT("cudnnScaledDotProductAttention succeeded, status : %s\n", cudnnGetErrorString(status));
+            // Print first 10 elements of output after compute
+            const int print_n = 10;
+            const int64_t o_elems = D_q * H_q * S_q * B;
+            debug_print_first_n_device(KQV->data, o_elems, print_n, KQV->type, "O(post)");
         }
     }
-
-    // Cleanup converted tensors and BHSD buffers
-    if (q_converted_gpu) CUDA_CHECK(cudaFree(q_converted_gpu));
-    if (k_converted_gpu) CUDA_CHECK(cudaFree(k_converted_gpu));
-    if (v_converted_gpu) CUDA_CHECK(cudaFree(v_converted_gpu));
-    if (q_bhsd) CUDA_CHECK(cudaFree(q_bhsd));
-    if (k_bhsd) CUDA_CHECK(cudaFree(k_bhsd));
-    if (v_bhsd) CUDA_CHECK(cudaFree(v_bhsd));
-
-    if (ok) {
-        CUDA_CHECK(cudaGetLastError());
-        // CUDA_CHECK(cudaDeviceSynchronize());
-    }
 }
+#endif
 
 // ============================================================================
 // Flash Attention DLDNN Implementation - Public Interface
 // ============================================================================
 
 namespace ggml_dl {
-
-// --- BEGIN: FLASH_ATTN_EXT fail-case list and matcher ---
-struct FailSpec8 {
-    int hsk;
-    int nr22;
-    int nr23;
-    int kv;
-    int nb;
-    int mask;
-    float max_bias;
-    float logit_softcap;
-};
-
-static const struct FailSpec8 kFailSpecs8[] = {
-    { 64, 1, 1, 512, 1, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 64, 1, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 64, 1, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 35, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 64, 1, 1, 1024, 3, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 1024, 3, 1, 8.0f, 0.0f },
-    { 64, 1, 1, 1024, 3, 0, 0.0f, 0.0f },
-    { 64, 1, 1, 1024, 32, 0, 0.0f, 0.0f },
-    { 64, 1, 1, 1024, 32, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 1024, 32, 1, 8.0f, 0.0f },
-    { 64, 1, 1, 1024, 35, 0, 0.0f, 0.0f },
-    { 64, 1, 1, 1024, 35, 1, 0.0f, 0.0f },
-    { 64, 1, 1, 1024, 35, 1, 8.0f, 0.0f },
-    { 64, 4, 1, 512, 1, 0, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 64, 4, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 64, 4, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 35, 1, 0.0f, 0.0f },
-    { 64, 4, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 512, 1, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 80, 1, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 80, 1, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 80, 1, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 80, 1, 1, 1024, 1, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 1024, 3, 0, 0.0f, 0.0f },
-    { 80, 1, 1, 1024, 3, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 1024, 3, 1, 0.0f, 0.0f },
-    { 80, 1, 1, 1024, 32, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 1024, 32, 1, 0.0f, 0.0f },
-    { 80, 1, 1, 1024, 35, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 1024, 35, 1, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 1, 0, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 1, 1, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 1, 1, 8.0f, 0.0f },
-    { 80, 4, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 80, 4, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 80, 4, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 35, 1, 0.0f, 0.0f },
-    { 80, 4, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 512, 1, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 512, 1, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 128, 1, 1, 512, 3, 0, 0.0f, 10.0f },
-    { 128, 1, 1, 512, 3, 1, 0.0f, 10.0f },
-    { 128, 1, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 512, 3, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 128, 1, 1, 512, 32, 0, 0.0f, 10.0f },
-    { 128, 1, 1, 512, 32, 1, 0.0f, 10.0f },
-    { 128, 1, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 512, 32, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 128, 1, 1, 512, 35, 0, 0.0f, 10.0f },
-    { 128, 1, 1, 512, 35, 1, 0.0f, 10.0f },
-    { 128, 1, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 512, 35, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 1024, 1, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 1024, 1, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 1024, 3, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 1024, 3, 0, 0.0f, 0.0f },
-    { 128, 1, 1, 1024, 3, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 1024, 32, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 1024, 32, 1, 8.0f, 10.0f },
-    { 128, 1, 1, 1024, 35, 1, 8.0f, 0.0f },
-    { 128, 1, 1, 1024, 35, 1, 8.0f, 10.0f },
-    { 128, 4, 1, 512, 1, 0, 0.0f, 0.0f },
-    { 128, 4, 1, 512, 1, 0, 0.0f, 10.0f },
-    { 128, 4, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 128, 4, 1, 512, 3, 0, 0.0f, 10.0f },
-    { 128, 4, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 128, 4, 1, 512, 3, 1, 0.0f, 10.0f },
-    { 128, 4, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 128, 4, 1, 512, 3, 1, 8.0f, 10.0f },
-    { 128, 4, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 128, 4, 1, 512, 32, 1, 0.0f, 10.0f },
-    { 128, 4, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 128, 4, 1, 512, 32, 1, 8.0f, 10.0f },
-    { 128, 4, 1, 512, 35, 1, 0.0f, 0.0f },
-    { 128, 4, 1, 512, 35, 1, 0.0f, 10.0f },
-    { 128, 4, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 128, 4, 1, 512, 35, 1, 8.0f, 10.0f },
-    { 128, 16, 1, 512, 1, 0, 0.0f, 0.0f },
-    { 128, 16, 1, 512, 1, 0, 0.0f, 10.0f },
-    { 128, 16, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 128, 16, 1, 512, 3, 0, 0.0f, 10.0f },
-    { 128, 16, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 128, 16, 1, 512, 3, 1, 0.0f, 10.0f },
-    { 128, 16, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 128, 16, 1, 512, 3, 1, 8.0f, 10.0f },
-    { 128, 16, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 128, 16, 1, 512, 32, 1, 0.0f, 10.0f },
-    { 128, 16, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 128, 16, 1, 512, 32, 1, 8.0f, 10.0f },
-    { 128, 16, 1, 512, 35, 1, 0.0f, 0.0f },
-    { 128, 16, 1, 512, 35, 1, 0.0f, 10.0f },
-    { 128, 16, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 128, 16, 1, 512, 35, 1, 8.0f, 10.0f },
-    { 256, 1, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 256, 1, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 256, 1, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 256, 1, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 256, 1, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 256, 1, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 256, 1, 1, 1024, 3, 1, 8.0f, 0.0f },
-    { 256, 1, 1, 1024, 32, 1, 8.0f, 0.0f },
-    { 256, 1, 1, 1024, 35, 1, 8.0f, 0.0f },
-    { 256, 4, 1, 512, 3, 0, 0.0f, 0.0f },
-    { 256, 4, 1, 512, 3, 1, 0.0f, 0.0f },
-    { 256, 4, 1, 512, 3, 1, 8.0f, 0.0f },
-    { 256, 4, 1, 512, 32, 0, 0.0f, 0.0f },
-    { 256, 4, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 256, 4, 1, 512, 32, 1, 8.0f, 0.0f },
-    { 256, 4, 1, 512, 35, 0, 0.0f, 0.0f },
-    { 256, 4, 1, 512, 35, 1, 0.0f, 0.0f },
-    { 256, 4, 1, 512, 35, 1, 8.0f, 0.0f },
-    { 80, 1, 1, 512, 32, 1, 0.0f, 0.0f },
-    { 128, 1, 1, 1024, 3, 0, 0.0f, 10.0f },
-    { 128, 1, 1, 1024, 32, 0, 0.0f, 0.0f },
-    { 128, 1, 1, 1024, 32, 0, 0.0f, 10.0f },
-    { 128, 1, 1, 1024, 35, 0, 0.0f, 0.0f },
-    { 128, 1, 1, 1024, 35, 0, 0.0f, 10.0f },
-};
-
-static inline bool eqf_approx(float a, float b) {
-    float d = a - b;
-    if (d < 0) d = -d;
-    return d < 1e-5f;
-}
-
-static void flash_attn_ext_extract_params_agnostic(const ggml_tensor * const * src,
-                                                   int64_t * out_hsk,
-                                                   int64_t * out_nr22,
-                                                   int64_t * out_nr23,
-                                                   int64_t * out_kv,
-                                                   int64_t * out_nb,
-                                                   bool    * out_has_mask) {
-    const ggml_tensor * Q = src[0];
-    const ggml_tensor * K = src[1];
-    const ggml_tensor * V = src[2];
-    const ggml_tensor * M = src[3];
-
-    int64_t qd[4] = { Q->ne[0], Q->ne[1], Q->ne[2], Q->ne[3] };
-    int64_t kd[4] = { K->ne[0], K->ne[1], K->ne[2], K->ne[3] };
-    int64_t vd[4] = { V->ne[0], V->ne[1], V->ne[2], V->ne[3] };
-
-    int64_t kv = 0;
-    for (int i = 0; i < 4; ++i) if (kd[i] == 512 || kd[i] == 1024) { kv = kd[i]; break; }
-    if (kv == 0) for (int i = 0; i < 4; ++i) if (vd[i] == 512 || vd[i] == 1024) { kv = vd[i]; break; }
-    if (kv == 0) { kv = kd[0]; for (int i = 1; i < 4; ++i) if (kd[i] > kv) kv = kd[i]; }
-
-    int64_t hsk = 0;
-    const int candidate_hsk[4] = {64, 80, 128, 256};
-    for (int i = 0; i < 4 && hsk == 0; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (kd[j] == candidate_hsk[i]) { hsk = kd[j]; break; }
-            if (vd[j] == candidate_hsk[i]) { hsk = vd[j]; break; }
-        }
-    }
-    if (hsk == 0) {
-        for (int i = 0; i < 4; ++i) {
-            if (kd[i] < kv && kd[i] > 32 && kd[i] > hsk) hsk = kd[i];
-        }
-        for (int i = 0; i < 4; ++i) {
-            if (vd[i] < kv && vd[i] > 32 && vd[i] > hsk) hsk = vd[i];
-        }
-    }
-
-    const int nb_candidates[4] = {35, 32, 3, 1};
-    int64_t nb = 1;
-    for (int c = 0; c < 4; ++c) {
-        for (int i = 0; i < 4; ++i) {
-            if (qd[i] == nb_candidates[c]) { nb = qd[i]; goto nb_done; }
-        }
-    }
-nb_done:
-
-    int64_t nr22 = 1;
-    for (int i = 0; i < 4; ++i) {
-        if (qd[i] == 16) { nr22 = 4; break; }
-        if (qd[i] == 4)  { nr22 = 1; break; }
-    }
-
-    int64_t nr23 = 1;
-
-    *out_hsk = hsk;
-    *out_nr22 = nr22;
-    *out_nr23 = nr23;
-    *out_kv  = kv;
-    *out_nb  = nb;
-    *out_has_mask = (M != nullptr);
-}
-
-static bool flash_attn_ext_is_in_fail_list(int64_t hsk, int64_t nr22, int64_t nr23, int64_t kv,
-                                           int64_t nb, bool has_mask, float max_bias, float logit_softcap) {
-    const int imask = has_mask ? 1 : 0;
-    const size_t n = sizeof(kFailSpecs8)/sizeof(kFailSpecs8[0]);
-    for (size_t i = 0; i < n; ++i) {
-        const struct FailSpec8 *s = &kFailSpecs8[i];
-        if (s->hsk == (int) hsk && s->nr22 == (int) nr22 && s->nr23 == (int) nr23 &&
-            s->kv == (int) kv && s->nb == (int) nb && s->mask == imask &&
-            eqf_approx(s->max_bias, max_bias) && eqf_approx(s->logit_softcap, logit_softcap)) {
-            GGML_DL_FATTN_DEBUG_PRINT("XFAIL_DETECTED (DLFA), just skip: hsk=%d, nr22=%d, nr23=%d, kv=%d, nb=%d, mask=%d, max_bias=%f, logit_softcap=%f\n",
-                   (int)hsk, (int)nr22, (int)nr23, (int)kv, (int)nb, imask, max_bias, logit_softcap);
-            return true;
-        }
-    }
-    return false;
-}
-// --- END: FLASH_ATTN_EXT fail-case list and matcher ---
-
-#if 0 // will be removed later
-bool flash_attn_ext_should_skip(const ggml_tensor * const * src, const int32_t * op_params) {
-    int64_t hsk_val = 0, nr22_val = 1, nr23_val = 1, kv_val = 0, nb_val = 1;
-    bool has_mask_val = false;
-    flash_attn_ext_extract_params_agnostic(src, &hsk_val, &nr22_val, &nr23_val, &kv_val, &nb_val, &has_mask_val);
-
-    float max_bias = 0.0f;
-    float logit_softcap = 0.0f;
-    memcpy(&max_bias,      op_params + 1, sizeof(max_bias));
-    memcpy(&logit_softcap, op_params + 2, sizeof(logit_softcap));
-
-    return flash_attn_ext_is_in_fail_list(hsk_val, nr22_val, nr23_val, kv_val, nb_val, has_mask_val, max_bias, logit_softcap);
-}
-#endif
 
 bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_UNUSED(ctx);
@@ -1716,16 +1185,16 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
 
     // Extract parameters
     const int64_t hsk = Q->ne[0];       // head size for K/Q
-    const int64_t hsv = V->ne[0];       // head size for V
-    const int64_t kv  = K->ne[1];       // sequence length
-    const int64_t nb  = Q->ne[3];       // batch size
+    // const int64_t hsv = V->ne[0];       // head size for V
+    // const int64_t kv  = K->ne[1];       // sequence length
+    // const int64_t nb  = Q->ne[3];       // batch size
 
     const int64_t n_head_q = Q->ne[2];  // Number of query heads
     const int64_t n_head_k = K->ne[2];  // Number of key heads
     const int64_t n_head_v = V->ne[2];  // Number of value heads
 
     const int64_t gqa_ratio = n_head_k > 0 ? n_head_q / n_head_k : 1;
-    const bool has_gqa = (gqa_ratio > 1);
+    // const bool has_gqa = (gqa_ratio > 1);
     const bool has_mask = (mask != nullptr);
 
     // Extract max_bias and logit_softcap from op_params
@@ -1734,8 +1203,18 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
     memcpy(&max_bias, ((const int32_t *) dst->op_params) + 1, sizeof(max_bias));
     memcpy(&logit_softcap, ((const int32_t *) dst->op_params) + 2, sizeof(logit_softcap));
 
-    const bool has_alibi = (max_bias != 0.0f);
-    const bool has_softcap = (logit_softcap != 0.0f);
+    const bool has_alibi = (max_bias > 0.0f);
+    // const bool has_softcap = (logit_softcap != 0.0f);
+    ggml_flash_attn_mask_params mask_info = {
+        /*.present          =*/ mask != nullptr,
+        /*.is_causal        =*/ false,
+        /*.window_left      =*/ -1,
+        /*.window_right     =*/ -1,
+        /*.per_token_window =*/ false,
+        /*.multi_sequence   =*/ false,
+        /*.has_alibi_bias   =*/ false,
+    };
+    const bool have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
 
     // Check for GQA (Grouped Query Attention) support
     if (n_head_q != n_head_k || n_head_k != n_head_v) {
@@ -1749,270 +1228,47 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
         }
     }
 
+    if (!has_alibi) {
+        if (!has_mask) {
+            // Nothing special to encode, allowed.
+        } else if (!have_mask_params || !mask_info.present) {
+            GGML_DL_FATTN_DEBUG_PRINT("mask metadata missing or not present\n");
+            return false;
+        } else if (mask_info.per_token_window || mask_info.multi_sequence) {
+            GGML_DL_FATTN_DEBUG_PRINT(
+                "mask metadata unsupported (per_token_window=%d, multi_sequence=%d).\n",
+                mask_info.per_token_window, mask_info.multi_sequence);
+            return false;
+        }
+    }
+
     // Check basic requirements
     if (hsk > 288) { // adapt from flash-attn
         GGML_LOG_WARN("DLDNN is not available for ne[0] %ld\n", hsk);
         return false;
     }
 
-#if 0 // will be removed later
-    // ========================================================================
-    // XFAIL Filter List - Based on test-backend-ops analysis
-    // Filter out known failing cases while preserving all passing cases
-    // ========================================================================
-
-    // XFAIL Rule 1: Small head (64, 80) + Long KV (1024) + Multi-batch (nb >= 3)
-    if ((hsk == 64 || hsk == 80) && kv == 1024 && nb >= 3) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] Small head (%ld) + long KV (%ld) + multi-batch (%ld)\n", hsk, kv, nb);
-        return false;
-    }
-
-    // XFAIL Rule 2: Small head (64, 80) + GQA + Mask
-    if ((hsk == 64 || hsk == 80) && has_gqa && has_mask) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] Small head (%ld) + GQA (ratio=%ld) + mask\n", hsk, gqa_ratio);
-        return false;
-    }
-
-    // XFAIL Rule 3: Small head (64, 80) + ALiBi (any configuration)
-    if ((hsk == 64 || hsk == 80) && has_alibi) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] Small head (%ld) + ALiBi (max_bias=%.3f)\n", hsk, max_bias);
-        return false;
-    }
-
-    // XFAIL Rule 4: hsk=128 + Non-standard batch (3, 35) + Mask + No GQA + Basic params
-    if (hsk == 128 && (nb == 3 || nb == 35) && has_mask && !has_gqa &&
-        !has_alibi && !has_softcap && kv == 512) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=128 + non-standard batch (%ld) + mask + basic params\n", nb);
-        return false;
-    }
-
-    // XFAIL Rule 5: hsk=128 + GQA + Mask
-    if (hsk == 128 && has_gqa && has_mask) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=128 + GQA (ratio=%ld) + mask\n", gqa_ratio);
-        return false;
-    }
-
-    // XFAIL Rule 6: hsk=128 + ALiBi + Multi-batch (nb >= 3) + Mask
-    if (hsk == 128 && has_alibi && nb >= 3 && has_mask) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=128 + ALiBi (max_bias=%.3f) + multi-batch (%ld) + mask\n", max_bias, nb);
-        return false;
-    }
-
-    // XFAIL Rule 7: hsk=128 + Multi-batch (nb > 1, exclude 32) + Complex features + Mask
-    // This covers: nb=3,35 with (GQA or ALiBi or softcap) + mask
-    if (hsk == 128 && nb > 1 && nb != 32 && has_mask &&
-        (has_gqa || has_alibi || has_softcap)) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=128 + multi-batch (%ld) + complex features (GQA=%d, ALiBi=%d, softcap=%d) + mask\n",
-                      nb, has_gqa, has_alibi, has_softcap);
-        return false;
-    }
-
-    // XFAIL Rule 8: hsk=256 + GQA (any configuration)
-    if (hsk == 256 && has_gqa) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=256 + GQA (ratio=%ld)\n", gqa_ratio);
-        return false;
-    }
-
-    // XFAIL Rule 9: hsk=256 + ALiBi (any configuration)
-    if (hsk == 256 && has_alibi) {
-        GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=256 + ALiBi (max_bias=%.3f)\n", max_bias);
-        return false;
-    }
-
-    // XFAIL Rule 10: No mask + Multi-batch (nb > 1, exclude 1,32,35 for basic cases) + Complex features
-    // Specifically targets: mask=0 + nb=3 + (GQA or ALiBi or softcap) combinations that fail
-    if (!has_mask && nb == 3 && (has_gqa || has_alibi || has_softcap)) {
-        // But allow hsk=128 + nb=3 + no_mask + GQA=16 + no_alibi + kv=512 (this PASSES)
-        // And allow hsk=64,80 + nb=3 + no_mask + GQA=4 + no_alibi + kv=512 (unclear, need to check)
-        // Actually from the PASS list, we see no nb=3 without mask passes for complex features
-        // Let me be more conservative here
-        if (!(hsk == 128 && gqa_ratio == 16 && !has_alibi && kv == 512)) {
-            GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] No mask + nb=3 + complex features (hsk=%ld, GQA=%ld, ALiBi=%d, softcap=%d)\n",
-                          hsk, gqa_ratio, has_alibi, has_softcap);
-            return false;
-        }
-    }
-
-    // XFAIL Rule 11: Specific failing patterns for no_mask + multi-batch scenarios
-    // Based on detailed analysis: mask=0 + nb>1 + specific hsk combinations fail
-    if (!has_mask && kv == 512) {
-        // hsk=64,80: nb=3 with GQA=4 fails
-        if ((hsk == 64 || hsk == 80) && nb == 3 && gqa_ratio == 4) {
-            GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=%ld + no mask + nb=3 + GQA=4\n", hsk);
-            return false;
-        }
-
-        // hsk=128: nb=3 with various complex features fail (except GQA=16 no_alibi no_softcap)
-        if (hsk == 128 && nb == 3) {
-            // Allow only: GQA=16 + no_alibi + (softcap=0 or 10)
-            if (!(gqa_ratio == 16 && !has_alibi)) {
-                // This will fail, filter it out
-                if (has_alibi || gqa_ratio == 4 || (gqa_ratio == 1 && has_softcap)) {
-                    GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=128 + no mask + nb=3 + incompatible features\n");
-                    return false;
-                }
-            }
-        }
-
-        // hsk=256: nb=3 with basic config fails
-        if (hsk == 256 && nb == 3 && !has_gqa && !has_alibi && !has_softcap) {
-            GGML_LOG_WARN("[XFAIL-DL-NOT-SUPPORTED] hsk=256 + no mask + nb=3\n");
-            return false;
-        }
-    }
-
-    // ========================================================================
-    // End of XFAIL Filter List
-    // ========================================================================
-
-    // Final precise blacklist (struct-based) check
-    if (flash_attn_ext_should_skip(dst->src, (const int32_t *) dst->op_params)) {
-        return false;
-    }
-#endif
     return true;
 }
 
 void flash_attn_ext_dldnn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    bool ok = true;
-    const struct ggml_tensor * KQV  = dst;
-    const struct ggml_tensor * Q    = dst->src[0];
-    const struct ggml_tensor * K    = dst->src[1];
-    const struct ggml_tensor * V    = dst->src[2];
-    const struct ggml_tensor * mask = dst->src[3];
 
     ggml_cuda_set_device(ctx.device);
 
-    cudnnHandle_t cudnn_handle = getCudnnHandle();
-    if (cudnn_handle == nullptr) {
-        GGML_LOG_ERROR("Failed to get cuDNN handle\n");
-        return;
-    }
+    cudnnHandle_t cudnn_handle = ctx.cudnn_handle();
+    CUDNN_CHECK(cudnnSetStream(cudnn_handle, ctx.stream()));
 
-    // Extract parameters
-    float scale;
     float max_bias;
-    float logit_softcap;
-    memcpy(&scale,         ((const int32_t *) dst->op_params) + 0, sizeof(scale));
     memcpy(&max_bias,      ((const int32_t *) dst->op_params) + 1, sizeof(max_bias));
-    memcpy(&logit_softcap, ((const int32_t *) dst->op_params) + 2, sizeof(logit_softcap));
 
-    // Determine which cuDNN interface to use
     bool has_alibi = (max_bias > 0.0f);
-    bool has_mask = (mask != nullptr);
-    bool use_mha_forward = has_alibi && !has_mask;  // Use MHA for ALiBi only
-    bool use_scaled_dot_product = has_mask && !has_alibi;  // Use ScaledDotProduct for mask only
-
-    if (has_alibi && has_mask) {
-        GGML_LOG_WARN("DLDNN: Both ALiBi and mask present. Currently not supported simultaneously. Falling back to standard implementation.\n");
-        return;
-    }
-
-    if (!has_alibi && !has_mask) {
-        // GGML_DL_FATTN_DEBUG_PRINT("DLDNN: No ALiBi or mask, using cudnnScaledDotProductAttention with is_causal=true\n");
-        // use_scaled_dot_product = true;
-        GGML_DL_FATTN_DEBUG_PRINT("DLDNN: No ALiBi or mask, using cudnnMHAForward\n");
-        use_mha_forward = true;
-    }
-
-    const char *env_force_sdp = getenv("GGML_DLDNN_FORCE_SDP_ATTENTION");
-    if (env_force_sdp != nullptr && strcmp(env_force_sdp, "1") == 0) {
-        GGML_DL_FATTN_DEBUG_PRINT("DLDNN: Force using cudnnScaledDotProductAttention\n");
-        use_scaled_dot_product = true;
-        use_mha_forward = false;
-    }
-
-    const char *env_force_mha = getenv("GGML_DLDNN_FORCE_MHA_FORWARD");
-    if (env_force_mha != nullptr && strcmp(env_force_mha, "1") == 0) {
-        GGML_DL_FATTN_DEBUG_PRINT("DLDNN: Force using cudnnMHAForward\n");
-        use_mha_forward = true;
-        use_scaled_dot_product = false;
-    }
-
-    GGML_DL_FATTN_DEBUG_PRINT("DLDNN interface selection: has_alibi=%s, has_mask=%s, using %s\n",
-                  has_alibi ? "true" : "false",
-                  has_mask ? "true" : "false",
-                  use_mha_forward ? "cudnnMHAForward" : "cudnnScaledDotProductAttention");
-
-    if (use_mha_forward) {
-        flash_attn_ext_dldnn_mha_forward(ctx, dst);
-    } else if (use_scaled_dot_product) {
-        flash_attn_ext_dldnn_scaled_dot_product(ctx, dst);
+    if (has_alibi) {
+        flash_attn_ext_dldnn_mha_forward_for_alibi(ctx, dst);
     } else {
-        GGML_LOG_ERROR("DLDNN: Unable to determine appropriate cuDNN interface\n");
-        return;
-    }
-}
-
-void convert_tensor_data(
-    const void* src_data,
-    void* dst_data,
-    const ggml_tensor* src_tensor,
-    enum ggml_type dst_type,
-    cudaStream_t stream
-) {
-    // Dimensions of the source tensor
-    const int64_t ne0 = src_tensor->ne[0];
-    const int64_t ne1 = src_tensor->ne[1];
-    const int64_t ne2 = src_tensor->ne[2];
-    const int64_t ne3 = src_tensor->ne[3];
-    const enum ggml_type src_type = src_tensor->type;
-
-    const size_t n_elements = ne0 * ne1 * ne2 * ne3;
-
-    // Check if tensor is contiguously allocated
-    const bool is_contiguous = ggml_is_contiguously_allocated(src_tensor);
-
-    // Get conversion function based on destination type
-    if (dst_type == GGML_TYPE_F16) {
-        if (is_contiguous) {
-            to_fp16_cuda_t convert_func = ggml_get_to_fp16_cuda(src_type);
-            GGML_ASSERT(convert_func != nullptr && "No F16 conversion kernel for source type");
-            convert_func(src_data, (__half*)dst_data, n_elements, stream);
-        } else {
-            to_fp16_nc_cuda_t convert_func = ggml_get_to_fp16_nc_cuda(src_type);
-            GGML_ASSERT(convert_func != nullptr && "No F16 non-contiguous conversion kernel for source type");
-            const int64_t ts = ggml_type_size(src_type);
-            const int64_t s01 = src_tensor->nb[1] / ts;
-            const int64_t s02 = src_tensor->nb[2] / ts;
-            const int64_t s03 = src_tensor->nb[3] / ts;
-            convert_func(src_data, (__half*)dst_data, ne0, ne1, ne2, ne3, s01, s02, s03, stream);
-        }
-    } else if (dst_type == GGML_TYPE_F32) {
-        if (is_contiguous) {
-            to_fp32_cuda_t convert_func = ggml_get_to_fp32_cuda(src_type);
-            GGML_ASSERT(convert_func != nullptr && "No F32 conversion kernel for source type");
-            convert_func(src_data, (float*)dst_data, n_elements, stream);
-        } else {
-            to_fp32_nc_cuda_t convert_func = ggml_get_to_fp32_nc_cuda(src_type);
-            GGML_ASSERT(convert_func != nullptr && "No F32 non-contiguous conversion kernel for source type");
-            const int64_t ts = ggml_type_size(src_type);
-            const int64_t s01 = src_tensor->nb[1] / ts;
-            const int64_t s02 = src_tensor->nb[2] / ts;
-            const int64_t s03 = src_tensor->nb[3] / ts;
-            convert_func(src_data, (float*)dst_data, ne0, ne1, ne2, ne3, s01, s02, s03, stream);
-        }
-    } else if (dst_type == GGML_TYPE_BF16) {
-        if (is_contiguous) {
-            to_bf16_cuda_t convert_func = ggml_get_to_bf16_cuda(src_type);
-            GGML_ASSERT(convert_func != nullptr && "No BF16 conversion kernel for source type");
-            convert_func(src_data, (__nv_bfloat16*)dst_data, n_elements, stream);
-        } else {
-            to_bf16_nc_cuda_t convert_func = ggml_get_to_bf16_nc_cuda(src_type);
-            GGML_ASSERT(convert_func != nullptr && "No BF16 non-contiguous conversion kernel for source type");
-            const int64_t ts = ggml_type_size(src_type);
-            const int64_t s01 = src_tensor->nb[1] / ts;
-            const int64_t s02 = src_tensor->nb[2] / ts;
-            const int64_t s03 = src_tensor->nb[3] / ts;
-            convert_func(src_data, (__nv_bfloat16*)dst_data, ne0, ne1, ne2, ne3, s01, s02, s03, stream);
-        }
-    } else {
-        GGML_ABORT("Unsupported destination type for convert_tensor_data");
+        flash_attn_ext_dldnn_mha_forward_for_mask(ctx, dst);
     }
 }
 
 } // namespace ggml_dl
 
 #endif // GGML_USE_DLFA
-
-

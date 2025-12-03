@@ -62,10 +62,13 @@ get_android_cmake_flags() {
     local cuda_nvcc_executable="${SDK_DIR}/custom_bin/dlcc"
 
     # Check DISABLE_CCACHE from global scope and set CMake option accordingly
-    local ccache_cmake_option="-DGGML_CCACHE=ON"
+    local cmake_ccache_option="-DGGML_CCACHE=ON"
     if [ "$DISABLE_CCACHE" = "true" ]; then
-        ccache_cmake_option="-DGGML_CCACHE=OFF"
+        cmake_ccache_option="-DGGML_CCACHE=OFF"
     fi
+
+    # Kineto option: default to OFF if not explicitly set, so CI 的 LLAMA_KINETO=OFF 能生效
+    local cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-OFF}"
 
     # Generate CMake command (matching successful local pattern)
     cat << EOF
@@ -100,7 +103,8 @@ cmake -G Ninja -B ${build_dir} \\
     -DCMAKE_CUDA_COMPILER=${cuda_nvcc_executable} \\
     -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \\
     -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \\
-    ${ccache_cmake_option}
+    ${cmake_ccache_option} \\
+    ${cmake_kineto_option}
 EOF
 }
 

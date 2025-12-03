@@ -2022,6 +2022,18 @@ extern "C" {
     //   n_head % ne32      == 0
     //   ne3    % ne33      == 0
     //
+#if defined(GGML_USE_DLFA)
+    struct ggml_flash_attn_mask_params {
+        bool     present;
+        bool     is_causal;
+        int32_t  window_left;
+        int32_t  window_right;
+        bool     per_token_window;
+        bool     multi_sequence;
+        bool     has_alibi_bias;
+    };
+#endif
+
     GGML_API struct ggml_tensor * ggml_flash_attn_ext(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,
@@ -2038,6 +2050,16 @@ extern "C" {
 
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
+
+#if defined(GGML_USE_DLFA)
+    GGML_API void ggml_flash_attn_ext_set_mask_params(
+            struct ggml_tensor * a,
+            const struct ggml_flash_attn_mask_params * params);
+
+    GGML_API bool ggml_flash_attn_ext_get_mask_params(
+            const struct ggml_tensor * a,
+            struct ggml_flash_attn_mask_params * out_params);
+#endif
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(

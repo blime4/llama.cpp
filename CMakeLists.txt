@@ -85,6 +85,8 @@ option(LLAMA_BUILD_SERVER   "llama: build server example" ${LLAMA_STANDALONE})
 option(LLAMA_CURL       "llama: use libcurl to download model from an URL" ON)
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 
+option(LLAMA_KINETO     "llama: use Kineto for GPU profiling" ON)
+
 # Required for relocatable CMake package
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/build-info.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/common.cmake)
@@ -200,6 +202,14 @@ endif()
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
     add_subdirectory(examples)
     add_subdirectory(pocs)
+endif()
+
+if (LLAMA_KINETO)
+    add_compile_definitions(LLAMA_USE_KINETO)
+    set(KINETO_BUILD_TESTS OFF CACHE BOOL "Build Kineto tests")
+    set(KINETO_LIBRARY_TYPE "static" CACHE STRING "Build Kineto as a static library")
+    add_subdirectory(third/kineto/libkineto)
+    set_property(TARGET kineto PROPERTY POSITION_INDEPENDENT_CODE ON)
 endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS)

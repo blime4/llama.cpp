@@ -1,6 +1,6 @@
 #include "llama-graph.h"
 
-#include "llama-impl.h"
+#include "ggml.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
 
@@ -12,6 +12,7 @@
 #include <cassert>
 #include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
@@ -245,6 +246,32 @@ void llm_graph_input_cross_embd::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+#ifdef GGML_USE_DLFA
+void llm_graph_input_masked::register_flash_attn_consumer(ggml_tensor * mask, ggml_tensor * attn) {
+    if (!mask || !attn) {
+        return;
+    }
+    mask_consumers[mask].push_back(attn);
+}
+
+void llm_graph_input_masked::propagate_flash_attn_mask(
+        ggml_tensor * mask,
+        const ggml_flash_attn_mask_params & info) const {
+    if (!mask || !info.present) {
+        return;
+    }
+
+    const auto it = mask_consumers.find(mask);
+    if (it == mask_consumers.end()) {
+        return;
+    }
+
+    for (ggml_tensor * attn : it->second) {
+        ggml_flash_attn_ext_set_mask_params(attn, &info);
+    }
+}
+#endif
+
 void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
     const int64_t n_kv     = ubatch->n_tokens;
     const int64_t n_tokens = ubatch->n_tokens;
@@ -279,25 +306,101 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
             }
         }
     }
+
+#ifdef GGML_USE_DLFA
+    if (cparams.flash_attn) {
+        ggml_flash_attn_mask_params info{};
+        info.present          = true;
+        info.is_causal        = cparams.causal_attn;
+        info.window_left      = -1;
+        info.window_right     = info.is_causal ? 0 : -1;
+        info.per_token_window = false;
+
+        bool multi_seq = (ubatch->n_seqs_unq > 1);
+        for (uint32_t i = 0; i < ubatch->n_tokens && !multi_seq; ++i) {
+            if (ubatch->n_seq_id[i] > 1) {
+                multi_seq = true;
+            }
+        }
+
+        info.multi_sequence = multi_seq;
+        info.has_alibi_bias = hparams.use_alibi;
+
+        propagate_flash_attn_mask(get_kq_mask(), info);
+    }
+#else
+    if (kq_mask_cnv && kq_mask_cnv != kq_mask) {
+        kq_mask_cnv->extra = kq_mask->extra;
+    }
+#endif
 }
 
 void llm_graph_input_attn_kv_unified::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->set_input_v_idxs(self_v_idxs, ubatch);
 
+#ifdef GGML_USE_DLFA
+    ggml_flash_attn_mask_params * info_ptr = nullptr;
+    ggml_flash_attn_mask_params info{};
+    if (cparams.flash_attn) {
+        info_ptr = &info;
+    }
+    mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn, info_ptr);
+
+    if (info_ptr) {
+        propagate_flash_attn_mask(get_kq_mask(), info);
+    }
+#else
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+
+    if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
+        self_kq_mask_cnv->extra = self_kq_mask->extra;
+    }
+#endif
 }
 
 void llm_graph_input_attn_kv_unified_iswa::set_input(const llama_ubatch * ubatch) {
     mctx->get_base()->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->get_base()->set_input_v_idxs(self_v_idxs, ubatch);
 
+#ifdef GGML_USE_DLFA
+    ggml_flash_attn_mask_params * info_base_ptr = nullptr;
+    ggml_flash_attn_mask_params info_base{};
+    if (cparams.flash_attn) {
+        info_base_ptr = &info_base;
+    }
+    mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn, info_base_ptr);
+
+    if (info_base_ptr) {
+        propagate_flash_attn_mask(get_kq_mask(), info_base);
+    }
+#else
     mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+    if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
+        self_kq_mask_cnv->extra = self_kq_mask->extra;
+    }
+#endif
 
     mctx->get_swa()->set_input_k_idxs(self_k_idxs_swa, ubatch);
     mctx->get_swa()->set_input_v_idxs(self_v_idxs_swa, ubatch);
 
+#ifdef GGML_USE_DLFA
+    ggml_flash_attn_mask_params * info_swa_ptr = nullptr;
+    ggml_flash_attn_mask_params info_swa{};
+    if (cparams.flash_attn) {
+        info_swa_ptr = &info_swa;
+    }
+    mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn, info_swa_ptr);
+
+    if (info_swa_ptr) {
+        propagate_flash_attn_mask(get_kq_mask_swa(), info_swa);
+    }
+#else
     mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
+    if (self_kq_mask_swa_cnv && self_kq_mask_swa_cnv != self_kq_mask_swa) {
+        self_kq_mask_swa_cnv->extra = self_kq_mask_swa->extra;
+    }
+#endif
 }
 
 void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
@@ -334,13 +437,36 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
             }
         }
     }
+
+#ifndef GGML_USE_DLFA
+    if (cross_kq_mask_cnv && cross_kq_mask_cnv != cross_kq_mask) {
+        cross_kq_mask_cnv->extra = cross_kq_mask->extra;
+    }
+#endif
 }
 
 void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     mctx->get_attn()->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(self_v_idxs, ubatch);
 
+#ifdef GGML_USE_DLFA
+    ggml_flash_attn_mask_params * info_ptr = nullptr;
+    ggml_flash_attn_mask_params info{};
+    if (cparams.flash_attn) {
+        info_ptr = &info;
+    }
+    mctx->get_attn()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn, info_ptr);
+
+    if (info_ptr) {
+        propagate_flash_attn_mask(get_kq_mask(), info);
+    }
+#else
     mctx->get_attn()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+
+    if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
+        self_kq_mask_cnv->extra = self_kq_mask->extra;
+    }
+#endif
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
@@ -1030,7 +1156,18 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * kq_b,
          ggml_tensor * kq_mask,
          ggml_tensor * v_mla,
-             float     kq_scale) const {
+             float     kq_scale
+#ifdef GGML_USE_DLFA
+        ,
+         ggml_tensor ** flash_node
+#endif
+         ) const {
+#ifdef GGML_USE_DLFA
+    if (flash_node) {
+        *flash_node = nullptr;
+    }
+#endif
+
     const bool v_trans = v->nb[1] > v->nb[2];
 
     q = ggml_permute(ctx0, q, 0, 2, 1, 3);
@@ -1042,16 +1179,39 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     const auto n_kv     = k->ne[1];
 
     ggml_tensor * cur;
+#ifdef GGML_USE_DLFA
+    ggml_tensor * flash_attn_node = nullptr;
+#endif
 
     // TODO: replace hardcoded padding with ggml-provided padding
     if (cparams.flash_attn && (n_kv % 256 == 0) && kq_b == nullptr) {
         GGML_ASSERT(kq_b == nullptr && "Flash attention does not support KQ bias yet");
 
+        ggml_type q_type = q->type;
+
         if (v_trans) {
             v = ggml_transpose(ctx0, v);
         }
 
-#ifndef LLAMA_USE_DLFA // FIXME: nowadays cudnnMHAForward only support qkvo are the same type;
+        // DL: FIXME: bugid : 16410 : nowadays cudnnMHAForward && cudnnScaledDotProductAttention only support qkvo mask are the same type;
+#if defined(GGML_USE_DLFA)
+        if (q->type != GGML_TYPE_F16) {
+            q = ggml_cast(ctx0, q, GGML_TYPE_F16);
+        }
+
+        // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
+        if (k->type != GGML_TYPE_F16) {
+            k = ggml_cast(ctx0, k, GGML_TYPE_F16);
+        }
+
+        if (v->type != GGML_TYPE_F16) {
+            v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+        }
+
+        if (kq_mask && kq_mask->type != GGML_TYPE_F16) {
+            kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
+        }
+#else
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
         if (k->type == GGML_TYPE_F32) {
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
@@ -1060,24 +1220,13 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         if (v->type == GGML_TYPE_F32) {
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
-#else
-        if (q->type != k->type || q->type != v->type) {
-            // LLAMA_LOG_WARN("Q, K, V have different types: Q=%s, K=%s, V=%s. Using V's type: %s as common type\n",
-            //                 ggml_type_name(q->type),
-            //                 ggml_type_name(k->type),
-            //                 ggml_type_name(v->type),
-            //                 ggml_type_name(v->type));
-
-            if (q->type != k->type) {
-                k = ggml_cast(ctx0, k, q->type);
-            }
-            if (q->type != v->type) {
-                v = ggml_cast(ctx0, v, q->type);
-            }
-        }
 #endif
+
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+#ifdef GGML_USE_DLFA
+        flash_attn_node = cur;
+#endif
 
         ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
 
@@ -1098,6 +1247,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*n_head, n_tokens);
+
+        if (cur->type != q_type) {
+            cur = ggml_cast(ctx0, cur, q_type);
+        }
     } else {
         ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
 
@@ -1151,6 +1304,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
     }
 
     ggml_build_forward_expand(gf, cur);
+#ifdef GGML_USE_DLFA
+    if (flash_node) {
+        *flash_node = flash_attn_node;
+    }
+#endif
 
     return cur;
 }
@@ -1193,7 +1351,13 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = k_cur;
     ggml_tensor * v = v_cur;
 
+#ifdef GGML_USE_DLFA
+    ggml_tensor * flash_node = nullptr;
+    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale, &flash_node);
+    inp->register_flash_attn_consumer(kq_mask, flash_node);
+#else
     ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale);
+#endif
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1268,7 +1432,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale);
+    ggml_tensor * flash_node = nullptr;
+    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale, &flash_node);
+    inp->register_flash_attn_consumer(kq_mask, flash_node);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1335,7 +1501,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale);
+    ggml_tensor * flash_node = nullptr;
+    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale, &flash_node);
+    inp->register_flash_attn_consumer(kq_mask, flash_node);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1390,7 +1558,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = k_cur;
     ggml_tensor * v = v_cur;
 
-    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale);
+    ggml_tensor * flash_node = nullptr;
+    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale, &flash_node);
+    inp->register_flash_attn_consumer(kq_mask, flash_node);
     cb(cur, "kqv_out", il);
 
     if (wo) {
@@ -1443,7 +1613,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale);
+    ggml_tensor * flash_node = nullptr;
+    ggml_tensor * cur = build_attn_mha(gf, q, k, v, kq_b, kq_mask, v_mla, kq_scale, &flash_node);
+    inp->register_flash_attn_consumer(kq_mask, flash_node);
     cb(cur, "kqv_out", il);
 
     if (wo) {

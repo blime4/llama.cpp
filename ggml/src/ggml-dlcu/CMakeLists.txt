@@ -4,13 +4,11 @@ list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
 # Add DL-specific headers (in this directory)
 list(APPEND GGML_HEADERS_CUDA "dl-mulmat.cuh")
 list(APPEND GGML_HEADERS_CUDA "dl-fattn.cuh")
-list(APPEND GGML_HEADERS_CUDA "dl-fattn-golden.cuh")
 
 file(GLOB   GGML_SOURCES_CUDA "../ggml-cuda/*.cu")
 # Add DL-specific sources (in this directory)
 list(APPEND GGML_SOURCES_CUDA "dl-mulmat.cu")
 list(APPEND GGML_SOURCES_CUDA "dl-fattn.cu")
-list(APPEND GGML_SOURCES_CUDA "dl-fattn-golden.cu")
 
 # TODO:  optimize this, cause DL do not fully support all the template instances
 #        it will just waste time to compile all the template instances.

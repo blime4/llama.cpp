@@ -1,0 +1,6 @@
+set(TARGET llama-profile)
+add_executable(${TARGET} llama-profile.cpp)
+install(TARGETS ${TARGET} RUNTIME)
+target_link_libraries(${TARGET} PRIVATE common llama dl ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(${TARGET} PRIVATE ${PROJECT_SOURCE_DIR}/third/kineto/libkineto/include)
+target_compile_features(${TARGET} PRIVATE cxx_std_17)

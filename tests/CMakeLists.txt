@@ -195,6 +195,10 @@ endif()
 # llama_build_and_test(test-opt.cpp) # SLOW
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
+if (GGML_DLCU)
+    target_compile_definitions(test-backend-ops PRIVATE GGML_USE_DLCU)
+    target_compile_definitions(test-backend-ops PRIVATE GGML_USE_DLFA)
+endif()
 
 llama_build_and_test(test-model-load-cancel.cpp  LABEL "model")
 llama_build_and_test(test-autorelease.cpp        LABEL "model")

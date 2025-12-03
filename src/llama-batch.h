@@ -34,6 +34,24 @@ struct llama_ubatch {
     llama_seq_id *  seq_id_unq; // [n_seqs_unq]       | s   | seq_id
     int32_t      *  seq_idx;    // [LLAMA_MAX_SEQ]    | -   | seq_idx
     int8_t       *  output;     // [n_tokens]         | i   | -
+
+    // DL note --------------------------------------------------
+    // token: [A0, A1, A2, A3, B0, B1, B2, B3, C0, C1, C2, C3]
+    // pos:   [ 0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3]
+    // n_seq_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    // seq_id:   [→[0], →[0], →[0], →[0], →[1], →[1], →[1], →[1], →[2], →[2], →[2], →[2]]
+    // seq_id_unq: [0, 1, 2]
+    // seq_idx: 0, 1, 2, ... n_seqs_unq - 1
+    // output:
+
+    // if use shared prefix. maybe one token belongs to multiple sequences.
+    // token:      [A0, A1, A2, A3, B2, B3, C0, C1, C2, C3]
+    // pos:        [ 0,  1,  2,  3,  2,  3,  0,  1,  2,  3]
+    // n_seq_id:   [2, 2, 1, 1, 1, 1, 1, 1, 1, 1]
+    // seq_id[0] → [0, 1]
+    // seq_id[1] → [0, 1]
+    // seq_id[2] → [0]
+    // DL note --------------------------------------------------
 };
 
 // a helper for sanitizing, fulfilling and splitting a batch

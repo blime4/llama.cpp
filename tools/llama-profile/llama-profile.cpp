@@ -17,6 +17,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <set>
+
+#include <libkineto.h>
 
 #include "common.h"
 #include "ggml.h"
@@ -275,7 +278,7 @@ struct cmd_params {
 static const cmd_params cmd_params_defaults = {
     /* model                */ { "models/7B/ggml-model-q4_0.gguf" },
     /* n_prompt             */ { 512 },
-    /* n_gen                */ { 128 },
+    /* n_gen                */ { 4 },
     /* n_pg                 */ {},
     /* n_depth              */ { 0 },
     /* n_batch              */ { 2048 },
@@ -287,7 +290,7 @@ static const cmd_params cmd_params_defaults = {
     /* cpu_mask             */ { "0x0" },
     /* cpu_strict           */ { false },
     /* poll                 */ { 50 },
-    /* n_gpu_layers         */ { 99 },
+    /* n_gpu_layers         */ { 999 },
     /* rpc_servers          */ { "" },
     /* split_mode           */ { LLAMA_SPLIT_MODE_LAYER },
     /* main_gpu             */ { 0 },
@@ -299,7 +302,7 @@ static const cmd_params cmd_params_defaults = {
     /* embeddings           */ { false },
     /* no_op_offload        */ { false },
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
-    /* reps                 */ 5,
+    /* reps                 */ 1,
     /* prio                 */ GGML_SCHED_PRIO_NORMAL,
     /* delay                */ 0,
     /* verbose              */ false,
@@ -1763,7 +1766,6 @@ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_th
         for (int i = 1; i < n_tokens; i++) {
             tokens[i] = std::rand() % n_vocab;
         }
-        // printf("[P] n_tokens: %d, [n_prompt: %d, n_processed: %d, n_batch: %d]\n", n_tokens, n_prompt, n_processed, n_batch);
         int res = llama_decode(ctx, llama_batch_get_one(tokens.data(), n_tokens));
         if (res != 0) {
             fprintf(stderr, "%s: failed to decode prompt batch, res = %d\n", __func__, res);
@@ -1838,6 +1840,31 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "warning: sanitizer enabled, performance may be affected\n");
 #endif
 
+#ifdef LLAMA_USE_KINETO
+    libkineto_init(false, true);
+    std::set<libkineto::ActivityType> types = {
+        libkineto::ActivityType::CPU_OP,
+        libkineto::ActivityType::USER_ANNOTATION,
+        libkineto::ActivityType::GPU_USER_ANNOTATION,
+        libkineto::ActivityType::GPU_MEMCPY,
+        libkineto::ActivityType::GPU_MEMSET,
+        libkineto::ActivityType::CONCURRENT_KERNEL,
+        libkineto::ActivityType::EXTERNAL_CORRELATION,
+        libkineto::ActivityType::CPU_INSTANT_EVENT,
+        libkineto::ActivityType::PYTHON_FUNCTION,
+        libkineto::ActivityType::XPU_RUNTIME,
+        libkineto::ActivityType::CUDA_RUNTIME,
+        libkineto::ActivityType::CUDA_DRIVER,
+        libkineto::ActivityType::CUDA_SYNC,
+        libkineto::ActivityType::PRIVATEUSE1_RUNTIME,
+        libkineto::ActivityType::PRIVATEUSE1_DRIVER,
+        libkineto::ActivityType::CUDA_PROFILER_RANGE,
+    };
+    auto& profiler = libkineto::api().activityProfiler();
+    libkineto::api().initProfilerIfRegistered();
+    profiler.prepareTrace(types);
+#endif
+
     // initialize backends
     ggml_backend_load_all();
 
@@ -1853,9 +1880,9 @@ int main(int argc, char ** argv) {
     auto * ggml_threadpool_free_fn = (decltype(ggml_threadpool_free) *) ggml_backend_reg_get_proc_address(cpu_reg, "ggml_threadpool_free");
 
     // initialize llama.cpp
-    if (!params.verbose) {
-        llama_log_set(llama_null_log_callback, NULL);
-    }
+    // if (!params.verbose) {
+    //     llama_log_set(llama_null_log_callback, NULL);
+    // }
     llama_backend_init();
     llama_numa_init(params.numa);
 
@@ -1885,7 +1912,7 @@ int main(int argc, char ** argv) {
     for (const auto & inst : params_instances) {
         params_idx++;
         if (params.progress) {
-            fprintf(stderr, "llama-bench: benchmark %d/%zu: starting\n", params_idx, params_count);
+            fprintf(stderr, "llama-profile: benchmark %d/%zu: starting\n", params_idx, params_count);
         }
         // keep the same model between tests when possible
         if (!lmodel || !prev_inst || !inst.equal_mparams(*prev_inst)) {
@@ -1939,7 +1966,7 @@ int main(int argc, char ** argv) {
             uint64_t t_warmup_start = get_time_ns();
             if (t.n_prompt > 0) {
                 if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup prompt run\n", params_idx, params_count);
+                    fprintf(stderr, "llama-profile: benchmark %d/%zu: warmup prompt run\n", params_idx, params_count);
                 }
                 //test_prompt(ctx, std::min(t.n_batch, std::min(t.n_prompt, 32)), 0, t.n_batch, t.n_threads);
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
@@ -1951,9 +1978,9 @@ int main(int argc, char ** argv) {
             uint64_t t_warmup_ttft = get_time_ns();
             if (t.n_gen > 0) {
                 if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup generation run\n", params_idx, params_count);
+                    fprintf(stderr, "llama-profile: benchmark %d/%zu: warmup generation run\n", params_idx, params_count);
                 }
-                bool res = test_gen(ctx, 1, t.n_threads);
+                bool res = test_gen(ctx, t.n_gen, t.n_threads);
                 if (!res) {
                     fprintf(stderr, "%s: error: failed to run gen warmup\n", __func__);
                     exit(1);
@@ -1966,57 +1993,43 @@ int main(int argc, char ** argv) {
                 1. * (t_warmup_end - t_warmup_ttft) / 1e9 / t.n_gen);
         }
 
-        for (int i = 0; i < params.reps; i++) {
-            llama_memory_clear(llama_get_memory(ctx), false);
+#ifdef LLAMA_USE_KINETO
+        profiler.startTrace();
+#endif
 
-            if (t.n_depth > 0) {
-                if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
-                            i + 1, params.reps);
-                }
-                bool res = test_prompt(ctx, t.n_depth, t.n_batch, t.n_threads);
-                if (!res) {
-                    fprintf(stderr, "%s: error: failed to run depth\n", __func__);
-                    exit(1);
-                }
+        llama_memory_clear(llama_get_memory(ctx), false);
+
+        uint64_t t_start = get_time_ns();
+
+        if (t.n_prompt > 0) {
+            bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
+            if (!res) {
+                fprintf(stderr, "%s: error: failed to run prompt\n", __func__);
+                exit(1);
             }
-
-            uint64_t t_start = get_time_ns();
-
-            if (t.n_prompt > 0) {
-                if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: prompt run %d/%d\n", params_idx, params_count,
-                            i + 1, params.reps);
-                }
-                bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
-                if (!res) {
-                    fprintf(stderr, "%s: error: failed to run prompt\n", __func__);
-                    exit(1);
-                }
-            }
-
-            uint64_t t_ttft = get_time_ns();
-            if (t.n_gen > 0) {
-                if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
-                            i + 1, params.reps);
-                }
-                bool res = test_gen(ctx, t.n_gen, t.n_threads);
-                if (!res) {
-                    fprintf(stderr, "%s: error: failed to run gen\n", __func__);
-                    exit(1);
-                }
-            }
-
-            uint64_t t_ns = get_time_ns() - t_start;
-            t.samples_ns.push_back(t_ns);
-
-            uint64_t t_end = get_time_ns();
-            printf("E2E: %.6fs, TTFT: %.6fs, TPOT: %.6fs\n",
-                1. * (t_end - t_start) / 1e9,
-                1. * (t_ttft - t_start) / 1e9,
-                1. * (t_end - t_ttft) / 1e9 / t.n_gen);
         }
+
+        uint64_t t_ttft = get_time_ns();
+        if (t.n_gen > 0) {
+            bool res = test_gen(ctx, t.n_gen, t.n_threads);
+            if (!res) {
+                fprintf(stderr, "%s: error: failed to run gen\n", __func__);
+                exit(1);
+            }
+        }
+        uint64_t t_end = get_time_ns();
+        printf("E2E: %.6fs, TTFT: %.6fs, TPOT: %.6fs\n",
+            1. * (t_end - t_start) / 1e9,
+            1. * (t_ttft - t_start) / 1e9,
+            1. * (t_end - t_ttft) / 1e9 / t.n_gen);
+
+        uint64_t t_ns = get_time_ns() - t_start;
+        t.samples_ns.push_back(t_ns);
+
+#ifdef LLAMA_USE_KINETO
+        auto trace = profiler.stopTrace();
+        trace->save("llama-bench-trace.json");
+#endif
 
         if (p) {
             p->print_test(t);
@@ -2033,6 +2046,7 @@ int main(int argc, char ** argv) {
         llama_free(ctx);
 
         ggml_threadpool_free_fn(threadpool);
+        break;
     }
 
     llama_model_free(lmodel);

@@ -166,6 +166,8 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
 
 #define CUBLAS_CHECK(err) CUDA_CHECK_GEN(err, CUBLAS_STATUS_SUCCESS, cublas_get_error_str)
 
+#define CUDNN_CHECK(err) CUDA_CHECK_GEN(err, CUDNN_STATUS_SUCCESS, cudnnGetErrorString)
+
 #if !defined(GGML_USE_HIP) && !defined(GGML_CUDA_NO_VMM)
 static const char * cu_get_error_str(CUresult err) {
     const char * err_str;
@@ -778,7 +780,9 @@ struct ggml_tensor_extra_gpu {
 };
 
 
-#if ((CUDART_VERSION >= 12000) && defined(GGML_CUDA_USE_GRAPHS)) || defined(GGML_HIP_GRAPHS) || defined(GGML_USE_DLCU)
+// #if ((CUDART_VERSION >= 12000) && defined(GGML_CUDA_USE_GRAPHS)) || defined(GGML_HIP_GRAPHS)
+#if defined(GGML_CUDA_USE_GRAPHS) || defined(GGML_HIP_GRAPHS)
+// #if (!defined(GGML_USE_DLCU))
 #define USE_CUDA_GRAPH
 #endif
 
@@ -828,6 +832,7 @@ struct ggml_backend_cuda_context {
 
     cudaStream_t streams[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = { { nullptr } };
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
+    cudnnHandle_t cudnn_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
     std::unique_ptr<ggml_cuda_graph> cuda_graph;
 
@@ -861,6 +866,18 @@ struct ggml_backend_cuda_context {
 
     cublasHandle_t cublas_handle() {
         return cublas_handle(device);
+    }
+
+    cudnnHandle_t cudnn_handle(int device) {
+        if (cudnn_handles[device] == nullptr) {
+            ggml_cuda_set_device(device);
+            CUDNN_CHECK(cudnnCreate(&cudnn_handles[device]));
+        }
+        return cudnn_handles[device];
+    }
+
+    cudnnHandle_t cudnn_handle() {
+        return cudnn_handle(device);
     }
 
     // pool

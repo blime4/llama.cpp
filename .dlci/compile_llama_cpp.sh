@@ -124,7 +124,9 @@ env >> "$compile_log" 2>&1
 echo "[INFO] Getting version information..." | tee -a "$compile_log"
 tag=$(git describe --tags --exact 2>/dev/null || true)
 commit=$(git rev-parse --short=8 HEAD)
-sdk_num=$(echo $SDK_TAG | grep -oE '[0-9]{12}')
+# SDK_TAG may be unset in some CI jobs, so fall back to a placeholder rather than exiting due to set -e
+sdk_num=$(echo "${SDK_TAG:-}" | grep -oE '[0-9]{12}' || true)
+sdk_num=${sdk_num:-000000000000}
 echo "[INFO] commit: $commit" | tee -a "$compile_log"
 
 if [[ -n "$tag" ]]; then
@@ -138,7 +140,8 @@ if [[ -n "$tag" ]]; then
     export LLAMA_CPP_BUILD_VERSION="${base_version}+${denglin_version}.sdk${sdk_num}"
 else
     # No tag, use main version from version.txt
-    base_version=$(cat version.txt | sed 's/[^0-9.].*$//')
+    base_version=$(cat version.txt 2>/dev/null | sed 's/[^0-9.].*$//' || true)
+    base_version=${base_version:-0.0.0}
     echo "[INFO] base_version: $base_version" | tee -a "$compile_log"
     denglin_version="git${commit}"
     echo "[INFO] denglin_version: $denglin_version" | tee -a "$compile_log"
@@ -256,6 +259,10 @@ if [ "$DISABLE_CCACHE" = "true" ]; then
     echo "[INFO] CMake: Disabling GGML_CCACHE" | tee -a "$compile_log"
 fi
 
+# Propagate Kineto toggle from environment (default ON if unset)
+cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-ON}"
+echo "[INFO] CMake: Using ${cmake_kineto_option}" | tee -a "$compile_log"
+
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a" | tee -a "$compile_log"
 
@@ -274,7 +281,8 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         -DGGML_CPU_ARM_ARCH=armv8-a \
         -DGGML_NATIVE=OFF \
         -DSDK_DIR=${sdk} \
-        ${cmake_ccache_option}"
+        ${cmake_ccache_option} \
+        ${cmake_kineto_option}"
 
     exec_with_log "$cmake_cmd"
     if [ $? -ne 0 ]; then
@@ -299,8 +307,10 @@ elif [ "$ARCH" = "loongarch64" ]; then
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
+        -DGGML_NATIVE=OFF \
         -DSDK_DIR=${sdk} \
-        ${cmake_ccache_option}"
+        ${cmake_ccache_option} \
+        ${cmake_kineto_option}"
 
     exec_with_log "$cmake_cmd"
 elif [ "$ARCH" = "android" ]; then
@@ -335,7 +345,8 @@ elif [ "$ARCH" = "riscv64" ]; then
         -DGGML_RVV=ON \
         -DGGML_NATIVE=OFF \
         -DSDK_DIR=${sdk} \
-        ${cmake_ccache_option}"
+        ${cmake_ccache_option} \
+        ${cmake_kineto_option}"
 
     exec_with_log "$cmake_cmd"
 
@@ -362,8 +373,10 @@ else
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
+        -DGGML_NATIVE=OFF \
         -DSDK_DIR=${sdk} \
-        ${cmake_ccache_option}"
+        ${cmake_ccache_option} \
+        ${cmake_kineto_option}"
 
     exec_with_log "$cmake_cmd"
     if [ $? -ne 0 ]; then

@@ -41,10 +41,15 @@ target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
+if (LLAMA_KINETO)
+target_link_libraries(llama PUBLIC ggml kineto)
+else()
 target_link_libraries(llama PUBLIC ggml)
+endif()
 
-# FIXME: remove this after testing
-target_compile_definitions(llama PRIVATE LLAMA_USE_DLFA)
+# DL
+target_compile_definitions(llama PRIVATE GGML_USE_DLFA)
+target_compile_definitions(llama PRIVATE GGML_USE_DLCU)
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

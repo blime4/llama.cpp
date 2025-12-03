@@ -2,6 +2,7 @@
 #ifdef GGML_USE_DLCU
 
 #include "../ggml-cuda/common.cuh"
+#include "dl-utils.h"
 #include <unordered_map>
 #include <mutex>
 
@@ -54,6 +55,33 @@ struct gptq_weight_data {
  */
 void quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor);
 
+/**
+ * @brief Calculate required memory size for GPTQ quantization
+ * @param K Number of columns (input features)
+ * @param M Number of rows (output features)
+ * @param bits Quantization bits (4 or 8)
+ * @param group_size Group size for quantization
+ * @return Required memory size in bytes (aligned to 256 bytes)
+ *
+ * This function can be used to pre-allocate tensor memory with sufficient size
+ * to allow in-place quantization (overwriting original weights).
+ */
+size_t calculate_gptq_required_size(int K, int M, int bits, int group_size);
+
+/**
+ * @brief Calculate required memory size for MoE GPTQ quantization
+ * @param K Number of columns (input features)
+ * @param M Number of rows (output features)
+ * @param E Number of experts
+ * @param bits Quantization bits (currently only 4 is supported)
+ * @param group_size Group size for quantization
+ * @return Required memory size in bytes (aligned to 256 bytes)
+ *
+ * This function can be used to pre-allocate tensor memory with sufficient size
+ * to allow in-place quantization (overwriting original weights) for MoE tensors.
+ */
+size_t calculate_moe_gptq_required_size(int K, int M, int E, int bits, int group_size);
+
 
 void mul_mat_dlblas(
     ggml_backend_cuda_context& ctx,
@@ -62,23 +90,20 @@ void mul_mat_dlblas(
     ggml_tensor* dst);
 
 
-bool is_dlblas_available_simple(
+bool is_dlblas_available(
     ggml_backend_cuda_context& ctx,
     const ggml_tensor* src0,
     const ggml_tensor* src1,
     const ggml_tensor* dst,
     bool split);
 
-bool should_use_dlblas_path(
-    bool use_mul_mat_vec,
-    bool use_mul_mat_vec_q);
+void mul_mat_id_dlblas(
+    ggml_backend_cuda_context& ctx,
+    const ggml_tensor* src0,
+    const ggml_tensor* src1,
+    const ggml_tensor* ids,
+    ggml_tensor* dst);
 
-/**
- * @brief Cleanup all DL resources
- *
- * Should be called during shutdown to free GPTQ weights.
- */
-void cleanup();
 
 } // namespace ggml_dl
 
@@ -87,6 +112,14 @@ void cleanup();
  * @note This function is called from llama-model.cpp during model loading
  */
 void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(
+    int device_id,
+    const ggml_tensor* tensor);
+
+/**
+ * @brief Quantize and store tensor for MoE
+ * @note This function is called from llama-model.cpp during model loading
+ */
+void ggml_backend_cuda_moe_gptq_quantize_and_store(
     int device_id,
     const ggml_tensor* tensor);
 

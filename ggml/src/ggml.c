@@ -3000,7 +3000,8 @@ struct ggml_tensor * ggml_mul_mat(
     GGML_ASSERT(!ggml_is_transposed(a));
 
     const int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    // struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
 
     result->op     = GGML_OP_MUL_MAT;
     result->src[0] = a;
@@ -3049,7 +3050,8 @@ struct ggml_tensor * ggml_mul_mat_id(
     GGML_ASSERT(ids->ne[0] % b->ne[1] == 0); // can broadcast
 
     const int64_t ne[4] = { as->ne[1], ids->ne[0], b->ne[2], 1 };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    // struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    struct ggml_tensor * result = ggml_new_tensor(ctx, b->type, 4, ne);
 
     result->op     = GGML_OP_MUL_MAT_ID;
     result->src[0] = as;
@@ -3587,6 +3589,10 @@ struct ggml_tensor * ggml_get_rows(
     // TODO: implement non F32 return
     enum ggml_type type = GGML_TYPE_F32;
     if (a->type == GGML_TYPE_I32) {
+        type = a->type;
+    }
+    // DL
+    if (a->type == GGML_TYPE_F16) {
         type = a->type;
     }
     struct ggml_tensor * result = ggml_new_tensor_4d(ctx, type, a->ne[0], b->ne[0], b->ne[1], b->ne[2]);
@@ -4754,6 +4760,40 @@ struct ggml_tensor * ggml_top_k(
 
 // ggml_flash_attn_ext
 
+#ifdef GGML_USE_DLFA
+#define GGML_FLASH_ATTN_PARAM_SCALE_F32           0
+#define GGML_FLASH_ATTN_PARAM_MAX_BIAS_F32        1
+#define GGML_FLASH_ATTN_PARAM_SOFTCAP_F32         2
+#define GGML_FLASH_ATTN_PARAM_PREC_I32            3
+#define GGML_FLASH_ATTN_PARAM_MASK_PRESENT_I32    4
+#define GGML_FLASH_ATTN_PARAM_MASK_CAUSAL_I32     5
+#define GGML_FLASH_ATTN_PARAM_MASK_WIN_LEFT_I32   6
+#define GGML_FLASH_ATTN_PARAM_MASK_WIN_RIGHT_I32  7
+#define GGML_FLASH_ATTN_PARAM_MASK_PER_TOKEN_I32  8
+#define GGML_FLASH_ATTN_PARAM_MASK_MULTI_SEQ_I32  9
+#define GGML_FLASH_ATTN_PARAM_MASK_HAS_ALIBI_I32 10
+#define GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32     11
+
+#define GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE 0x46414d31 // 'FAM1'
+
+struct ggml_flash_attn_ext_op_params {
+    float    scale;
+    float    max_bias;
+    float    logit_softcap;
+    int32_t  prec;
+    int32_t  mask_present;
+    int32_t  mask_is_causal;
+    int32_t  mask_window_left;
+    int32_t  mask_window_right;
+    int32_t  mask_per_token_window;
+    int32_t  mask_multi_sequence;
+    int32_t  mask_has_alibi_bias;
+    int32_t  mask_magic;
+};
+
+static_assert(sizeof(struct ggml_flash_attn_ext_op_params) <= GGML_MAX_OP_PARAMS, "flash attn params exceed op_params capacity");
+#endif // GGML_USE_DLFA
+
 struct ggml_tensor * ggml_flash_attn_ext(
         struct ggml_context * ctx,
         struct ggml_tensor  * q,
@@ -4785,10 +4825,29 @@ struct ggml_tensor * ggml_flash_attn_ext(
 
     // permute(0, 2, 1, 3)
     int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
-    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    // struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+    struct ggml_tensor* result = ggml_new_tensor(ctx, q->type, 4, ne);
 
+#if defined(GGML_USE_DLFA)
+    struct ggml_flash_attn_ext_op_params params = {
+        /*.scale                =*/ scale,
+        /*.max_bias             =*/ max_bias,
+        /*.logit_softcap        =*/ logit_softcap,
+        /*.prec                 =*/ (int32_t) GGML_PREC_DEFAULT,
+        /*.mask_present         =*/ 0,
+        /*.mask_is_causal       =*/ 0,
+        /*.mask_window_left     =*/ -1,
+        /*.mask_window_right    =*/ -1,
+        /*.mask_per_token_window=*/ 0,
+        /*.mask_multi_sequence  =*/ 0,
+        /*.mask_has_alibi_bias  =*/ 0,
+        /*.mask_magic           =*/ 0,
+    };
+    ggml_set_op_params(result, &params, sizeof(params));
+#else
     float params[] = { scale, max_bias, logit_softcap };
     ggml_set_op_params(result, params, sizeof(params));
+#endif
 
     result->op     = GGML_OP_FLASH_ATTN_EXT;
     result->src[0] = q;
@@ -4817,6 +4876,53 @@ enum ggml_prec ggml_flash_attn_ext_get_prec(
 
     return (enum ggml_prec) prec_i32;
 }
+
+#ifdef GGML_USE_DLFA
+void ggml_flash_attn_ext_set_mask_params(
+        struct ggml_tensor * a,
+        const struct ggml_flash_attn_mask_params * params) {
+    GGML_ASSERT(a != NULL);
+    // GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    if (params == NULL) {
+        ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32, 0);
+        return;
+    }
+
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_PRESENT_I32,      params->present ? 1 : 0);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_CAUSAL_I32,       params->is_causal ? 1 : 0);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_WIN_LEFT_I32,     params->window_left);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_WIN_RIGHT_I32,    params->window_right);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_PER_TOKEN_I32,    params->per_token_window ? 1 : 0);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MULTI_SEQ_I32,    params->multi_sequence ? 1 : 0);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_HAS_ALIBI_I32,    params->has_alibi_bias ? 1 : 0);
+    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32,        GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE);
+}
+
+bool ggml_flash_attn_ext_get_mask_params(
+        const struct ggml_tensor * a,
+        struct ggml_flash_attn_mask_params * out_params) {
+    GGML_ASSERT(a != NULL);
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    const int32_t magic = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32);
+    if (magic != GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE) {
+        return false;
+    }
+
+    if (out_params != NULL) {
+        out_params->present          = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_PRESENT_I32) != 0;
+        out_params->is_causal        = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_CAUSAL_I32)  != 0;
+        out_params->window_left      = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_WIN_LEFT_I32);
+        out_params->window_right     = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_WIN_RIGHT_I32);
+        out_params->per_token_window = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_PER_TOKEN_I32) != 0;
+        out_params->multi_sequence   = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MULTI_SEQ_I32) != 0;
+        out_params->has_alibi_bias   = ggml_get_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_HAS_ALIBI_I32) != 0;
+    }
+
+    return true;
+}
+#endif // GGML_USE_DLFA
 
 // ggml_flash_attn_back
 

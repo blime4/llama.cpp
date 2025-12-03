@@ -189,6 +189,7 @@ main() {
         "./.dlci/test_llama_cpp.sh"
         "--ci-test"
         "--binary-path" "$BINARY_PATH"
+        "--simple-bench"
     )
 
     # Handle platform-specific Docker options
@@ -203,6 +204,7 @@ main() {
             "./.dlci/test_llama_cpp.sh"
             "--ci-test"
             "--binary-path" "$BINARY_PATH"
+            "--simple-bench"
         )
     elif [ "$DOCKER_PLATFORM" = "android" ]; then
         # Android cross-compiled binaries - limited testing
@@ -215,6 +217,7 @@ main() {
             "--ci-test"
             "--binary-path" "$BINARY_PATH"
             "--android-mode"
+            "--simple-bench"
         )
     fi
 

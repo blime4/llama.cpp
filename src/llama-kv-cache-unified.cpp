@@ -941,7 +941,15 @@ void llama_kv_cache_unified::set_input_v_idxs(ggml_tensor * dst, const llama_uba
     }
 }
 
-void llama_kv_cache_unified::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
+void llama_kv_cache_unified::set_input_kq_mask(
+        ggml_tensor * dst,
+        const llama_ubatch * ubatch,
+        bool causal_attn
+#ifdef GGML_USE_DLFA
+        ,
+        ggml_flash_attn_mask_params * out_info
+#endif
+        ) const {
     const uint32_t n_tokens = ubatch->n_tokens;
 
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
@@ -1008,6 +1016,30 @@ void llama_kv_cache_unified::set_input_kq_mask(ggml_tensor * dst, const llama_ub
             }
         }
     }
+
+#ifdef GGML_USE_DLFA
+    if (out_info != nullptr) {
+        ggml_flash_attn_mask_params info{};
+        info.present          = true;
+        info.is_causal        = causal_attn;
+        info.window_right     = causal_attn ? 0 : -1;
+        info.window_left      = (swa_type == LLAMA_SWA_TYPE_STANDARD && n_swa > 0)
+                                    ? (int32_t) n_swa - 1
+                                    : -1;
+        info.per_token_window = (swa_type == LLAMA_SWA_TYPE_CHUNKED);
+
+        bool multi_seq = (ubatch->n_seqs_unq > 1);
+        for (uint32_t i = 0; i < n_tokens && !multi_seq; ++i) {
+            if (ubatch->n_seq_id[i] > 1) {
+                multi_seq = true;
+            }
+        }
+        info.multi_sequence = multi_seq;
+        info.has_alibi_bias = hparams.use_alibi;
+        *out_info = info;
+    }
+    dst->extra = nullptr;
+#endif
 }
 
 void llama_kv_cache_unified::set_input_k_shift(ggml_tensor * dst) const {
@@ -1976,8 +2008,20 @@ void llama_kv_cache_unified_context::set_input_v_idxs(ggml_tensor * dst, const l
     kv->set_input_v_idxs(dst, ubatch, sinfos[i_cur]);
 }
 
-void llama_kv_cache_unified_context::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
-    kv->set_input_kq_mask(dst, ubatch, causal_attn);
+void llama_kv_cache_unified_context::set_input_kq_mask(
+        ggml_tensor * dst,
+        const llama_ubatch * ubatch,
+        bool causal_attn
+#ifdef GGML_USE_DLFA
+        ,
+        ggml_flash_attn_mask_params * out_info
+#endif
+        ) const {
+    kv->set_input_kq_mask(dst, ubatch, causal_attn
+#ifdef GGML_USE_DLFA
+            , out_info
+#endif
+            );
 }
 
 void llama_kv_cache_unified_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {

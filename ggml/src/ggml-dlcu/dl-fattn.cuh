@@ -84,4 +84,3 @@ void convert_tensor_data(
 } // namespace ggml_dl
 
 #endif // GGML_USE_DLFA
-

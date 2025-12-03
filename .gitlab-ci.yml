@@ -2,6 +2,7 @@ variables:
   REPO_PATH: "${CI_PROJECT_DIR}"
   SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
+  LLAMA_KINETO: "OFF"
 
   # SDK_TAG, LOCAL_MODEL_PATH and Docker images - now managed by unified config in .dlci/config.yml
   # These variables are set by the utils.sh script in each job
@@ -10,7 +11,7 @@ variables:
   DOCKER_ENVS=()
   while IFS='=' read -r key value; do
     DOCKER_ENVS+=(--env "${key}=${value}")
-  done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH)')
+  done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|LOCAL_MODEL_PATH|LLAMA_KINETO)')
 
 .load_unified_config: &load_unified_config |
   # Load all configuration from unified config
@@ -41,6 +42,7 @@ compile_and_test_llama_cpp_x86_64:
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/bench_llama_cpp.sh --ci-test --binary-path build_x86_64/bin
   artifacts:
     paths:
       - build_x86_64/bin
@@ -62,6 +64,7 @@ compile_and_test_llama_cpp_aarch64:
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/bench_llama_cpp.sh --ci-test --binary-path build_aarch64/bin
   artifacts:
     paths:
       - build_aarch64/bin
@@ -106,6 +109,7 @@ compile_and_test_llama_cpp_loongarch64:
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/test_llama_cpp.sh
+    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/bench_llama_cpp.sh --ci-test --binary-path build_loongarch64/bin
   artifacts:
     paths:
       - build_loongarch64/bin

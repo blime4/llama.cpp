@@ -36,7 +36,7 @@ endif()
 
 if (GGML_ALL_WARNINGS)
     if (NOT MSVC)
-        list(APPEND WARNING_FLAGS -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function)
+        list(APPEND WARNING_FLAGS -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-gnu-line-marker -Wno-unused-parameter -Wno-invalid-noreturn -Wno-unused-variable)
         list(APPEND C_FLAGS       -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes
                                   -Werror=implicit-int -Werror=implicit-function-declaration)
         list(APPEND CXX_FLAGS     -Wmissing-declarations -Wmissing-noreturn)
@@ -203,7 +203,8 @@ add_library(ggml-base
             ggml-threading.h
             ggml-quants.c
             ggml-quants.h
-            gguf.cpp)
+            gguf.cpp
+            ggml-dlfa.cpp)
 
 target_include_directories(ggml-base PRIVATE .)
 if (GGML_BACKEND_DL)
@@ -285,6 +286,10 @@ function(ggml_add_backend_library backend)
     if (${BUILD_SHARED_LIBS})
         target_compile_definitions(${backend} PRIVATE GGML_BACKEND_BUILD)
         target_compile_definitions(${backend} PUBLIC  GGML_BACKEND_SHARED)
+    endif()
+
+    if (GGML_DLCU)
+        target_compile_definitions(${backend} PRIVATE GGML_USE_DLCU)
     endif()
 
     if(NOT GGML_AVAILABLE_BACKENDS)
@@ -427,6 +432,10 @@ ggml_add_backend(SYCL)
 ggml_add_backend(Vulkan)
 ggml_add_backend(OpenCL)
 ggml_add_backend(DLCU)
+
+if (GGML_DLCU)
+    target_compile_definitions(ggml-base PRIVATE GGML_USE_DLCU GGML_USE_DLFA)
+endif()
 
 foreach (target ggml-base ggml)
     target_include_directories(${target} PUBLIC    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../include> $<INSTALL_INTERFACE:include>)

@@ -7,8 +7,8 @@ static inline __device__ void ggml_cuda_swap(T & a, T & b) {
     b = tmp;
 }
 
-template<ggml_sort_order order>
-static __global__ void k_argsort_f32_i32(const float * x, int * dst, const int ncols, int ncols_pad) {
+template<ggml_sort_order order, typename T>
+static __global__ void k_argsort_i32(const T * x, int * dst, const int ncols, int ncols_pad) {
     // bitonic sort
     int col = threadIdx.x;
     int row = blockIdx.y;
@@ -17,7 +17,7 @@ static __global__ void k_argsort_f32_i32(const float * x, int * dst, const int n
         return;
     }
 
-    const float * x_row = x + row * ncols;
+    const T * x_row = x + row * ncols;
     extern __shared__ int dst_row[];
 
     // initialize indices
@@ -65,7 +65,8 @@ static int next_power_of_2(int x) {
     return n;
 }
 
-static void argsort_f32_i32_cuda(const float * x, int * dst, const int ncols, const int nrows, ggml_sort_order order, cudaStream_t stream) {
+template <typename T>
+static void argsort_i32_cuda(const T * x, int * dst, const int ncols, const int nrows, ggml_sort_order order, cudaStream_t stream) {
     // bitonic sort requires ncols to be power of 2
     const int ncols_pad = next_power_of_2(ncols);
 
@@ -77,9 +78,9 @@ static void argsort_f32_i32_cuda(const float * x, int * dst, const int ncols, co
     GGML_ASSERT(shared_mem <= ggml_cuda_info().devices[ggml_cuda_get_device()].smpb);
 
     if (order == GGML_SORT_ORDER_ASC) {
-        k_argsort_f32_i32<GGML_SORT_ORDER_ASC><<<block_nums, block_dims, shared_mem, stream>>>(x, dst, ncols, ncols_pad);
+        k_argsort_i32<GGML_SORT_ORDER_ASC><<<block_nums, block_dims, shared_mem, stream>>>(x, dst, ncols, ncols_pad);
     } else if (order == GGML_SORT_ORDER_DESC) {
-        k_argsort_f32_i32<GGML_SORT_ORDER_DESC><<<block_nums, block_dims, shared_mem, stream>>>(x, dst, ncols, ncols_pad);
+        k_argsort_i32<GGML_SORT_ORDER_DESC><<<block_nums, block_dims, shared_mem, stream>>>(x, dst, ncols, ncols_pad);
     } else {
         GGML_ABORT("fatal error");
     }
@@ -91,7 +92,7 @@ void ggml_cuda_op_argsort(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     float * dst_d = (float *)dst->data;
     cudaStream_t stream = ctx.stream();
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    // GGML_ASSERT(src0->type == GGML_TYPE_F32);
     GGML_ASSERT( dst->type == GGML_TYPE_I32);
     GGML_ASSERT(ggml_is_contiguous(src0));
 
@@ -100,5 +101,11 @@ void ggml_cuda_op_argsort(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     enum ggml_sort_order order = (enum ggml_sort_order) dst->op_params[0];
 
-    argsort_f32_i32_cuda(src0_d, (int *)dst_d, ncols, nrows, order, stream);
+    if (src0->type == GGML_TYPE_F32) {
+        argsort_i32_cuda(src0_d, (int *)dst_d, ncols, nrows, order, stream);
+    } else if (src0->type == GGML_TYPE_F16) {
+        argsort_i32_cuda((const half*)src0_d, (int *)dst_d, ncols, nrows, order, stream);
+    } else {
+        GGML_ASSERT(false);
+    }
 }

@@ -28,38 +28,38 @@ platform_suffixes:
 
 build:
   sdk:
-    tag: "V2_SOFTWARE_master_202510172141"
+    tag: "V2_SOFTWARE_master_202512011845"
     workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
     docker_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
     # SDK download configuration
     download:
       x86_64:
-        repository: "ai-sw-dailybuild-v2"
-        filename: "sdk.tar.bz2"
+        repository: "sw-master-sdk-MR"
+        filename_pattern: "*manylinux_2_28-x86_64-test.tar.xz"
         extract_dir: "sdk"
       aarch64:
-        repository: "ai-sw-sdk-v2-test"
-        filename_pattern: "*manylinux_2_28-aarch64.tar.bz2"
+        repository: "sw-master-sdk-MR"
+        filename_pattern: "*manylinux_2_28-aarch64-test.tar.xz"
         extract_dir: "sdk"
       riscv64:
-        repository: "ai-sw-sdk-v2-test"
-        filename_pattern: "*-riscv64.tar.bz2"
+        repository: "sw-master-sdk-MR"
+        filename_pattern: "*ubuntu24.04-riscv64-test.tar.xz"
         extract_dir: "sdk"
       loongarch64:
-        repository: "ai-sw-sdk-v2-test"
-        filename_pattern: "*-loongarch.tar.bz2"
+        repository: "sw-master-sdk-MR"
+        filename_pattern: "*manylinux_2_38-loongarch64-test.tar.xz"
         extract_dir: "sdk"
       android:
         # Android cross-compilation dual SDK configuration
         # x86 SDK for compilation, aarch64 SDK for linking
         x86_sdk:
-          repository: "ai-sw-sdk-v2-test"
-          filename_pattern: "*manylinux_2_28-x86_64.tar.bz2"
+          repository: "sw-master-sdk-MR"
+          filename_pattern: "*manylinux_2_28-x86_64-test.tar.xz"
           extract_dir: "sdk"
         aarch64_sdk:
-          repository: "ai-sw-sdk-v2-test"
-          filename_pattern: "*manylinux_2_28-aarch64.tar.bz2"
+          repository: "sw-master-sdk-MR"
+          filename_pattern: "*manylinux_2_28-aarch64-test.tar.xz"
           extract_dir: "sdk_aarch64"
 
   model_path: "/mars/aebox/LLM/model"

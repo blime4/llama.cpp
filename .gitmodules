@@ -1,0 +1,3 @@
+[submodule "third/kineto"]
+	path = third/kineto
+	url = ../pytorch_mirrors/kineto

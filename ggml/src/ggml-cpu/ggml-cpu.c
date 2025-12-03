@@ -1105,6 +1105,8 @@ void ggml_set_f32_nd(const struct ggml_tensor * tensor, int i0, int i1, int i2, 
 
 // ggml_compute_forward_mul_mat
 
+static void * incr_ptr_aligned(void ** p, size_t size, size_t align);
+
 static void ggml_compute_forward_mul_mat_one_chunk(
     const struct ggml_compute_params * params,
     struct ggml_tensor * dst,
@@ -1207,31 +1209,58 @@ void ggml_compute_forward_mul_mat(
     const int ith = params->ith;
     const int nth = params->nth;
 
-    enum ggml_type           const vec_dot_type         = type_traits_cpu[src0->type].vec_dot_type;
-    ggml_from_float_t        const from_float           = type_traits_cpu[vec_dot_type].from_float;
-    int64_t                  const vec_dot_num_rows     = type_traits_cpu[src0->type].nrows;
+    enum ggml_type           const vec_dot_type     = type_traits_cpu[src0->type].vec_dot_type;
+    ggml_from_float_t        const from_float       = type_traits_cpu[vec_dot_type].from_float;
+    int64_t                  const vec_dot_num_rows = type_traits_cpu[src0->type].nrows;
 
     GGML_ASSERT(ne0 == ne01);
     GGML_ASSERT(ne1 == ne11);
     GGML_ASSERT(ne2 == ne12);
     GGML_ASSERT(ne3 == ne13);
 
-    // we don't support permuted src0 or src1
     GGML_ASSERT(nb00 == ggml_type_size(src0->type));
     GGML_ASSERT(nb10 == ggml_type_size(src1->type));
 
-    // dst cannot be transposed or permuted
-    GGML_ASSERT(nb0 == sizeof(float));
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
 
-    // nb01 >= nb00 - src0 is not transposed
-    //   compute by src0 rows
+    const bool need_src1_convert = src1->type != vec_dot_type;
+    const bool need_dst_convert  = dst->type  != GGML_TYPE_F32;
 
-    // TODO: extract to "extra_op"
+    if (need_dst_convert) {
+        GGML_ASSERT(ggml_get_type_traits_cpu(dst->type)->from_float);
+    }
+
+    void * wdata_cur = params->wdata;
+    void * src1_wdata = NULL;
+    void * dst_tmp_data = NULL;
+
+    if (need_src1_convert) {
+        src1_wdata = incr_ptr_aligned(&wdata_cur, ggml_row_size(vec_dot_type, ggml_nelements(src1)), sizeof(int64_t));
+    }
+
+    if (need_dst_convert) {
+        dst_tmp_data = incr_ptr_aligned(&wdata_cur, ggml_nelements(dst)*sizeof(float), sizeof(int64_t));
+    }
+
+    GGML_ASSERT(params->wsize >= (size_t)((char *) wdata_cur - (char *) params->wdata));
+
+    struct ggml_tensor dst_tmp;
+    struct ggml_tensor * dst_compute = dst;
+
+    if (need_dst_convert) {
+        dst_tmp = *dst;
+        dst_tmp.type = GGML_TYPE_F32;
+        dst_tmp.data = dst_tmp_data;
+        dst_tmp.nb[0] = sizeof(float);
+        dst_tmp.nb[1] = dst_tmp.nb[0] * dst_tmp.ne[0];
+        dst_tmp.nb[2] = dst_tmp.nb[1] * dst_tmp.ne[1];
+        dst_tmp.nb[3] = dst_tmp.nb[2] * dst_tmp.ne[2];
+        dst_compute = &dst_tmp;
+    }
+
 #if GGML_USE_LLAMAFILE
-    // broadcast factors
     const int64_t r2 = ne12 / ne02;
     const int64_t r3 = ne13 / ne03;
 
@@ -1258,7 +1287,8 @@ UseGgmlGemm1:;
 #endif
 
     if (src1->type != vec_dot_type) {
-        char * wdata = params->wdata;
+        GGML_ASSERT(src1_wdata != NULL);
+        char * wdata = (char *) src1_wdata;
 
         const size_t nbw0 = ggml_type_size(vec_dot_type);
         const size_t nbw1 = ggml_row_size(vec_dot_type, ne10);
@@ -1295,7 +1325,6 @@ UseGgmlGemm1:;
     }
 
     if (ith == 0) {
-        // Every thread starts at ith, so the first unprocessed chunk is nth.  This save a bit of coordination right at the start.
         atomic_store_explicit(&params->threadpool->current_chunk, nth, memory_order_relaxed);
     }
 
@@ -1325,40 +1354,26 @@ UseGgmlGemm1:;
 UseGgmlGemm2:;
 #endif
 
-    // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these are the same numbers)
     const int64_t nr0 = ne0;
-
-    // This is the size of the rest of the dimensions of the result
     const int64_t nr1 = ne1 * ne2 * ne3;
 
-    // Now select a reasonable chunk size.
     int chunk_size = 16;
 
-    // We need to step up the size if it's small
     if (nr0 == 1 || nr1 == 1) {
         chunk_size = 64;
     }
 
-    // distribute the work across the inner or outer loop based on which one is larger
-    // The number of chunks in the 0/1 dim.
-    // CEIL(nr0/chunk_size)
     int64_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
     int64_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
 
-    // If the chunking is poor for the number of threads on this setup, scrap the whole plan.  Re-chunk it by thread.
-    //   Also, chunking by thread was measured to have perform better on NUMA systems.  See https://github.com/ggml-org/llama.cpp/pull/6915
-    //   In theory, chunking should be just as useful on NUMA and non NUMA systems, but testing disagreed with that.
     if (nchunk0 * nchunk1 < nth * 4 || ggml_is_numa()) {
-        // distribute the thread work across the inner or outer loop based on which one is larger
-        nchunk0 = nr0 > nr1 ? nth : 1; // parallelize by src0 rows
-        nchunk1 = nr0 > nr1 ? 1 : nth; // parallelize by src1 rows
+        nchunk0 = nr0 > nr1 ? nth : 1;
+        nchunk1 = nr0 > nr1 ? 1 : nth;
     }
 
-    // The number of elements in each chunk
     const int64_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
     const int64_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
 
-    // The first chunk comes from our thread_id, the rest will get auto-assigned.
     int current_chunk = ith;
 
     while (current_chunk < nchunk0 * nchunk1) {
@@ -1371,21 +1386,35 @@ UseGgmlGemm2:;
         const int64_t ir1_start = dr1 * ith1;
         const int64_t ir1_end = MIN(ir1_start + dr1, nr1);
 
-        // dot kernels can handle 1 row and col at a time, but mmla kernels can process 2 rows and cols
         int64_t num_rows_per_vec_dot = vec_dot_num_rows;
 
-        // these checks are needed to avoid crossing dim1 boundaries
-        // can be optimized, but the logic would become more complicated, so keeping it like this for simplicity
         if ((nr0 % 2 != 0) || (ne11 % 2 != 0) || ((ir0_end - ir0_start) % 2 != 0) || ((ir1_end - ir1_start) % 2 != 0)) {
             num_rows_per_vec_dot = 1;
         }
-        ggml_compute_forward_mul_mat_one_chunk(params, dst, src0->type, num_rows_per_vec_dot, ir0_start, ir0_end, ir1_start, ir1_end);
+        ggml_compute_forward_mul_mat_one_chunk(params, dst_compute, src0->type, num_rows_per_vec_dot, ir0_start, ir0_end, ir1_start, ir1_end);
 
         if (nth >= nchunk0 * nchunk1) {
             break;
         }
 
         current_chunk = atomic_fetch_add_explicit(&params->threadpool->current_chunk, 1, memory_order_relaxed);
+    }
+
+    if (need_dst_convert) {
+        ggml_from_float_t const dst_from_float = ggml_get_type_traits_cpu(dst->type)->from_float;
+        GGML_ASSERT(dst_from_float);
+
+        float * tmp = (float *) dst_tmp_data;
+        for (int64_t i3 = 0; i3 < ne3; ++i3) {
+            for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                    const int64_t row_idx = ((i3*ne2 + i2)*ne1 + i1) * ne0;
+                    float * row_src = tmp + row_idx;
+                    void * row_dst = (char *) dst->data + i1*nb1 + i2*nb2 + i3*nb3;
+                    dst_from_float(row_src, row_dst, ne0);
+                }
+            }
+        }
     }
 }
 
@@ -2698,6 +2727,10 @@ struct ggml_cplan ggml_graph_plan(
                         if (node->src[1]->type != vec_dot_type) {
                             cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
                         }
+
+                        if (node->type != GGML_TYPE_F32) {
+                            cur += ggml_nelements(node)*ggml_type_size(GGML_TYPE_F32);
+                        }
                     } break;
                 case GGML_OP_MUL_MAT_ID:
                     {
@@ -2778,7 +2811,8 @@ struct ggml_cplan ggml_graph_plan(
                         const int64_t ne10 = node->src[1]->ne[0]; // DK
                         const int64_t ne20 = node->src[2]->ne[0]; // DV
 
-                        cur = sizeof(float)*(1*ne10 + 2*ne20)*n_tasks; // 1x head size K + 2x head size V (per thread)
+                        // cur = sizeof(float)*(1*ne10 + 2*ne20)*n_tasks; // 1x head size K + 2x head size V (per thread)
+                        cur = sizeof(float)*(2*ne10 + 2*ne20)*n_tasks; // DL: FP16 // 2x head size K (Q buffers) + 2x head size V (per thread)
                     } break;
                 case GGML_OP_FLASH_ATTN_BACK:
                     {

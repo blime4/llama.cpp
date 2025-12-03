@@ -249,6 +249,63 @@ void ggml_cuda_op_get_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     get_rows_cuda(src0->data, src0->type, (const int32_t *) src1->data, dst->data, dst->type,
         ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+// {
+// CUDA_CHECK(cudaDeviceSynchronize());
+// int i[8];
+// CUDA_CHECK(cudaMemcpy(i, src1->data, sizeof(int) * 8, cudaMemcpyDeviceToHost));
+// printf("id: %s:%s[%d, %d, %d, %d] -> %s:%s[%d, %d, %d, %d] %d %d %d %d %d %d %d %d\n",
+//         src0->name, src0->type == GGML_TYPE_F16 ? "F16": "F32",
+//         src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+//         dst->name, dst->type == GGML_TYPE_F16 ? "F16": "F32",
+//         dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+//         static_cast<int>(i[0]),
+//         static_cast<int>(i[1]),
+//         static_cast<int>(i[2]),
+//         static_cast<int>(i[3]),
+//         static_cast<int>(i[4]),
+//         static_cast<int>(i[5]),
+//         static_cast<int>(i[6]),
+//         static_cast<int>(i[7]));
+// }
+
+// if (src0->type == GGML_TYPE_F16) {
+// CUDA_CHECK(cudaDeviceSynchronize());
+// half i[8];
+// CUDA_CHECK(cudaMemcpy(i, dst->data, sizeof(half) * 8, cudaMemcpyDeviceToHost));
+// printf("ggml_cuda_op_get_rows: %s:%s[%d, %d, %d, %d] -> %s:%s[%d, %d, %d, %d] %f %f %f %f %f %f %f %f\n",
+//         src0->name, src0->type == GGML_TYPE_F16 ? "F16": "F32",
+//         src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+//         dst->name, dst->type == GGML_TYPE_F16 ? "F16": "F32",
+//         dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+//         static_cast<float>(i[0]),
+//         static_cast<float>(i[1]),
+//         static_cast<float>(i[2]),
+//         static_cast<float>(i[3]),
+//         static_cast<float>(i[4]),
+//         static_cast<float>(i[5]),
+//         static_cast<float>(i[6]),
+//         static_cast<float>(i[7]));
+// } else {
+// CUDA_CHECK(cudaDeviceSynchronize());
+// float i[8];
+// CUDA_CHECK(cudaMemcpy(i, dst->data, sizeof(float) * 8, cudaMemcpyDeviceToHost));
+// printf("ggml_cuda_op_get_rows: %s:%s[%d, %d, %d, %d] -> %s:%s[%d, %d, %d, %d] %f %f %f %f %f %f %f %f\n",
+//         src0->name, src0->type == GGML_TYPE_F16 ? "F16": "F32",
+//         src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+//         dst->name, dst->type == GGML_TYPE_F16 ? "F16": "F32",
+//         dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+//         static_cast<float>(i[0]),
+//         static_cast<float>(i[1]),
+//         static_cast<float>(i[2]),
+//         static_cast<float>(i[3]),
+//         static_cast<float>(i[4]),
+//         static_cast<float>(i[5]),
+//         static_cast<float>(i[6]),
+//         static_cast<float>(i[7]));
+// }
+// if (std::string(dst->name) == "ffn_moe_weights-47") {
+//     abort();
+// }
 }
 
 void ggml_cuda_op_get_rows_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

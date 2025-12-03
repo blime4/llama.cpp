@@ -564,6 +564,9 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
         if (cublas_handles[i] != nullptr) {
             CUBLAS_CHECK(cublasDestroy(cublas_handles[i]));
         }
+        if (cudnn_handles[i] != nullptr) {
+            CUDNN_CHECK(cudnnDestroy(cudnn_handles[i]));
+        }
     }
 }
 
@@ -736,6 +739,71 @@ static size_t ggml_backend_cuda_buffer_type_get_alloc_size(ggml_backend_buffer_t
             size += ggml_row_size(tensor->type, MATRIX_ROW_PADDING - ne0 % MATRIX_ROW_PADDING);
         }
     }
+
+// DL note --------------------------------------------------
+// Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf:
+// ----> tensor 'blk.8.ffn_gate.weight' no additional allocation needed. current size=7741440, gptq_size=7311360
+// Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q2_k.gguf
+// ----> Pre-allocating GPTQ memory for tensor 'blk.8.attn_output.weight': original gguf=1013760, gptq=1253376, final=1253376
+#ifdef GGML_USE_DLCU
+    // DL: Pre-allocate sufficient memory for GPTQ quantization if this tensor might be quantized
+    if (tensor->name[0] != '\0') {
+        const char* name = tensor->name;
+        // Only keep the main per-tensor debug info (all key info on one line)
+        bool is_norm_weight = (strstr(name, "norm") != nullptr) ||
+                              (strstr(name, "ln") != nullptr);
+        bool is_weight_tensor = (strstr(name, "weight") != nullptr) ||
+                                (strstr(name, ".w") != nullptr) ||
+                                (strstr(name, "_w") != nullptr);
+        bool is_3d = (tensor->ne[2] > 1);
+        bool is_2d = (tensor->ne[2] == 1 && tensor->ne[1] > 1);
+        bool is_mulmat_shape = (is_2d || is_3d);
+        int K = (int)tensor->ne[0];
+        int M = (int)tensor->ne[1];
+        int E = (int)tensor->ne[2];
+
+        if (is_norm_weight) {
+            GGML_DL_MULMAT_DEBUG_PRINT("[DEBUG] tensor '%s' is norm/ln tensor, skip GPTQ allocation. shape=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
+                name, tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
+        } else if (is_weight_tensor && is_mulmat_shape) {
+            int quant_bits = 4;
+            const char* env_bits = getenv("GGML_QUANT_BITS");
+            if (env_bits) {
+                int val = atoi(env_bits);
+                if (val == 4 || val == 8) quant_bits = val;
+            }
+            int group_size = 128;
+            const char* env_group = getenv("GGML_CUDA_GPTQ_GROUP_SIZE");
+            if (env_group) {
+                int val = atoi(env_group);
+                if (val > 0) group_size = val;
+            }
+            int adjusted_group_size = group_size;
+            if (K % group_size != 0) {
+                adjusted_group_size = K;
+                while (adjusted_group_size > 1 && K % adjusted_group_size != 0) {
+                    adjusted_group_size--;
+                }
+            }
+
+            size_t gptq_size = 0;
+            if (is_3d && E > 0 && adjusted_group_size > 0) {
+                gptq_size = ggml_dl::calculate_moe_gptq_required_size(K, M, E, quant_bits, adjusted_group_size);
+            } else if (!is_3d && adjusted_group_size > 0) {
+                gptq_size = ggml_dl::calculate_gptq_required_size(K, M, quant_bits, adjusted_group_size);
+            }
+            // Single combined debug print:
+            GGML_DL_MULMAT_DEBUG_PRINT("[DEBUG] tensor '%s': shape=[%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "], is_weight=%d, is_mulmat_shape=%d, K=%d, M=%d, E=%d, bits=%d, gsize=%d->%d, gptq_size=%zu, bytes=%zu\n",
+                name, tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3], is_weight_tensor, is_mulmat_shape, K, M, E, quant_bits, group_size, adjusted_group_size, gptq_size, size);
+
+            if (gptq_size > 0 && gptq_size > size) {
+                size = gptq_size;
+                GGML_DL_MULMAT_DEBUG_PRINT("Pre-allocating GPTQ memory for tensor '%s': from %zu to %zu bytes\n",
+                                           name, ggml_nbytes(tensor), size);
+            }
+        }
+    }
+#endif
 
     return size;
 
@@ -1912,8 +1980,9 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
     const float beta_f32 = 0.0f;
 
     if (dst->op_params[0] == GGML_PREC_DEFAULT) {
-        if constexpr (src0_type == GGML_TYPE_F32) {
-            dst_t = (char *) dst_ddf;  // Direct F32 output
+        // if constexpr (src0_type == GGML_TYPE_F32) {
+        if (dst->type == src0_type) {
+            dst_t = (char *) dst_ddf;  // Direct F32/F16 output
         } else {
             dst_t = (char *) dst_temp.alloc(ne_dst);
             nbd2 /= sizeof(float) / sizeof(cuda_t);
@@ -1922,7 +1991,8 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
     } else {
         dst_t = (char *) dst_ddf;
         cu_compute_type = CUBLAS_COMPUTE_32F;
-        cu_data_type = CUDA_R_32F;
+        // DL: dst maybe fp16
+        cu_data_type = dst->type == GGML_TYPE_F32 ? CUDA_R_32F : CUDA_R_16F;
         alpha = &alpha_f32;
         beta = &beta_f32;
     }
@@ -1991,7 +2061,9 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
     }
 
     // Convert output back to F32 if needed
-    if (dst->op_params[0] == GGML_PREC_DEFAULT && cu_data_type != CUDA_R_32F) {
+    // if (dst->op_params[0] == GGML_PREC_DEFAULT && cu_data_type != CUDA_R_32F) {
+    if (dst->op_params[0] == GGML_PREC_DEFAULT && dst_t != dst->data) {
+        GGML_ASSERT(dst->type == GGML_TYPE_F32);
         const to_fp32_cuda_t to_fp32_cuda = ggml_get_to_fp32_cuda(traits::ggml_type_val);
         to_fp32_cuda(dst_temp.get(), dst_ddf, ne_dst, main_stream);
     }
@@ -2071,14 +2143,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
-#if defined(GGML_USE_DLTU)
-    const char* which_branch = "";
-
 #ifdef GGML_USE_DLCU
-    bool dlblas_available = ggml_dl::is_dlblas_available_simple(ctx, src0, src1, dst, split);
-    bool should_use_dlblas_path = dlblas_available ?
-        ggml_dl::should_use_dlblas_path(use_mul_mat_vec, use_mul_mat_vec_q): false;
-    if (should_use_dlblas_path) {
+    const char* which_branch = "";
+    bool dlblas_available = ggml_dl::is_dlblas_available(ctx, src0, src1, dst, split);
+    if (dlblas_available) {
         ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
         which_branch = "ggml_dl::mul_mat_dlblas";
         // Emit a debug line once per invocation so we can see which GPU path executed.
@@ -2088,7 +2156,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
 #else
     bool dlblas_available = false;
 #endif
-#endif
+
     if (!split && use_mul_mat_vec) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
         // but this is only faster for GPUs without tensor cores or with a thin src0 matrix (particularly KQV in attention)
@@ -2135,6 +2203,14 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
     const ggml_tensor * ids  = dst->src[2];
+
+#ifdef GGML_USE_DLCU
+// #if 0
+    {
+        ggml_dl::mul_mat_id_dlblas(ctx, src0, src1, ids, dst);
+        return;
+    }
+#endif
 
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
@@ -2563,11 +2639,6 @@ static const char * ggml_backend_cuda_get_name(ggml_backend_t backend) {
 static void ggml_backend_cuda_free(ggml_backend_t backend) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
-    // DL: Clean up GPTQ cache when backend is freed to prevent dangling pointers
-#ifdef GGML_USE_DLCU
-    ggml_dl::cleanup();
-#endif
-
     delete cuda_ctx;
     delete backend;
 }
@@ -2674,12 +2745,14 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
 #endif
         }
 
+#ifndef GGML_USE_DLCU
         if (node->op == GGML_OP_MUL_MAT_ID && node->ne[2] != 1) {
             use_cuda_graph = false; // This node type is not supported by CUDA graph capture
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to unsupported node type\n", __func__);
 #endif
         }
+#endif
 
         if (node->op == GGML_OP_ADD && node->src[1] && node->src[1]->ne[1] > 1) {
             // disable CUDA graphs for batch size > 1 for now.
@@ -2699,7 +2772,7 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             // store a pointer to each copy op CUDA kernel to identify it later
             void * ptr = ggml_cuda_cpy_fn(node->src[0], node->src[1]);
             if (!ptr) {
-                use_cuda_graph = false;
+                // use_cuda_graph = false;
 #ifndef NDEBUG
                 GGML_LOG_DEBUG("%s: disabling CUDA graphs due to unsupported copy op\n", __func__);
 #endif
@@ -2918,6 +2991,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     bool use_cuda_graph = true;
     bool cuda_graph_update_required = false;
 
+#ifndef GGML_USE_DLCU
     if (cuda_ctx->cuda_graph->graph == nullptr) {
 #ifdef GGML_USE_DLCU
         // For DLCU, allow CUDA graphs on Volta (CC 700) and above
@@ -2936,6 +3010,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         }
 #endif
     }
+#endif
 
     // Disable CUDA graphs in presence of env var, old GPU, use-case which is changing too rapidly,
     // or previous graph capture failure.
@@ -2948,22 +3023,26 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     }
 
     if (use_cuda_graph) {
-        cuda_graph_update_required = is_cuda_graph_update_required(cuda_ctx, cgraph);
 
         use_cuda_graph = check_node_graph_compatibility_and_refresh_copy_ops(cuda_ctx, cgraph, use_cuda_graph);
 
-        // Disable CUDA graphs (from the next token) if the use-case is demanding too many consecutive graph updates.
-        if (use_cuda_graph && cuda_graph_update_required) {
-            cuda_ctx->cuda_graph->number_consecutive_updates++;
-        } else {
-            cuda_ctx->cuda_graph->number_consecutive_updates = 0;
-        }
+        if (use_cuda_graph) {
 
-        if (cuda_ctx->cuda_graph->number_consecutive_updates >= 4) {
-            cuda_ctx->cuda_graph->disable_due_to_too_many_updates = true;
+            cuda_graph_update_required = is_cuda_graph_update_required(cuda_ctx, cgraph);
+
+            // Disable CUDA graphs (from the next token) if the use-case is demanding too many consecutive graph updates.
+            if (cuda_graph_update_required) {
+                cuda_ctx->cuda_graph->number_consecutive_updates++;
+            } else {
+                cuda_ctx->cuda_graph->number_consecutive_updates = 0;
+            }
+
+            if (cuda_ctx->cuda_graph->number_consecutive_updates >= 4) {
+                cuda_ctx->cuda_graph->disable_due_to_too_many_updates = true;
 #ifndef NDEBUG
-            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
+                GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
 #endif
+            }
         }
     }
 
@@ -3238,9 +3317,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                         return false;
                     }
                 }
-                if (b->type == GGML_TYPE_F16 && a->type != GGML_TYPE_F16) {
-                    return false;
-                }
+                // DL: support fp16
+                // if (b->type == GGML_TYPE_F16 && a->type != GGML_TYPE_F16) {
+                //     return false;
+                // }
 #ifdef GGML_USE_MUSA
                 const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
                 if (b->ne[2]*b->ne[3] > 1 && !ggml_is_transposed(a) && !ggml_is_transposed(b)) {
@@ -3690,6 +3770,10 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
 #ifdef GGML_USE_DLTU
     if (strcmp(name, "ggml_backend_cuda_gptq_quantize_and_store_from_cpu") == 0) {
         return (void *)ggml_backend_cuda_gptq_quantize_and_store_from_cpu;
+    }
+
+    if (strcmp(name, "ggml_backend_moe_gptq_quantize_and_store") == 0) {
+        return (void *)ggml_backend_cuda_moe_gptq_quantize_and_store;
     }
 #endif
     return nullptr;

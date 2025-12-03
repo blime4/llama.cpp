@@ -9,10 +9,16 @@
 #include <memory>
 #include <set>
 #include <functional>
+#ifdef GGML_USE_DLFA
+#include <unordered_map>
+#endif
 
 struct ggml_cgraph;
 struct ggml_context;
 struct ggml_tensor;
+#ifdef GGML_USE_DLFA
+struct ggml_flash_attn_mask_params;
+#endif
 
 struct llama_ubatch;
 struct llama_cparams;
@@ -216,7 +222,24 @@ public:
     const llama_cross * cross;
 };
 
-class llm_graph_input_attn_no_cache : public llm_graph_input_i {
+#ifdef GGML_USE_DLFA
+class llm_graph_input_masked : public llm_graph_input_i {
+public:
+    virtual ~llm_graph_input_masked() = default;
+
+    void register_flash_attn_consumer(ggml_tensor * mask, ggml_tensor * attn);
+
+protected:
+    void propagate_flash_attn_mask(ggml_tensor * mask, const ggml_flash_attn_mask_params & info) const;
+
+private:
+    std::unordered_map<const ggml_tensor *, std::vector<ggml_tensor *>> mask_consumers;
+};
+#else
+using llm_graph_input_masked = llm_graph_input_i;
+#endif
+
+class llm_graph_input_attn_no_cache : public llm_graph_input_masked {
 public:
     llm_graph_input_attn_no_cache(const llama_hparams & hparams, const llama_cparams & cparams) :
         hparams(hparams),
@@ -235,7 +258,7 @@ public:
     const llama_cparams & cparams;
 };
 
-class llm_graph_input_attn_kv_unified : public llm_graph_input_i {
+class llm_graph_input_attn_kv_unified : public llm_graph_input_masked {
 public:
     llm_graph_input_attn_kv_unified(
             const llama_hparams & hparams,
@@ -266,7 +289,7 @@ public:
     const llama_kv_cache_unified_context * mctx;
 };
 
-class llm_graph_input_attn_kv_unified_iswa : public llm_graph_input_i {
+class llm_graph_input_attn_kv_unified_iswa : public llm_graph_input_masked {
 public:
     llm_graph_input_attn_kv_unified_iswa(
             const llama_hparams & hparams,
@@ -304,7 +327,7 @@ public:
     const llama_kv_cache_unified_iswa_context * mctx;
 };
 
-class llm_graph_input_attn_cross : public llm_graph_input_i {
+class llm_graph_input_attn_cross : public llm_graph_input_masked {
 public:
     llm_graph_input_attn_cross(const llama_cross * cross) : cross(cross) {}
     ~llm_graph_input_attn_cross() = default;
@@ -319,7 +342,7 @@ public:
     const llama_cross * cross = nullptr;
 };
 
-class llm_graph_input_mem_hybrid : public llm_graph_input_i {
+class llm_graph_input_mem_hybrid : public llm_graph_input_masked {
 public:
     llm_graph_input_mem_hybrid(
             const llama_hparams & hparams,
@@ -593,7 +616,12 @@ struct llm_graph_context {
              ggml_tensor * kq_b,
              ggml_tensor * kq_mask,
              ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
-                   float   kq_scale) const;
+                   float   kq_scale
+#ifdef GGML_USE_DLFA
+            ,
+             ggml_tensor ** flash_node = nullptr
+#endif
+            ) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

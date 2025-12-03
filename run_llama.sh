@@ -86,6 +86,10 @@ Usage: $0 [options]
 Options:
   --platform PLATFORM     Target platform (x86_64, aarch64, loongarch64, android)
   --action ACTION         Action to execute (compile, test, all)
+  -c                      Shortcut for "--action compile"
+  -t                      Shortcut for "--action test"
+  -cc                     Clean build_* directories, then run "--action compile"
+  -ccc                    Clean build_* directories and ccache, then run "--action compile"
   --sdk-path PATH         SDK path (or use environment variable SDK_DIR)
   --repo-path PATH        Repository path (or use environment variable REPO_PATH)
   --model-path PATH       Model path (or use environment variable LOCAL_MODEL_PATH)
@@ -93,10 +97,11 @@ Options:
   --interactive           Interactive setup
   --debug[=0]             Enable full debug mode (Debug build + verbose runtime output) [DEFAULT]
                           Use --debug=0 to disable debug mode (Release build)
-  --simple-test           Run only backend-ops tests (MUL_MAT and DLFA tests)
-  --simple-model          Run only Qwen2.5 model tests with GGML_DLFA_READY=1
+  --simple-test, -st      Run only backend-ops tests (MUL_MAT and DLFA tests)
+  --simple-model, -sm      Run only Qwen2.5 model tests with GGML_DLFA_READY=1
   --simple-tp             Run tensor parallel tests with split-mode variations
   --simple-perf           Run performance comparison tests (Pool vs Legacy modes)
+  --simple-bench, -sb     Run llama-bench performance test with Qwen3-30B model
   --big                   Use big model for testing (e.g., Qwen3-30B instead of Qwen2.5-1.5B)
   --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
@@ -508,6 +513,42 @@ setup_ccache() {
     log_success "ccache configuration completed"
 }
 
+# Clean build directories (build_*)
+clean_build_directories() {
+    local repo_path="$1"
+    if [ -z "$repo_path" ] || [ ! -d "$repo_path" ]; then
+        log_warn "Cannot clean build directories: invalid repository path ($repo_path)"
+        return
+    fi
+
+    mapfile -t build_dirs < <(find "$repo_path" -maxdepth 1 -type d -name 'build_*' -print 2>/dev/null)
+
+    if [ ${#build_dirs[@]} -eq 0 ]; then
+        log_info "No build_* directories found to clean under $repo_path"
+        return
+    fi
+
+    for dir in "${build_dirs[@]}"; do
+        log_info "Removing build directory: $dir"
+        rm -rf "$dir"
+    done
+
+    log_success "Build directories cleaned"
+}
+
+# Clean ccache directory
+clean_ccache_cache() {
+    local ccache_dir="${CCACHE_DIR:-/LocalRun/$(whoami)/cache/llama_cpp_ccache}"
+
+    if [ -d "$ccache_dir" ]; then
+        log_info "Removing ccache directory: $ccache_dir"
+        rm -rf "$ccache_dir"
+        log_success "ccache cache cleaned"
+    else
+        log_info "No ccache directory to clean (path: $ccache_dir)"
+    fi
+}
+
 # Get version information
 get_version_info() {
     local tag commit sdk_num base_version denglin_version
@@ -823,7 +864,7 @@ compile_llama_cpp() {
         -DLLAMA_CURL=OFF
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         -DGGML_CUDA_FA=ON
-        -DGGML_CUDA_FA_ALL_QUANTS=OFF
+        -DGGML_CUDA_FA_ALL_QUANTS=ON
         -DSDK_DIR="$SDK_DIR"
     )
 
@@ -964,14 +1005,15 @@ run_tests_with_repeat() {
     local debug="$3"
     local simple_test="$4"
     local simple_model="$5"
-    local repeat_count="${6:-1}"
-    local enable_dlpti="${7:-false}"
-    local dlpti_options="${8:-}"
-    local no_fa="${9:-false}"
+    local simple_bench="$6"
+    local repeat_count="${7:-1}"
+    local enable_dlpti="${8:-false}"
+    local dlpti_options="${9:-}"
+    local no_fa="${10:-false}"
 
     if [ "$repeat_count" -eq 1 ]; then
         # Single run
-        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" "$no_fa"
+        run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$simple_bench" "$enable_dlpti" "$dlpti_options" "$no_fa"
         return $?
     fi
 
@@ -992,7 +1034,7 @@ run_tests_with_repeat() {
         # Print progress on same line
         printf "\r${BLUE}[INFO]${NC} Progress: [%d/%d] " "$i" "$repeat_count"
 
-        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$enable_dlpti" "$dlpti_options" "$no_fa" >/dev/null 2>&1; then
+        if run_tests "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$simple_bench" "$enable_dlpti" "$dlpti_options" "$no_fa" >/dev/null 2>&1; then
             passed_runs=$((passed_runs + 1))
             printf "${GREEN}✓${NC} Pass: %d  ${RED}✗${NC} Fail: %d" "$passed_runs" "$failed_runs"
         else
@@ -1065,9 +1107,10 @@ run_tests() {
     local debug="${3:-false}"
     local simple_test="${4:-false}"
     local simple_model="${5:-false}"
-    local enable_dlpti="${6:-false}"
-    local dlpti_options="${7:-}"
-    local no_fa="${8:-false}"
+    local simple_bench="${6:-false}"
+    local enable_dlpti="${7:-false}"
+    local dlpti_options="${8:-}"
+    local no_fa="${9:-false}"
 
     log_info "Starting test execution (platform: $platform)"
 
@@ -1135,6 +1178,80 @@ run_tests() {
     # Set up environment variables for the comprehensive test script
     export DOCKER_PLATFORM="$platform"
     export REPO_PATH="${REPO_PATH}"
+
+    # Handle simple benchmark mode separately - call bench_llama_cpp.sh directly
+    if [ "$simple_bench" = "true" ]; then
+        unset CUDA_VISIBLE_DEVICES
+        log_info "Simple benchmark test mode enabled - calling bench_llama_cpp.sh directly"
+
+        # Check if benchmark script exists
+        local bench_script="${REPO_PATH}/.dlci/bench_llama_cpp.sh"
+
+        if [ ! -f "$bench_script" ]; then
+            log_error "Benchmark script not found: $bench_script"
+            return 1
+        fi
+
+        if [ ! -x "$bench_script" ]; then
+            log_info "Making benchmark script executable..."
+            chmod +x "$bench_script"
+        fi
+
+        log_info "Running benchmark using: $bench_script"
+
+        # Prepare arguments for bench script
+        local bench_args=()
+        if [ "$VERBOSE" = "true" ]; then
+            bench_args+=("--verbose")
+        fi
+
+        # Run benchmark script
+        local ret=0
+        local start_time
+        start_time=$(date +%s)
+
+        log_info "Output will be saved to $MAIN_LOG_FILE"
+        bash "$bench_script" "${bench_args[@]}" >> "$MAIN_LOG_FILE" 2>&1
+        ret=$?
+
+        local end_time
+        end_time=$(date +%s)
+        local bench_duration=$((end_time - start_time))
+
+        # Format duration
+        local duration_str=""
+        if [ $bench_duration -ge 3600 ]; then
+            local hours=$((bench_duration / 3600))
+            local minutes=$(((bench_duration % 3600) / 60))
+            local seconds=$((bench_duration % 60))
+            duration_str="${hours}h ${minutes}m ${seconds}s"
+        elif [ $bench_duration -ge 60 ]; then
+            local minutes=$((bench_duration / 60))
+            local seconds=$((bench_duration % 60))
+            duration_str="${minutes}m ${seconds}s"
+        else
+            duration_str="${bench_duration}s"
+        fi
+
+        if [ "$ret" -eq 0 ]; then
+            # bench_llama_cpp.sh already outputs success message, just show log location
+            log_info "Benchmark log saved to: $MAIN_LOG_FILE"
+            return 0
+        else
+            log_error "Benchmark failed (exit code: $ret)"
+            log_error "Execution time: $duration_str"
+            log_error "Benchmark log file: $MAIN_LOG_FILE"
+
+            # Show log content on error
+            if [ -f "$MAIN_LOG_FILE" ]; then
+                log_error "=== Last 50 lines of benchmark output ==="
+                tail -n 50 "$MAIN_LOG_FILE"
+                log_error "=== End of benchmark output ==="
+            fi
+
+            return 1
+        fi
+    fi
 
     # Build test script arguments
     local test_script_args=""
@@ -1425,12 +1542,15 @@ main() {
     local simple_model=false
     local simple_tp=false
     local simple_perf=false
+    local simple_bench=false
     local big_model=false
     local skip_device_check=false
     local repeat_test=1
     local enable_dlpti=false
     local dlpti_options=""
     local no_fa=false
+    local clean_build_dirs_flag=false
+    local clean_ccache_flag=false
 
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
@@ -1442,6 +1562,25 @@ main() {
             --action)
                 action="$2"
                 shift 2
+                ;;
+            -c)
+                action="compile"
+                shift
+                ;;
+            -t)
+                action="test"
+                shift
+                ;;
+            -cc)
+                clean_build_dirs_flag=true
+                action="compile"
+                shift
+                ;;
+            -ccc)
+                clean_build_dirs_flag=true
+                clean_ccache_flag=true
+                action="compile"
+                shift
                 ;;
             --sdk-path)
                 SDK_DIR_arg="$2"
@@ -1480,7 +1619,15 @@ main() {
                 simple_test=true
                 shift
                 ;;
+            -st)
+                simple_test=true
+                shift
+                ;;
             --simple-model)
+                simple_model=true
+                shift
+                ;;
+            -sm)
                 simple_model=true
                 shift
                 ;;
@@ -1490,6 +1637,14 @@ main() {
                 ;;
             --simple-perf)
                 simple_perf=true
+                shift
+                ;;
+            --simple-bench)
+                simple_bench=true
+                shift
+                ;;
+            -sb)
+                simple_bench=true
                 shift
                 ;;
             --big)
@@ -1616,6 +1771,9 @@ main() {
     if [ "$simple_model" = "true" ]; then
         log_info "Simple model test mode: enabled (Qwen2.5 with GGML_DLFA_READY=1)"
     fi
+    if [ "$simple_bench" = "true" ]; then
+        log_info "Simple benchmark test mode: enabled (llama-bench with Qwen3-30B)"
+    fi
     if [ "$repeat_test" -gt 1 ]; then
         log_info "Repeat test: $repeat_test times"
     fi
@@ -1630,6 +1788,16 @@ main() {
         log_info "Flash Attention: DISABLED (--no-fa)"
     fi
     echo ""
+
+    if [ "$clean_build_dirs_flag" = "true" ]; then
+        log_info "Cleaning build directories before compilation (-cc/-ccc)"
+        clean_build_directories "$REPO_PATH"
+    fi
+
+    if [ "$clean_ccache_flag" = "true" ]; then
+        log_info "Cleaning ccache cache before compilation (-ccc)"
+        clean_ccache_cache
+    fi
 
     # Configure platform parameters
     configure_platform "$platform"
@@ -1672,7 +1840,7 @@ main() {
                     log_warn "Device status check skipped by user request"
                 fi
 
-                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$repeat_test" "$enable_dlpti" "$dlpti_options" "$no_fa"
+                run_tests_with_repeat "$platform" "$build_dir" "$debug" "$simple_test" "$simple_model" "$simple_bench" "$repeat_test" "$enable_dlpti" "$dlpti_options" "$no_fa"
 
                 if [ "$action" = "test" ]; then
                     log_success "Testing completed"
