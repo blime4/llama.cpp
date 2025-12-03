@@ -183,6 +183,8 @@ release_llama_cpp_x86_64:
     - build-x86_64
   dependencies:
     - compile_and_test_llama_cpp_x86_64
+  needs:
+    - job: compile_and_test_llama_cpp_x86_64
   only:
     - /^dl-release-.*$/
   script:
@@ -198,6 +200,8 @@ release_llama_cpp_aarch64:
     - build-arm64
   dependencies:
     - compile_and_test_llama_cpp_aarch64
+  needs:
+    - job: compile_and_test_llama_cpp_aarch64
   only:
     - /^dl-release-.*$/
   script:
@@ -213,6 +217,8 @@ release_llama_cpp_riscv64:
     - build-x86_64
   dependencies:
     - compile_and_test_llama_cpp_riscv64
+  needs:
+    - job: compile_and_test_llama_cpp_riscv64
   only:
     - /^dl-release-.*$/
   script:
@@ -228,6 +234,8 @@ release_llama_cpp_loongarch64:
     - build-loongarch64
   dependencies:
     - compile_and_test_llama_cpp_loongarch64
+  needs:
+    - job: compile_and_test_llama_cpp_loongarch64
   only:
     - /^dl-release-.*$/
   script:
@@ -243,6 +251,8 @@ release_llama_cpp_android:
     - build-x86_64  # Android cross-compilation uses x86_64 builder
   dependencies:
     - compile_and_test_llama_cpp_android
+  needs:
+    - job: compile_and_test_llama_cpp_android
   only:
     - /^dl-release-.*$/
   script:
