@@ -67,7 +67,6 @@ get_android_cmake_flags() {
         cmake_ccache_option="-DGGML_CCACHE=OFF"
     fi
 
-    # Kineto option: default to OFF if not explicitly set, so CI 的 LLAMA_KINETO=OFF 能生效
     local cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-OFF}"
 
     # Generate CMake command (matching successful local pattern)
