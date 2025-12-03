@@ -149,3 +149,5 @@ third
 # IDE
 /*.code-workspace
 /.windsurf/
+# emscripten
+a.out.*
