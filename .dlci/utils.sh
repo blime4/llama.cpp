@@ -654,11 +654,11 @@ EOF
     fi
 
     # Create release package name
-    local release_name="llama-${CI_COMMIT_TAG:-dev}-${sdk_tag_transformed}-bin-${platform_suffix}.tar.gz"
+    local release_name="llama-${CI_COMMIT_TAG:-dev}-${sdk_tag_transformed}-bin-${platform_suffix}.zip"
 
     echo "[INFO] Creating release package: ${release_name}"
     cd "${REPO_PATH}"
-    tar -czf "${release_name}" release
+    zip -r "${release_name}" release
 
     if [ $? -eq 0 ]; then
         echo ""
