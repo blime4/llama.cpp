@@ -16,8 +16,8 @@ docker_images:
     image: "c-41:manylinux_2_38-loongarch64-20250910"
     dev_image: "c-41:manylinux_2_38-loongarch64-20250910"
   android:
-    image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251022"
-    dev_image: "c-39:ubuntu22.04-amd64-android-ndk25.2.9519653-20251022"
+    image: "c-39:android-ndk25.2-jdk22-amd64-20251204"
+    dev_image: "c-39:android-ndk25.2-jdk22-amd64-20251204"
 
 platform_suffixes:
   x86_64: "manylinux_2_28-x86_64"
