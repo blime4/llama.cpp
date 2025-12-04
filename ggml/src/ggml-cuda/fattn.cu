@@ -359,8 +359,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     }
 
 #ifdef GGML_USE_DLCU
-    // GGML_ABORT("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet");
-    GGML_LOG_ERROR("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet");
+    GGML_ABORT("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet.");
 #else
     ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
 #endif
