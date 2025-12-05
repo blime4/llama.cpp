@@ -3,6 +3,10 @@
 # Android compilation utilities - shared between local_dev.sh and CI/CD
 # This extracts the successful compilation logic from local_dev.sh
 
+# Source utility functions (needed for get_sdk_tag, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/utils.sh"
+
 # Function to set up Android compilation environment
 setup_android_compile_env() {
     local SDK_DIR="$1"
@@ -18,7 +22,7 @@ setup_android_compile_env() {
     export NDK_ROOT="${NDK_ROOT:-$ANDROID_NDK_ROOT}"
 
     # Set SDK paths
-    export SDK_TAG="${SDK_TAG:-V2_SOFTWARE_master_202510172141}"
+    export SDK_TAG=$(get_sdk_tag)
     export REPO_PATH="${REPO_PATH:-$(pwd)}"
     export DOCKER_PLATFORM="$arch"
 

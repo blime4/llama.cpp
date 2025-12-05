@@ -173,7 +173,11 @@ main() {
     echo ""
 
     # Get Docker image for the platform
-    DOCKER_IMAGE=$(get_docker_image)
+    DOCKER_IMAGE=$(get_docker_image_for_platform)
+    if [ $? -ne 0 ] || [ -z "$DOCKER_IMAGE" ]; then
+        echo "[ERROR] Failed to get Docker image for platform: $DOCKER_PLATFORM"
+        exit 1
+    fi
     echo "[INFO] Using Docker image: $DOCKER_IMAGE"
     echo ""
 
@@ -189,7 +193,6 @@ main() {
         "./.dlci/test_llama_cpp.sh"
         "--ci-test"
         "--binary-path" "$BINARY_PATH"
-        "--simple-bench"
     )
 
     # Handle platform-specific Docker options
@@ -204,7 +207,6 @@ main() {
             "./.dlci/test_llama_cpp.sh"
             "--ci-test"
             "--binary-path" "$BINARY_PATH"
-            "--simple-bench"
         )
     elif [ "$DOCKER_PLATFORM" = "android" ]; then
         # Android cross-compiled binaries - limited testing
@@ -217,7 +219,6 @@ main() {
             "--ci-test"
             "--binary-path" "$BINARY_PATH"
             "--android-mode"
-            "--simple-bench"
         )
     fi
 

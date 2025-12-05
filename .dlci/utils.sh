@@ -644,7 +644,6 @@ EOF
         platform_suffix="linux-${arch}"
     fi
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202510172141 to sdk202510082141
     local sdk_tag_transformed=""
     if [[ "$SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"

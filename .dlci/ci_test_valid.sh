@@ -33,19 +33,19 @@ NC='\033[0m' # No Color
 
 # Logging functions
 log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "${BLUE}[INFO]${NC} $1" >&2
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
 }
 
 # Function to print banner
@@ -102,32 +102,58 @@ setup_SDK_DIR() {
     fi
 
     for path in "${potential_paths[@]}"; do
-        if [ -d "$path" ]; then
+        if [ -d "$path" ] && [ -f "$path/env.sh" ]; then
             echo "$path"
             return 0
         fi
     done
 
-    # If no existing SDK found, use default location
+    # If specified SDK not found, try to find the latest available SDK
+    log_warn "Specified SDK not found: ${sdk_tag}, searching for latest available SDK..."
+
+    local search_base="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp"
+    local sdk_suffix="sdk"
+    if [ "$platform" = "riscv64" ]; then
+        sdk_suffix="sdk_riscv64"
+    fi
+
+    # Find the latest SDK directory with env.sh
+    local latest_sdk=""
+    if [ -d "$search_base" ]; then
+        latest_sdk=$(find "$search_base" -type d -name "$sdk_suffix" -exec test -f {}/env.sh \; -print 2>/dev/null | sort -r | head -1)
+    fi
+
+    if [ -n "$latest_sdk" ] && [ -d "$latest_sdk" ] && [ -f "$latest_sdk/env.sh" ]; then
+        log_warn "Using latest available SDK: $latest_sdk"
+        echo "$latest_sdk"
+        return 0
+    fi
+
+    # If still no SDK found, use default location (will fail later in validation)
     local default_SDK_DIR="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/${sdk_tag}/sdk"
     if [ "$platform" = "riscv64" ]; then
         default_SDK_DIR="/LocalRun/$(whoami)/local_builds/sdk_llama_cpp/${sdk_tag}/sdk_riscv64"
     fi
 
-    log_warn "No existing SDK found, will use: $default_SDK_DIR"
+    log_error "No existing SDK found with env.sh"
+    log_error "Searched for: ${sdk_tag}"
+    log_error "Default location: $default_SDK_DIR"
     echo "$default_SDK_DIR"
+    return 1
 }
 
 # Function to get platform suffix based on architecture
+# Note: This function is also defined in utils.sh, but we keep it here for backward compatibility
+# The utils.sh version will be used when sourced
 get_platform_suffix() {
     local platform="$1"
 
-    # Use unified configuration
+    # Use unified configuration from utils.sh
     local suffix=$(get_config_value ".platform_suffixes.${platform}")
     if [[ -n "$suffix" ]]; then
         echo "$suffix"
     else
-        log_warning "Unknown platform: ${platform}, using generic naming"
+        log_warn "Unknown platform: ${platform}, using generic naming"
         echo "linux-${platform}"
     fi
 }
@@ -138,7 +164,6 @@ get_latest_release_tag() {
     local sdk_tag="$2"
     local platform_suffix=$(get_platform_suffix "$platform")
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202510172141 to sdk202509180241
     local sdk_tag_transformed=""
     if [[ "$sdk_tag" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
@@ -194,7 +219,16 @@ download_and_extract_release() {
     local sdk_tag="$4"
 
     local platform_suffix=$(get_platform_suffix "$platform")
-    local release_filename="llama-${version}-${sdk_tag}-bin-${platform_suffix}.zip"
+
+    local sdk_tag_transformed=""
+    if [[ "$sdk_tag" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
+        sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
+    else
+        # Fallback: if pattern doesn't match, use original SDK_TAG
+        sdk_tag_transformed="$sdk_tag"
+    fi
+
+    local release_filename="llama-${version}-${sdk_tag_transformed}-bin-${platform_suffix}.zip"
     local download_path="${work_dir}/${release_filename}"
     local extract_path="${work_dir}/extracted_release"
 
@@ -372,13 +406,19 @@ main() {
 
     # Step 3: Set up SDK path
     log_info "Step 3: Setting up SDK path..."
-    SDK_DIR=$(setup_SDK_DIR "$DEFAULT_SDK_TAG" "$DOCKER_PLATFORM")
-    if [ -d "$SDK_DIR" ]; then
+    if ! SDK_DIR=$(setup_SDK_DIR "$DEFAULT_SDK_TAG" "$DOCKER_PLATFORM"); then
+        log_error "Failed to find a valid SDK directory"
+        log_error "SDK is required for running CI tests"
+        exit 1
+    fi
+
+    if [ -d "$SDK_DIR" ] && [ -f "$SDK_DIR/env.sh" ]; then
         log_info "Found existing SDK at: $SDK_DIR"
         log_success "SDK path: $SDK_DIR"
     else
-        log_warn "SDK path does not exist: $SDK_DIR"
-        log_success "SDK path (will be used): $SDK_DIR"
+        log_error "SDK path does not exist or is invalid: $SDK_DIR"
+        log_error "SDK directory must exist and contain env.sh"
+        exit 1
     fi
     echo ""
 
@@ -428,7 +468,6 @@ main() {
     # Inline download and extract logic
     local platform_suffix=$(get_platform_suffix "$DOCKER_PLATFORM")
 
-    # Transform SDK_TAG from V2_SOFTWARE_master_202510172141 to sdk202509180241
     local sdk_tag_transformed=""
     if [[ "$DEFAULT_SDK_TAG" =~ V2_SOFTWARE_master_([0-9]+) ]]; then
         sdk_tag_transformed="sdk${BASH_REMATCH[1]}"
