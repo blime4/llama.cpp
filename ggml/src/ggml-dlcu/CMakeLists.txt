@@ -16,6 +16,8 @@ list(APPEND GGML_SOURCES_CUDA ${GGML_DLCU_FP16_SRCS})
 # TODO:  optimize this, cause DL do not fully support all the template instances
 #        it will just waste time to compile all the template instances.
 file(GLOB   SRCS "../ggml-cuda/template-instances/*.cu")
+# Exclude fattn-mma-f16 files since they are not supported in DLCU yet
+list(FILTER SRCS EXCLUDE REGEX ".*fattn-mma-f16.*\\.cu$")
 list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
 if (GGML_CUDA_FA_ALL_QUANTS)

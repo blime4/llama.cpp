@@ -76,6 +76,12 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
 }
 
 static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+#ifdef GGML_USE_DLCU
+    // DLIN does not support MMA F16 flash attention yet
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(dst);
+    return;
+#endif
     const ggml_tensor * KQV  = dst;
     const ggml_tensor * Q    = dst->src[0];
     const ggml_tensor * K    = dst->src[1];
@@ -377,9 +383,11 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
             break;
         case BEST_FATTN_KERNEL_MMA_F16:
 #ifdef GGML_USE_DLCU
+            // DLIN does not support MMA F16 flash attention yet, skip silently
             GGML_ABORT("ggml_cuda_flash_attn_ext_mma_f16 is not supported in DLIN yet.");
-#endif
+#else
             ggml_cuda_flash_attn_ext_mma_f16(ctx, dst);
+#endif
             break;
 #ifdef GGML_USE_DLFA
         case BEST_FATTN_KERNEL_DLFA:
