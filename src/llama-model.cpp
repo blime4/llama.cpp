@@ -1861,7 +1861,8 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             ggml_tensor* tensor = ml.create_tensor(ctx, tn, ne, flags);
 
             // DL: used to record all MUL_MAT types of tensors, and then perform GPTQ quantization uniformly
-            if (tensor && op == GGML_OP_MUL_MAT) {
+            // only quantize quantized tensors
+            if (tensor && op == GGML_OP_MUL_MAT && ggml_is_quantized(tensor->type)) {
                 mul_mat_tensors.push_back(tensor);
             }
 
@@ -4739,8 +4740,8 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
                     if (dev) {
                         ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
-                        auto *ggml_backend_cuda_gptq_quantize_and_store_from_cpu_fn = ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_gptq_quantize_and_store_from_cpu");
-                        if (ggml_backend_cuda_gptq_quantize_and_store_from_cpu_fn) {
+                        auto *ggml_backend_cuda_gptq_quantize_and_store_fn = ggml_backend_reg_get_proc_address(reg, "ggml_backend_cuda_gptq_quantize_and_store");
+                        if (ggml_backend_cuda_gptq_quantize_and_store_fn) {
                             try {
                                 size_t dev_index = [&]() {
                                     auto *reg = ggml_backend_dev_backend_reg(dev);
@@ -4752,7 +4753,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                                     throw std::runtime_error(format("device %s not found in its backend reg", ggml_backend_dev_name(dev)));
                                 }();
                                 using quantize_and_store_fn_t = void (*)(int, const ggml_tensor*);
-                                auto fn = reinterpret_cast<quantize_and_store_fn_t>(ggml_backend_cuda_gptq_quantize_and_store_from_cpu_fn);
+                                auto fn = reinterpret_cast<quantize_and_store_fn_t>(ggml_backend_cuda_gptq_quantize_and_store_fn);
                                 fn(static_cast<int>(dev_index), tensor);
                                 // LLAMA_LOG_DEBUG("%s: quantized tensor %s on device %s\n",
                                 //             __func__, tensor->name, ggml_backend_dev_name(dev));
@@ -4760,7 +4761,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                                 LLAMA_LOG_WARN("%s: failed to quantize tensor %s: %s\n", __func__, tensor->name, e.what());
                             }
                         } else {
-                            LLAMA_LOG_ERROR("DL: no function ggml_backend_cuda_gptq_quantize_and_store_from_cpu found\n");
+                            LLAMA_LOG_ERROR("DL: no function ggml_backend_cuda_gptq_quantize_and_store found\n");
                         }
                     } else {
                         LLAMA_LOG_WARN("DL: no device found for tensor %s\n", tensor->name);

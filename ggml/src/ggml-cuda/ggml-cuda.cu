@@ -3768,8 +3768,8 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
         return (void *)ggml_backend_cuda_get_features;
     }
 #ifdef GGML_USE_DLTU
-    if (strcmp(name, "ggml_backend_cuda_gptq_quantize_and_store_from_cpu") == 0) {
-        return (void *)ggml_backend_cuda_gptq_quantize_and_store_from_cpu;
+    if (strcmp(name, "ggml_backend_cuda_gptq_quantize_and_store") == 0) {
+        return (void *)ggml_backend_cuda_gptq_quantize_and_store;
     }
 
     if (strcmp(name, "ggml_backend_moe_gptq_quantize_and_store") == 0) {
