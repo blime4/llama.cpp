@@ -2030,5 +2030,24 @@ void llama_kv_cache_unified_context::set_input_pos_bucket(ggml_tensor * dst, con
 
 uint32_t llama_kv_cache_unified::get_padding(const llama_cparams & cparams) {
     // the FA kernels require padding to avoid extra runtime boundary checks
-    return cparams.flash_attn ? 256u : 32u;
+    // return cparams.flash_attn ? 256u : 32u;
+    if (!cparams.flash_attn) {
+        return 32u;
+    }
+
+    static bool LLAMA_USE_CONTEXT_PADDING = []() {
+        const char* env = std::getenv("LLAMA_USE_CONTEXT_PADDING");
+        if (env && env[0] == '1' && env[1] == 'y' && env[2] == 'Y') {
+            return true;
+        }
+        return false;
+    }();
+
+    uint32_t next_power_of_two = 256u;
+    if (!LLAMA_USE_CONTEXT_PADDING) {
+        while (next_power_of_two < cparams.n_ctx) {
+            next_power_of_two <<= 1;
+        }
+    }
+    return next_power_of_two;
 }
