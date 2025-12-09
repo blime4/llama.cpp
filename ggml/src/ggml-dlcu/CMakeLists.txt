@@ -7,8 +7,8 @@ list(APPEND GGML_HEADERS_CUDA "dl-fattn.cuh")
 
 file(GLOB   GGML_SOURCES_CUDA "../ggml-cuda/*.cu")
 # Add DL-specific sources (in this directory)
-list(APPEND GGML_SOURCES_CUDA "dl-mulmat.cu")
-list(APPEND GGML_SOURCES_CUDA "dl-fattn.cu")
+file(GLOB   GGML_SOURCES_DLCU "*.cu")
+list(APPEND GGML_SOURCES_CUDA ${GGML_SOURCES_DLCU})
 
 # TODO:  optimize this, cause DL do not fully support all the template instances
 #        it will just waste time to compile all the template instances.

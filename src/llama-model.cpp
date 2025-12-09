@@ -7800,11 +7800,7 @@ struct llm_build_qwen3moe : public llm_graph_context {
         ggml_tensor * cur;
         ggml_tensor * inpL;
 
-        // ggml_type compute_type = GGML_TYPE_F16;
-        ggml_type compute_type = GGML_TYPE_F32;
-        if (getenv("QWEN_USE_FP16") != nullptr) {
-            compute_type = GGML_TYPE_F16;
-        }
+        ggml_type compute_type = cparams.use_fp16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
 
         inpL = build_inp_embd(model.tok_embd);
 

@@ -2030,7 +2030,7 @@ void llama_kv_cache_unified_context::set_input_pos_bucket(ggml_tensor * dst, con
 
 uint32_t llama_kv_cache_unified::get_padding(const llama_cparams & cparams) {
     // the FA kernels require padding to avoid extra runtime boundary checks
-    // return cparams.flash_attn ? 256u : 32u;
+#ifdef GGML_USE_DLCU
     if (!cparams.flash_attn) {
         return 32u;
     }
@@ -2050,4 +2050,7 @@ uint32_t llama_kv_cache_unified::get_padding(const llama_cparams & cparams) {
         }
     }
     return next_power_of_two;
+#else
+    return cparams.flash_attn ? 256u : 32u;
+#endif
 }

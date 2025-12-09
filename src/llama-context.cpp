@@ -13,6 +13,32 @@
 #include <limits>
 #include <stdexcept>
 
+#ifdef GGML_USE_DLCU
+//
+// utils
+//
+
+static bool LLAMA_USE_FP16 = []() -> bool {
+    const char* var = std::getenv("LLAMA_USE_FP16");
+    if (var == nullptr) {
+        // compatibility
+        var = std::getenv("QWEN_USE_FP16");
+    }
+    if (var && var[0] == '0') {
+        return false;
+    }
+    return true;
+}();
+
+static bool LLAMA_OPS_FUSION = []() -> bool {
+    const char* var = std::getenv("LLAMA_OPS_FUSION");
+    if (var && var[0] == '0') {
+        return false;
+    }
+    return true;
+}();
+#endif  // GGML_USE_DLCU
+
 //
 // llama_context
 //
@@ -47,6 +73,10 @@ llama_context::llama_context(
     cparams.no_perf          = params.no_perf;
     cparams.pooling_type     = params.pooling_type;
     cparams.warmup           = false;
+#ifdef GGML_USE_DLCU
+    cparams.use_fp16         = LLAMA_USE_FP16;
+    cparams.ops_fusion       = LLAMA_OPS_FUSION;
+#endif  // GGML_USE_DLCU
 
     cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
@@ -115,6 +145,10 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: flash_attn    = %d\n",   __func__, cparams.flash_attn);
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",   __func__, cparams.rope_freq_scale);
+#ifdef GGML_USE_DLCU
+    LLAMA_LOG_INFO("%s: use_fp16      = %d\n",   __func__, cparams.use_fp16);
+    LLAMA_LOG_INFO("%s: ops_fusion    = %d\n",   __func__, cparams.ops_fusion);
+#endif  // GGML_USE_DLCU
 
     if (n_ctx_per_seq < hparams.n_ctx_train) {
         LLAMA_LOG_WARN("%s: n_ctx_per_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",

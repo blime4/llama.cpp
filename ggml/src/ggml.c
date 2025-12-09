@@ -1032,9 +1032,17 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_ADAMW",
 
     "GLU",
+#ifdef GGML_USE_DLCU
+    "MOE_SUM",
+#endif  // GGML_USE_DLCU
 };
 
+#ifdef GGML_USE_DLCU
+static_assert(GGML_OP_COUNT == 87, "GGML_OP_COUNT != 87");
+#else
 static_assert(GGML_OP_COUNT == 86, "GGML_OP_COUNT != 86");
+#endif  // GGML_USE_DLCU
+
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1132,9 +1140,16 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "adamw(x)",
 
     "glu(x)",
+#ifdef GGML_USE_DLCU
+    "moe_sum(x)",
+#endif  // GGML_USE_DLCU
 };
 
+#ifdef GGML_USE_DLCU
+static_assert(GGML_OP_COUNT == 87, "GGML_OP_COUNT != 87");
+#else
 static_assert(GGML_OP_COUNT == 86, "GGML_OP_COUNT != 86");
+#endif  // GGML_USE_DLCU
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5336,6 +5351,25 @@ struct ggml_tensor * ggml_rwkv_wkv7(
 
     return result;
 }
+
+#ifdef GGML_USE_DLCU
+// ggml_moe_sum
+// a        [hidden_dim, n_expert_used, n_tokens]
+// result   [hidden_dim, n_tokens]
+struct ggml_tensor * ggml_moe_sum(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   n_expert_used) {
+    GGML_ASSERT(a->ne[1] == n_expert_used);
+    const int64_t ne[2] = {a->ne[0], a->ne[2]};
+    struct ggml_tensor * result = ggml_new_tensor(ctx, a->type, 2, ne);
+
+    result->op     = GGML_OP_MOE_SUM;
+    result->src[0] = a;
+
+    return result;
+}
+#endif  // GGML_USE_DLCU
 
 // ggml_unary
 

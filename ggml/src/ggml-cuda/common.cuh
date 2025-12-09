@@ -963,7 +963,7 @@ inline void ggml_dump_tensor(ggml_backend_cuda_context& ctx, const ggml_tensor *
     }
     std::string file_name = name + "_" + std::to_string(dump_count[name]) + ".txt";
     FILE * fp = fopen(file_name.c_str(), "w");
-    fprintf(fp, "%s:%s %d %d %d %d\n",
+    fprintf(fp, "%s:%s %ld %ld %ld %ld\n",
         tensor->name,
         ggml_type_name(tensor->type),
         tensor->ne[0],
@@ -974,24 +974,24 @@ inline void ggml_dump_tensor(ggml_backend_cuda_context& ctx, const ggml_tensor *
         std::vector<int> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
-        for (int i = 0; i < data.size(); i++) {
-            fprintf(fp, "%d %d\n", i, data[i]);
+        for (size_t i = 0; i < data.size(); i++) {
+            fprintf(fp, "%zu %d\n", i, data[i]);
         }
         fclose(fp);
     } else if (tensor->type == GGML_TYPE_F32) { 
         std::vector<float> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
-        for (int i = 0; i < data.size(); i++) {
-            fprintf(fp, "%d %f\n", i, data[i]);
+        for (size_t i = 0; i < data.size(); i++) {
+            fprintf(fp, "%zu %f\n", i, data[i]);
         }
         fclose(fp);
     } else if (tensor->type == GGML_TYPE_F16) {
         std::vector<half> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
-        for (int i = 0; i < data.size(); i++) {
-            fprintf(fp, "%d %f\n", i, static_cast<float>(data[i]));
+        for (size_t i = 0; i < data.size(); i++) {
+            fprintf(fp, "%zu %f\n", i, static_cast<float>(data[i]));
         }
         fclose(fp);
     } else {
