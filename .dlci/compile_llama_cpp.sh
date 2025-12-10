@@ -259,8 +259,8 @@ if [ "$DISABLE_CCACHE" = "true" ]; then
     echo "[INFO] CMake: Disabling GGML_CCACHE" | tee -a "$compile_log"
 fi
 
-# Propagate Kineto toggle from environment (default OFF if unset)
-cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-OFF}"
+# Propagate Kineto toggle from environment (default ON if unset)
+cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-ON}"
 echo "[INFO] CMake: Using ${cmake_kineto_option}" | tee -a "$compile_log"
 
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then

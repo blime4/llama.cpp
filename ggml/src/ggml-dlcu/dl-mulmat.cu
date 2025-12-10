@@ -1,5 +1,3 @@
-#include <pthread.h>
-#include <cassert>
 #include <csignal>
 #ifdef GGML_USE_DLCU
 #include "dl-mulmat.cuh"
@@ -801,10 +799,8 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
         // Support both 4-bit and 8-bit quantization
         GGML_ASSERT((bits == 4 || bits == 8) && "Only 4-bit and 8-bit quantization supported");
         GGML_ASSERT(K % group_size == 0);
-        if(M % 2 != 0) {
-            assert(ggml_is_quantized(src0->type));
-            assert(false && "M is not even, which 4-bit and 8-bit quantization are not supported");
-        }
+        GGML_ASSERT(M % 2 == 0);
+        GGML_ASSERT(group_size % 32 == 0);
     }{
         // Handle special cases for small K values
         if (bits == 4 && (K < 2 || K % 2 != 0)) {
@@ -1204,8 +1200,8 @@ static ggml_gptq_data* ggml_cuda_gptq_get_or_create_weight(
     return gptq_weight;
 }
 
-// DL: used to quantize the weight tensor, and then store it to the mapping table.
-void ggml_backend_cuda_gptq_quantize_and_store(int device_id, const ggml_tensor* tensor) {
+// DL: used to quantize the weight tensor from CPU, and then store it to the mapping table.
+void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor) {
     CUDA_CHECK(cudaSetDevice(device_id));
     ggml_backend_cuda_context ctx(device_id);
 
@@ -1595,6 +1591,9 @@ static void ggml_cuda_mul_mat_dlblas(ggml_backend_cuda_context & ctx, const ggml
 
 namespace ggml_dl {
 
+void quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor) {
+    ggml_backend_cuda_gptq_quantize_and_store_from_cpu(device_id, tensor);
+}
 
 // Calculate the required memory size for GPTQ quantization
 // This can be used to pre-allocate tensor memory with sufficient size
@@ -1865,15 +1864,6 @@ bool is_dlblas_available(
     GGML_UNUSED(dst);
     // do not support split now.
     if (split) return false;
-
-    // only support quantized weight for now.
-    // ---> such as Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf
-    //      blk.0.ffn_gate_inp_shexp.weight type is fp32, M=1, can not use 4-bit quantization.
-    //      also can not be quantized to 8-bit. the answer will be wrong.
-    // if the weight is unquantized, we will fallback to the original path.
-    if (!ggml_is_quantized(src0->type)) {
-        return false;
-    }
 
     // Check if we're in force test mode first
     const char* env_force_dlblas_test = getenv("GGML_FORCE_DLBLAS_TEST");

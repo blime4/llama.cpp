@@ -42,6 +42,20 @@ struct gptq_weight_data {
 
 
 /**
+ * @brief Quantize tensor to GPTQ format from CPU
+ * @param device_id CUDA device ID
+ * @param tensor Source tensor (must have data on CPU)
+ *
+ * This function:
+ * 1. Copies tensor data to GPU
+ * 2. Performs GPTQ quantization
+ * 3. Stores quantized data in global registry
+ *
+ * Called from llama_model::load_tensors() for all MUL_MAT tensors.
+ */
+void quantize_and_store_from_cpu(int device_id, const ggml_tensor* tensor);
+
+/**
  * @brief Calculate required memory size for GPTQ quantization
  * @param K Number of columns (input features)
  * @param M Number of rows (output features)
@@ -94,10 +108,10 @@ void mul_mat_id_dlblas(
 } // namespace ggml_dl
 
 /**
- * @brief Quantize and store tensor
+ * @brief Quantize and store tensor from CPU
  * @note This function is called from llama-model.cpp during model loading
  */
-void ggml_backend_cuda_gptq_quantize_and_store(
+void ggml_backend_cuda_gptq_quantize_and_store_from_cpu(
     int device_id,
     const ggml_tensor* tensor);
 

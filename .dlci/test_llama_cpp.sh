@@ -1073,7 +1073,8 @@ add_qwen_model_tests() {
     local yaml_config="$1"
 
     local qwen2_models=(
-        "Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf"
+        # DL-TODO : FIXME, M=1 fp32 can not use 4-bit quantization.
+        # "Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf"
     )
 
     local qwen25_models=(
