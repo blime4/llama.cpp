@@ -8250,8 +8250,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_soft_max(GGML_TYPE_F16, {32, 2, 32, 1}, true,  true,  GGML_TYPE_F16, {1, 1}, 0.1f, 8.0f));
 #endif
 
-    // for (float max_bias : {0.0f, 8.0f}) {
-    for (float max_bias : {0.0f}) {
+    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {200001, 2, 3, 1}, true,  true,  GGML_TYPE_F32, {1, 1}, 0.1f, 8.0f));
+    test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {200001, 2, 3, 1}, true,  true,  GGML_TYPE_F16, {1, 1}, 0.1f, 8.0f));
+
+    for (float max_bias : {0.0f, 8.0f}) {
+#ifdef GGML_USE_DLCU
+    if (max_bias > 0.0f) continue;
+#endif
         for (float scale : {1.0f, 0.1f}) {
             for (int64_t ne0 : {16, 1024}) {
                 for (int64_t ne1 : {16, 1024}) {
