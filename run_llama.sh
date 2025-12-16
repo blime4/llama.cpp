@@ -95,10 +95,11 @@ Options:
   --model-path PATH       Model path (or use environment variable LOCAL_MODEL_PATH)
   --no-auto-install       Disable automatic installation of missing dependencies
   --interactive           Interactive setup
-  --debug[=0]             Enable full debug mode (Debug build + verbose runtime output) [DEFAULT]
-                          Use --debug=0 to disable debug mode (Release build)
+  --debug                 Enable full debug mode (Debug build + verbose runtime output)
+  --release               Disable debug mode (Release build) [DEFAULT]
+                          Or use --debug=0 to disable debug mode (Release build)
   --simple-test, -st      Run only backend-ops tests (MUL_MAT and DLFA tests)
-  --simple-model, -sm      Run only Qwen2.5 model tests with GGML_DLFA_READY=1
+  --simple-model, -sm     Run only Qwen2.5 model tests with GGML_DLFA_READY=1
   --simple-tp             Run tensor parallel tests with split-mode variations
   --simple-perf           Run performance comparison tests (Pool vs Legacy modes)
   --simple-bench, -sb     Run llama-bench performance test with Qwen3-30B model
@@ -123,11 +124,11 @@ Environment variables:
   LOCAL_MODEL_PATH       Model path (default: from config.yml)
 
 Examples:
-  # Auto-detect platform, full process (debug mode by default)
+  # Auto-detect platform, full process (release mode by default)
   $0
 
   # Specify LoongArch64 platform compilation in release mode
-  $0 --platform loongarch64 --action compile --sdk-path /opt/sdk --debug=0
+  $0 --platform loongarch64 --action compile --sdk-path /opt/sdk --release
 
   # Android cross-compilation
   $0 --platform android --action compile --sdk-path /opt/sdk
@@ -992,7 +993,7 @@ compile_llama_cpp() {
 
     # Compile
     cd "$build_dir"
-    ninja -j "$(nproc)"
+    ninja -j "$(cpu_num=$(lscpu | grep '^CPU(s):' | awk '{print $2}'); if [ $((cpu_num-2)) -gt 0 ]; then echo $((cpu_num-2)); else echo 1; fi)"
 
     # Calculate compilation time
     local compile_end_time
@@ -1541,7 +1542,7 @@ main() {
     local model_path_arg=""
     local auto_install=true
     local interactive=false
-    local debug=true  # Default to debug mode unless --release is specified
+    local debug=false  # Default to release mode; use --debug to enable debug mode
     local simple_test=false
     local simple_model=false
     local simple_tp=false
@@ -1617,6 +1618,10 @@ main() {
                 else
                     debug=true
                 fi
+                shift
+                ;;
+            --release)
+                debug=false
                 shift
                 ;;
             --simple-test)
@@ -1765,9 +1770,9 @@ main() {
     log_info "Repository path: $REPO_PATH"
     log_info "Model path: $LOCAL_MODEL_PATH"
     if [ "$debug" = "true" ]; then
-        log_info "Build mode: DEBUG (Debug build + verbose output) [DEFAULT]"
+        log_info "Build mode: DEBUG (Debug build + verbose output)"
     else
-        log_info "Build mode: RELEASE (optimized, debug disabled with --debug=0)"
+        log_info "Build mode: RELEASE (optimized, default; can be forced with --release or --debug=0)"
     fi
     if [ "$simple_test" = "true" ]; then
         log_info "Simple test mode: enabled"
