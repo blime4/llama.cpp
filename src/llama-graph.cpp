@@ -288,6 +288,14 @@ static void set_flash_attn_runtime(
     }
     const int prev_seqlen_k_real = runtime ? runtime->seqlen_k_real : 0;
 
+    // Debug: print key and runtime lookup status
+    // printf("for debug : mask key = '%s', mask name = '%s', mask ptr = %p, runtime found = %d, prev_seqlen_k_real = %d\n",
+    //        key.c_str(),
+    //        mask->name ? mask->name : "<null>",
+    //        (void*)mask,
+    //        runtime != nullptr ? 1 : 0,
+    //        prev_seqlen_k_real);
+
     int seqlen_k_real = seqlen_q;
     const int64_t mask_sk = mask->ne[0];  // key sequence length (padded)
     const int64_t mask_sq = mask->ne[1];  // query sequence length
@@ -335,15 +343,25 @@ static void set_flash_attn_runtime(
             seqlen_k_real = std::max(seqlen_k_real, inferred);
         }
     } else {
-        // prefill: infer from mask if available
+        // prefill: keep accumulating across rounds instead of resetting to the new prompt length
+        // IMPORTANT: In multi-round conversations, the mask's last row only reflects the current
+        // prompt length, not the total conversation length. So we should NOT use inferred value
+        // to override the accumulated length. Only use inferred as a sanity check.
+        seqlen_k_real = (prev_seqlen_k_real > 0 ? prev_seqlen_k_real : 0) + seqlen_q;
         const int inferred = infer_from_mask_last_row();
-        if (inferred > 0) {
+        // Only use inferred value if it's larger than our accumulated value (shouldn't happen
+        // in normal cases, but acts as a safety check)
+        if (inferred > 0 && inferred > seqlen_k_real) {
+            // printf("for debug : WARNING: inferred (%d) > accumulated (%d), using inferred\n", inferred, seqlen_k_real);
             seqlen_k_real = inferred;
         }
     }
 
     // Clamp to padded length
+    int seqlen_k_real_no_clamp = seqlen_k_real;
     seqlen_k_real = std::min<int64_t>(seqlen_k_real, mask_sk);
+    // const char * stage = seqlen_q == 1 ? "decode" : "prefill";
+    // printf("for debug : stage : %s, seqlen_q : %d, seqlen_k_real_no_clamp : %d, mask_sk : %d\n", stage, seqlen_q, seqlen_k_real_no_clamp, mask_sk);
     // printf("for debug : seqlen_k_real : %d (prev=%d)\n", seqlen_k_real, prev_seqlen_k_real);
 
     // block table is built from padded kv size (n_kv = mask_sk) with 256 page blocks

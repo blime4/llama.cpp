@@ -293,9 +293,20 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const int64_t seq_k = pack.K->ne[1];
 
     // Track the real (unpadded) key length during decode per K buffer
+    // IMPORTANT: Prefer using runtime->seqlen_k_real from host side if available,
+    // to ensure synchronization between host and CUDA kernel across multi-round conversations.
     auto & decode_state = ggml_dl::flash_attn_ext_dldnn_decode_state().seq_k_real_by_k_ptr;
     const uintptr_t k_key = reinterpret_cast<uintptr_t>(pack.K->data);
     int64_t & seqlen_k_real = decode_state[k_key];
+
+    // If runtime exists and has a valid seqlen_k_real, use it as the authoritative source
+    // This ensures host-side accumulation (in set_flash_attn_runtime) is respected
+    if (runtime && runtime->seqlen_k_real > 0) {
+        // Initialize or sync decode_state with host-side value
+        if (seqlen_k_real <= 0 || seqlen_k_real != runtime->seqlen_k_real) {
+            seqlen_k_real = runtime->seqlen_k_real;
+        }
+    }
 
     GGMLTensorDescriptor k_desc_trunc;
     GGMLTensorDescriptor v_desc_trunc;
@@ -361,8 +372,30 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         };
 
         if (seq_q != 1) {
-            seqlen_k_real = clamp_seq(seq_q);
-            GGML_DL_FATTN_DEBUG_PRINT("for debug: prefill seqlen_k_real : %d\n", seqlen_k_real);
+            // Prefill: in multi-round conversations we want K length to keep
+            // accumulating instead of resetting to the prompt length of the
+            // current round.
+            // IMPORTANT: If runtime->seqlen_k_real exists, it's already been accumulated
+            // on the host side (in set_flash_attn_runtime), so use it directly.
+            // Otherwise, fall back to local accumulation logic.
+            if (runtime && runtime->seqlen_k_real > 0) {
+                // Host side has already done the accumulation, use it
+                seqlen_k_real = clamp_seq(runtime->seqlen_k_real);
+            } else {
+                // Fallback: local accumulation (shouldn't happen in normal flow)
+                int64_t prev = seqlen_k_real;
+                if (prev <= 0 || prev > seq_k) {
+                    prev = 0;
+                }
+                int64_t candidate = prev + seq_q;
+                seqlen_k_real = clamp_seq(candidate);
+            }
+            // printf(
+            //     "for debug: prefill seqlen_k_real : %lld (runtime=%lld, seq_q=%lld, seq_k=%lld)\n",
+            //     (long long) seqlen_k_real,
+            //     (long long) (runtime ? runtime->seqlen_k_real : -1),
+            //     (long long) seq_q,
+            //     (long long) seq_k);
         } else {
             if (pack.K->ne[3] != 1) {
                 GGML_ABORT(
@@ -394,19 +427,28 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                 GGML_DL_FATTN_DEBUG_PRINT("mask infer: seq_q=%lld seq_k=%lld inferred=%lld min=%.3f max=%.3f\n",
                     (long long) seq_q, (long long) seq_k, (long long) inferred, (double) min_v, (double) max_v);
             }
-            int64_t prev = seqlen_k_real;
-            if (prev <= 0 || prev > seq_k) {
-                prev = seq_q;
+            // Decode: similar to prefill, prefer runtime->seqlen_k_real if available
+            // Host side has already accumulated: prev_seqlen_k_real + seqlen_q
+            if (runtime && runtime->seqlen_k_real > 0) {
+                // Host side has already done the accumulation, use it
+                seqlen_k_real = clamp_seq(runtime->seqlen_k_real);
+            } else {
+                // Fallback: local accumulation (shouldn't happen in normal flow)
+                int64_t prev = seqlen_k_real;
+                if (prev <= 0 || prev > seq_k) {
+                    prev = seq_q;
+                }
+                int64_t candidate = prev + seq_q;
+                if (inferred > 0 && inferred <= seq_k) {
+                    candidate = std::max<int64_t>(candidate, inferred);
+                }
+                seqlen_k_real = clamp_seq(candidate);
             }
-            int64_t candidate = prev + seq_q;
-            if (inferred > 0 && inferred <= seq_k) {
-                candidate = std::max<int64_t>(candidate, inferred);
-            }
-            seqlen_k_real = clamp_seq(candidate);
             GGML_DL_FATTN_DEBUG_PRINT(
-                "decode seqlen_k_real updated for layer %p: new=%lld (max=%lld)\n",
+                "decode seqlen_k_real updated for layer %p: new=%lld (runtime=%lld, max=%lld)\n",
                 (const void *) pack.K->data,
                 (long long) seqlen_k_real,
+                (long long) (runtime ? runtime->seqlen_k_real : -1),
                 (long long) seq_k);
         }
 
@@ -414,6 +456,10 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         set_trunc_desc(pack.V, v_desc_trunc, seqlen_k_real);
         k_desc_ptr = &k_desc_trunc;
         v_desc_ptr = &v_desc_trunc;
+
+        // Sync back to decode_state so it persists for next call
+        // (This ensures decode_state stays in sync with runtime->seqlen_k_real)
+        decode_state[k_key] = seqlen_k_real;
     }
 
     float scale;
