@@ -1,4 +1,8 @@
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include "common.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
@@ -286,6 +290,55 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     ggml_cuda_set_device(ctx.device);
 
 #if defined(GGML_USE_DLFA)
+    const char * env_dl_fattn_debug = getenv("GGML_DL_FATTN_DEBUG");
+    if (env_dl_fattn_debug != nullptr && strcmp(env_dl_fattn_debug, "1") == 0 && mask != nullptr) {
+        const int64_t mask_sk = mask->ne[0];
+        const int64_t mask_sq_pad = mask->ne[1];
+        const int64_t max_rows = mask_sq_pad < 10 ? mask_sq_pad : 10;
+        const int64_t max_cols = mask_sk < 16 ? mask_sk : 16;
+        const size_t elem_size = ggml_type_size(mask->type);
+        const size_t row_bytes = (size_t) mask_sk * elem_size;
+        std::vector<uint8_t> row_buf(row_bytes);
+
+        printf("  mask preview [real data] (sq=%lld, sk=%lld):\n",
+               (long long) mask_sq_pad, (long long) mask_sk);
+        for (int64_t r = 0; r < max_rows; ++r) {
+            printf("    row %lld:", (long long) r);
+            ggml_backend_tensor_get(mask, row_buf.data(), r * mask->nb[1], row_bytes);
+
+            for (int64_t c = 0; c < max_cols; ++c) {
+                float val = 0.0f;
+                switch (mask->type) {
+                    case GGML_TYPE_F32:
+                        val = reinterpret_cast<float *>(row_buf.data())[c];
+                        break;
+                    case GGML_TYPE_F16:
+                        val = ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[c]);
+                        break;
+                    case GGML_TYPE_BF16:
+                        val = ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[c]);
+                        break;
+                    default:
+                        val = 0.0f;
+                        break;
+                }
+
+                if (std::isinf(val) && val < 0) {
+                    printf("  -INF");
+                } else {
+                    printf(" %6.2f", val);
+                }
+            }
+            if (mask_sk > max_cols) {
+                printf(" ...");
+            }
+            printf("\n");
+        }
+        if (mask_sq_pad > max_rows) {
+            printf("    ...\n");
+        }
+    }
+
     if (ggml_dl::flash_attn_dldnn_available(ctx, dst)) {
         ggml_dl::flash_attn_ext_dldnn(ctx, dst);
         return;

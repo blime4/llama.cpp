@@ -733,11 +733,19 @@ int main(int argc, char ** argv) {
 
         // display text
         if (input_echo && display) {
+#if 0
+            const bool is_prefill_phase = embd.size() > 1;
+#endif
             for (auto id : embd) {
                 const std::string token_str = common_token_to_piece(ctx, id, params.special);
 
+#if 0
+                const char * phase_str = is_prefill_phase ? "PREFILL" : "DECODE ";
+                LOG("[%s][%6d] %s\n", phase_str, (int) id, token_str.c_str());
+#else
                 // Console/Stream Output
                 LOG("%s", token_str.c_str());
+#endif
 
                 // Record Displayed Tokens To Log
                 // Note: Generated tokens are created one by one hence this check

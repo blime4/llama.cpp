@@ -47,6 +47,16 @@ else()
 target_link_libraries(llama PUBLIC ggml)
 endif()
 
+# Link with ggml-dlcu for DLFA functions (needed for prepare_varlen_buffers)
+# In GGML_BACKEND_DL mode, ggml-dlcu is a MODULE, but we still need to link it for symbols
+# Note: ggml_backend_cuda_get_context and ggml_backend_is_cuda are also in ggml-dlcu
+if (GGML_USE_DLFA)
+    # For MODULE targets, link the library file directly using relative path from build dir
+    # The library is in the same output directory as binaries (bin/)
+    target_link_libraries(llama PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/../bin/libggml-dlcu.so")
+    message(STATUS "Linking llama with ggml-dlcu: ${CMAKE_CURRENT_BINARY_DIR}/../bin/libggml-dlcu.so")
+endif()
+
 # DL
 target_compile_definitions(llama PRIVATE GGML_USE_DLFA)
 target_compile_definitions(llama PRIVATE GGML_USE_DLCU)

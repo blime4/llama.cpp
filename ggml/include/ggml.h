@@ -2067,10 +2067,6 @@ extern "C" {
             const struct ggml_tensor * a);
 
 #if defined(GGML_USE_DLFA)
-    GGML_API void ggml_flash_attn_ext_set_mask_params(
-            struct ggml_tensor * a,
-            const struct ggml_flash_attn_mask_params * params);
-
     GGML_API bool ggml_flash_attn_ext_get_mask_params(
             const struct ggml_tensor * a,
             struct ggml_flash_attn_mask_params * out_params);

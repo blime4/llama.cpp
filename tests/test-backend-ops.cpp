@@ -4729,7 +4729,7 @@ struct test_flash_attn_ext : public test_case {
 
         ggml_tensor * m = nullptr;
 #ifdef GGML_USE_DLFA
-        ggml_dl::flash_attn_mask_info info{};
+        ggml_flash_attn_mask_params info{};
 #endif
         if (mask) {
             // for debug testing
@@ -4941,7 +4941,7 @@ struct test_flash_attn_ext_mask : public test_case {
         ggml_tensor * m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, GGML_PAD(nb, GGML_KQ_MASK_PAD), 1, 1);
         ggml_set_name(m, "m");
 
-        ggml_dl::flash_attn_mask_info info{};
+        ggml_flash_attn_mask_params info{};
         info.present = true;
         info.is_causal = is_causal;
         info.window_left = window_left;
@@ -6606,12 +6606,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
-    }
 
-    if (GGML_DLFA_READY) {
         // Always include at least one FP16 reference test to cover CPU FP16 implementation.
         test_cases.emplace_back(new test_flash_attn_ext(
             64, 64, 4, {1, 1}, 128, 2, true, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, {0, 1, 2, 3}));
+
     }
 
 #ifdef GGML_USE_DLFA

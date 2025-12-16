@@ -9,9 +9,6 @@
 #include <memory>
 #include <set>
 #include <functional>
-#ifdef GGML_USE_DLFA
-#include <unordered_map>
-#endif
 
 struct ggml_cgraph;
 struct ggml_context;
@@ -226,14 +223,6 @@ public:
 class llm_graph_input_masked : public llm_graph_input_i {
 public:
     virtual ~llm_graph_input_masked() = default;
-
-    void register_flash_attn_consumer(ggml_tensor * mask, ggml_tensor * attn);
-
-protected:
-    void propagate_flash_attn_mask(ggml_tensor * mask, const ggml_flash_attn_mask_params & info) const;
-
-private:
-    std::unordered_map<const ggml_tensor *, std::vector<ggml_tensor *>> mask_consumers;
 };
 #else
 using llm_graph_input_masked = llm_graph_input_i;
@@ -329,7 +318,13 @@ public:
 
 class llm_graph_input_attn_cross : public llm_graph_input_masked {
 public:
-    llm_graph_input_attn_cross(const llama_cross * cross) : cross(cross) {}
+    llm_graph_input_attn_cross(
+            const llama_hparams & hparams,
+            const llama_cparams & cparams,
+            const llama_cross * cross) :
+        hparams(hparams),
+        cparams(cparams),
+        cross(cross) {}
     ~llm_graph_input_attn_cross() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
@@ -339,6 +334,8 @@ public:
     ggml_tensor * cross_kq_mask     = nullptr; // F32 [n_outputs_enc, n_batch, 1, 1]
     ggml_tensor * cross_kq_mask_cnv = nullptr; // F32 [n_outputs_enc, n_batch, 1, 1]
 
+    const llama_hparams & hparams;
+    const llama_cparams & cparams;
     const llama_cross * cross = nullptr;
 };
 
@@ -593,10 +590,6 @@ struct llm_graph_context {
              ggml_tensor * kq_mask,
              ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                    float   kq_scale
-#ifdef GGML_USE_DLFA
-            ,
-             ggml_tensor ** flash_node = nullptr
-#endif
             ) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;

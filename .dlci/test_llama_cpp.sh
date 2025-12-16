@@ -203,8 +203,8 @@ simple_test_define_cases() {
     SIMPLE_TEST_CASES=(
         # "MUL_MAT|${build_dir_bin}/test-backend-ops -o MUL_MAT|GGML_CUDA_DISABLE_GRAPHS=1 GGML_CUDA_GPTQ_GROUP_SIZE=128 GGML_DL_MULMAT_DEBUG=1"
         # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT|GGML_CUDA_DISABLE_GRAPHS=1"
-        # "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT --verbose|"
-        "GET_ROWS|${build_dir_bin}/test-backend-ops -o GET_ROWS --verbose|"
+        "FLASH_ATTN_EXT|${build_dir_bin}/test-backend-ops -o FLASH_ATTN_EXT --verbose|"
+        # "GET_ROWS|${build_dir_bin}/test-backend-ops -o GET_ROWS --verbose|"
     )
 }
 
@@ -1178,7 +1178,7 @@ validate_qwen_output() {
         echo "[INFO] Using ngl=20 for Qwen3 model: $model_name"
     fi
 
-    export DLEOL_DISABLE_CU_MATMUL=1     # DL TODO file a bug. | when use CUDA GRAPH
+    export DLEOL_DISABLE_CU_MATMUL=1     # bugid : 16579. | when use CUDA GRAPH
 
     # Print command before executing for easier debugging
     echo "[INFO] Executing command: ${build_dir_bin}/llama-cli -m \"$model_path\" -no-cnv -n 50 --temp 0.0 --top-k 1 --top-p 1.0 --repeat-penalty 1.0 -s 42 -ngl $ngl_value -p \"$prompt\""

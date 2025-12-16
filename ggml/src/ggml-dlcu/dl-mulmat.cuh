@@ -2,7 +2,6 @@
 #ifdef GGML_USE_DLCU
 
 #include "../ggml-cuda/common.cuh"
-#include "dl-utils.h"
 #include <unordered_map>
 #include <mutex>
 

@@ -852,6 +852,9 @@ compile_llama_cpp() {
         log_info "Compiling in Release mode (optimized)"
     fi
 
+    # Propagate Kineto toggle from environment (default OFF if unset)
+    local cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-OFF}"
+
     # Build CMake arguments
     local cmake_common_args=(
         -G Ninja
@@ -866,6 +869,7 @@ compile_llama_cpp() {
         -DGGML_CUDA_FA=ON
         -DGGML_CUDA_FA_ALL_QUANTS=ON
         -DSDK_DIR="$SDK_DIR"
+        ${cmake_kineto_option}
     )
 
     # Add platform-specific arguments

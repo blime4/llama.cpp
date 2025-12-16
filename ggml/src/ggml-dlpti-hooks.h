@@ -2,6 +2,7 @@
 #define GGML_DLPTI_HOOKS_H
 
 #include "../include/ggml.h"
+#include "../include/ggml-backend.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -24,17 +25,41 @@ extern "C" {
 static inline const char * ggml_dlpti_get_op_name(const struct ggml_tensor * node) {
 #ifdef DLPTI_ENABLED
     static char name_buf[256];
-    const char * name = ggml_op_desc(node);
-    if (name == NULL || name[0] == '\0') {
-        name = ggml_op_name(node->op);
+    const char * op_name = ggml_op_desc(node);
+    if (op_name == NULL || op_name[0] == '\0') {
+        op_name = ggml_op_name(node->op);
     }
-    if (name == NULL || name[0] == '\0') {
-        name = "ggml_op";
+    if (op_name == NULL || op_name[0] == '\0') {
+        op_name = "ggml_op";
     }
-    if (strncmp(name, "ggml_op_", 8) == 0) {
-        return name;
+
+    // best-effort backend name from buffer type / device
+    const char * backend_name = "unknown";
+    const struct ggml_tensor * t = node;
+    ggml_backend_buffer_t buf = NULL;
+    if (t) {
+        if (t->buffer) {
+            buf = t->buffer;
+        } else if (t->view_src && t->view_src->buffer) {
+            buf = t->view_src->buffer;
+        }
     }
-    snprintf(name_buf, sizeof(name_buf), "ggml_op_%s", name);
+    if (buf) {
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf);
+        if (buft) {
+            ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+            const char * dev_name = dev ? ggml_backend_dev_name(dev) : NULL;
+            const char * buft_name = ggml_backend_buft_name(buft);
+            if (dev_name && dev_name[0]) {
+                backend_name = dev_name;
+            } else if (buft_name && buft_name[0]) {
+                backend_name = buft_name;
+            }
+        }
+    }
+
+    const char * op_core = (strncmp(op_name, "ggml_op_", 8) == 0) ? op_name + 8 : op_name;
+    snprintf(name_buf, sizeof(name_buf), "ggml_op_%s_%s", backend_name, op_core);
     return name_buf;
 #else
     (void) node;

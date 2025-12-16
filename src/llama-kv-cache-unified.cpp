@@ -956,6 +956,7 @@ void llama_kv_cache_unified::set_input_kq_mask(
     float * data = (float *) dst->data;
 
     const int64_t n_kv = dst->ne[0];
+    size_t unmasked_last_row = 0;
 
     // Use only the previous KV cells of the correct sequence for each token of the ubatch.
     // It's assumed that if a token in the batch has multiple sequences, they are equivalent.
@@ -1001,6 +1002,9 @@ void llama_kv_cache_unified::set_input_kq_mask(
 
                 if (masked) {
                     f = -INFINITY;
+                } else if (i == n_tokens - 1) {
+                    // Only count unmasked cells for the last row (latest token)
+                    unmasked_last_row++;
                 }
 
                 data[h*(n_kv*n_tokens) + i*n_kv + j] = f;
@@ -1016,6 +1020,14 @@ void llama_kv_cache_unified::set_input_kq_mask(
             }
         }
     }
+    // const bool is_prefill = n_tokens > 1;
+    // LLAMA_LOG_INFO(
+    //         "%s: phase=%s n_tokens=%u n_kv=%lld last_row_unmasked=%zu\n",
+    //         __func__,
+    //         is_prefill ? "PREFILL" : "DECODE ",
+    //         n_tokens,
+    //         (long long) n_kv,
+    //         unmasked_last_row);
 
 #ifdef GGML_USE_DLFA
     if (out_info != nullptr) {

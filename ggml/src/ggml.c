@@ -4911,26 +4911,6 @@ enum ggml_prec ggml_flash_attn_ext_get_prec(
 }
 
 #ifdef GGML_USE_DLFA
-void ggml_flash_attn_ext_set_mask_params(
-        struct ggml_tensor * a,
-        const struct ggml_flash_attn_mask_params * params) {
-    GGML_ASSERT(a != NULL);
-    // GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
-
-    if (params == NULL) {
-        ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32, 0);
-        return;
-    }
-
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_PRESENT_I32,      params->present ? 1 : 0);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_CAUSAL_I32,       params->is_causal ? 1 : 0);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_WIN_LEFT_I32,     params->window_left);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_WIN_RIGHT_I32,    params->window_right);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_PER_TOKEN_I32,    params->per_token_window ? 1 : 0);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MULTI_SEQ_I32,    params->multi_sequence ? 1 : 0);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_HAS_ALIBI_I32,    params->has_alibi_bias ? 1 : 0);
-    ggml_set_op_params_i32(a, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32,        GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE);
-}
 
 bool ggml_flash_attn_ext_get_mask_params(
         const struct ggml_tensor * a,

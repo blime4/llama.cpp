@@ -41,6 +41,13 @@ GGML_BACKEND_API int  ggml_backend_cuda_get_device_count(void);
 GGML_BACKEND_API void ggml_backend_cuda_get_device_description(int device, char * description, size_t description_size);
 GGML_BACKEND_API void ggml_backend_cuda_get_device_memory(int device, size_t * free, size_t * total);
 
+// Forward declaration
+struct ggml_backend_cuda_context;
+
+// Get CUDA context from a CUDA backend (for internal use)
+// Returns ggml_backend_cuda_context* (defined in ggml-cuda/common.cuh)
+GGML_BACKEND_API struct ggml_backend_cuda_context * ggml_backend_cuda_get_context(ggml_backend_t backend);
+
 GGML_BACKEND_API bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size);
 GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
 

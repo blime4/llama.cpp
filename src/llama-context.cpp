@@ -7,6 +7,12 @@
 #include "llama-mmap.h"
 #include "llama-model.h"
 
+#ifdef GGML_USE_DLFA
+#include "ggml-dlfa.h"
+#include "ggml-cuda.h"
+#include "ggml-backend.h"
+#endif
+
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -713,6 +719,58 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
+#ifdef GGML_USE_DLFA
+// Prepare varlen buffers for flash attention tensors in the graph.
+// Must run after set_inputs so that mask->extra (runtime metadata) is ready,
+// but before graph_compute to keep CUDA graph capture stable.
+static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+    bool prepared = false;
+    const int n_nodes = ggml_graph_n_nodes(gf);
+    for (int i = 0; i < n_nodes; ++i) {
+        ggml_tensor * node = ggml_graph_node(gf, i);
+        if (node == nullptr || node->op != GGML_OP_FLASH_ATTN_EXT) {
+            continue;
+        }
+
+        // Backend and buffer must be CUDA
+        ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched, node);
+        if (backend == nullptr) {
+            continue;
+        }
+
+        ggml_backend_buffer_t buf = node->buffer;
+        if (buf == nullptr) {
+            continue;
+        }
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf);
+        const char * buft_name = buft ? ggml_backend_buft_name(buft) : nullptr;
+        if (buft_name == nullptr || strstr(buft_name, "CUDA") == nullptr) {
+            continue;
+        }
+
+        // Varlen metadata lives in mask->extra
+        ggml_tensor * mask = node->src[3];
+        auto * runtime = mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
+        if (runtime == nullptr || runtime->block_table_stride == 0 || runtime->batch == 0) {
+            continue;
+        }
+
+        ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+        ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+        auto * prepare_fn = reg ? ggml_backend_reg_get_proc_address(reg, "flash_attn_ext_dldnn_prepare_varlen_buffers_backend") : nullptr;
+        if (prepare_fn == nullptr) {
+            continue;
+        }
+
+        using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *);
+        auto fn = reinterpret_cast<prepare_backend_fn_t>(prepare_fn);
+        fn(backend, node);
+        prepared = true;
+        break; // all layers share the same varlen layout; prepare once per graph
+    }
+}
+#endif
+
 llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
@@ -743,6 +801,12 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
     }
 
     res->set_inputs(&ubatch);
+
+#ifdef GGML_USE_DLFA
+    // Prepare varlen buffers for flash attention after set_inputs and before graph_compute
+    // This enables async overlap of cudaMemcpyAsync with subsequent graph_compute operations
+    prepare_flash_attn_varlen_buffers(sched.get(), gf);
+#endif
 
     const auto status = graph_compute(gf, ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
