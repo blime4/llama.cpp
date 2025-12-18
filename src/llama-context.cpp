@@ -24,6 +24,8 @@
 // utils
 //
 
+#include "../ggml/src/ggml-dlpti-hooks.h"
+
 static bool LLAMA_USE_FP16 = []() -> bool {
     const char* var = std::getenv("LLAMA_USE_FP16");
     if (var == nullptr) {
@@ -772,26 +774,25 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
 #endif
 
 llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+    GGML_DLPTI_TRACE_FUNCTION(__func__);
+
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
     }
-
     auto * gf = graph_init();
     if (!gf) {
         LLAMA_LOG_ERROR("%s: failed to initialize graph\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
     }
-
     auto res = graph_build(ctx_compute.get(), gf, ubatch, gtype, mctx);
     if (!res) {
         LLAMA_LOG_ERROR("%s: failed to build graph\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
     }
-
     // LLAMA_LOG_INFO("graph build time: %.3f ms (%d nodes, %d leafs)\n", (ggml_time_us() - t_start_us)/1000.0, gf->n_nodes, gf->n_leafs);
 
     if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
@@ -799,7 +800,6 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
         ret = GGML_STATUS_ALLOC_FAILED;
         return nullptr;
     }
-
     res->set_inputs(&ubatch);
 
 #ifdef GGML_USE_DLFA
@@ -807,20 +807,19 @@ llm_graph_result_ptr llama_context::process_ubatch(const llama_ubatch & ubatch, 
     // This enables async overlap of cudaMemcpyAsync with subsequent graph_compute operations
     prepare_flash_attn_varlen_buffers(sched.get(), gf);
 #endif
-
     const auto status = graph_compute(gf, ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
     }
-
     ret = GGML_STATUS_SUCCESS;
 
     return res;
 }
 
 int llama_context::encode(const llama_batch & batch_inp) {
+    GGML_DLPTI_TRACE_FUNCTION(__func__);
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
     if (batch_inp.n_tokens == 0) {
@@ -988,6 +987,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
 }
 
 int llama_context::decode(const llama_batch & batch_inp) {
+    GGML_DLPTI_TRACE_FUNCTION(__func__);
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
     if (!memory) {
@@ -1336,6 +1336,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
 //
 
 uint32_t llama_context::output_reserve(int32_t n_outputs) {
+    GGML_DLPTI_TRACE_FUNCTION(__func__);
     const auto & hparams = model.hparams;
     const auto & vocab   = model.vocab;
 
@@ -1414,6 +1415,7 @@ int32_t llama_context::graph_max_nodes() const {
 }
 
 ggml_cgraph * llama_context::graph_init() {
+    GGML_DLPTI_TRACE_FUNCTION(__func__);
     ggml_init_params params = {
         /*.mem_size   =*/ buf_compute_meta.size(),
         /*.mem_buffer =*/ buf_compute_meta.data(),
@@ -1427,7 +1429,7 @@ ggml_cgraph * llama_context::graph_init() {
 
 ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx) {
     LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
-
+    GGML_DLPTI_TRACE_FUNCTION(__func__);
     if (n_tokens % n_seqs != 0) {
         n_tokens = ((n_tokens + (n_seqs - 1)) / n_seqs) * n_seqs; // round to next multiple of n_seqs
         n_outputs = std::min(n_outputs, n_tokens);

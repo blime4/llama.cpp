@@ -264,8 +264,6 @@ cmake_kineto_option="-DLLAMA_KINETO=${LLAMA_KINETO:-OFF}"
 echo "[INFO] CMake: Using ${cmake_kineto_option}" | tee -a "$compile_log"
 
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-    echo "[INFO] Detected ARM platform, setting GGML_CPU_ARM_ARCH=armv8-a" | tee -a "$compile_log"
-
     # Execute CMake with logging
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
@@ -278,11 +276,13 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_RVV=OFF \
-        -DGGML_CPU_ARM_ARCH=armv8-a \
+        -DGGML_CPU_ALL_VARIANTS=ON \
         -DGGML_NATIVE=OFF \
         -DSDK_DIR=${sdk} \
         ${cmake_ccache_option} \
         ${cmake_kineto_option}"
+
+        # -DGGML_CPU_ARM_ARCH=armv8-a \
 
     exec_with_log "$cmake_cmd"
     if [ $? -ne 0 ]; then
@@ -293,6 +293,7 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     fi
 elif [ "$ARCH" = "loongarch64" ]; then
     echo "[INFO] Detected LoongArch64 platform" | tee -a "$compile_log"
+    echo "[INFO] GGML_CPU_ALL_VARIANTS is disabled for LoongArch64 platform" | tee -a "$compile_log"
 
     # Execute CMake with logging
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
@@ -336,7 +337,7 @@ elif [ "$ARCH" = "riscv64" ]; then
         -DCMAKE_VERBOSE_MAKEFILE=ON \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_BACKEND_DL=ON \
-        -DGGML_CPU_ALL_VARIANTS=OFF \
+        -DGGML_CPU_ALL_VARIANTS=ON \
         -DGGML_CUDA_GRAPHS=ON \
         -DLLAMA_CURL=OFF \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \

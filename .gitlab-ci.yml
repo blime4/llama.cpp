@@ -3,6 +3,9 @@ variables:
   SDK_WORKSPACE: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
   DOCKER_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
   LLAMA_KINETO: "OFF"
+  # Only pull the needed submodule to avoid syncing other third-party deps
+  GIT_SUBMODULE_STRATEGY: normal
+  GIT_SUBMODULE_PATHS: ".dlci/devops-scripts"
 
   # SDK_TAG, LOCAL_MODEL_PATH and Docker images - now managed by unified config in .dlci/config.yml
   # These variables are set by the utils.sh script in each job
@@ -24,6 +27,7 @@ workflow:
 .load_unified_config: &load_unified_config |
   # Load all configuration from unified config
   source .dlci/utils.sh
+  bash .dlci/devops-scripts/linux/check-env.sh
   export SDK_TAG=$(get_sdk_tag)
   export LOCAL_MODEL_PATH=$(get_model_path)
   export DOCKER_IMAGE_X86=$(get_docker_image_with_network "x86_64")

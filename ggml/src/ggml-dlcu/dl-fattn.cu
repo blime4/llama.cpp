@@ -313,37 +313,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const GGMLTensorDescriptor * k_desc_ptr = &pack.k_desc;
     const GGMLTensorDescriptor * v_desc_ptr = &pack.v_desc;
 
-    auto infer_seq_k_from_mask = [&](const ggml_tensor * tensor, int64_t token_idx) -> int64_t {
-        const int64_t mask_sk = tensor->ne[0];
-        const size_t elem_size = ggml_type_size(tensor->type);
-        const size_t row_bytes = (size_t) mask_sk * elem_size;
-        std::vector<uint8_t> row_buf(row_bytes);
-        ggml_backend_tensor_get(tensor, row_buf.data(), token_idx * tensor->nb[1], row_bytes);
-
-        auto read_val = [&](int64_t col) {
-            switch (tensor->type) {
-                case GGML_TYPE_F32:
-                    return reinterpret_cast<float *>(row_buf.data())[col];
-                case GGML_TYPE_F16:
-                    return ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[col]);
-                case GGML_TYPE_BF16:
-                    return ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[col]);
-                default:
-                    return -INFINITY;
-            }
-        };
-
-        int64_t last_valid = -1;
-        for (int64_t c = mask_sk - 1; c >= 0; --c) {
-            const float val = read_val(c);
-            if (!(std::isinf(val) && val < 0)) {
-                last_valid = c;
-                break;
-            }
-        }
-        return last_valid + 1;
-    };
-
     if (mask != nullptr) {
         auto set_trunc_desc = [&](const ggml_tensor * tensor, GGMLTensorDescriptor & desc, int64_t trunc_seq_len) {
             const int64_t clamped_seq = std::min<int64_t>(trunc_seq_len, tensor->ne[1]);
@@ -402,7 +371,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                     "decode path currently supports batch=1 (got %lld); falling back to padded descriptors\n",
                     (long long) pack.K->ne[3]);
             }
-            int64_t inferred = infer_seq_k_from_mask(mask, /*token_idx*/ 0);
             if (env_dl_fattn_debug && strcmp(env_dl_fattn_debug, "1") == 0) {
                 const int64_t mask_sk = mask->ne[0];
                 const size_t elem_size = ggml_type_size(mask->type);
@@ -424,25 +392,12 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                         GGML_DL_FATTN_DEBUG_PRINT("mask row0 c=%lld val=%.3f\n", (long long) c, (double) val);
                     }
                 }
-                GGML_DL_FATTN_DEBUG_PRINT("mask infer: seq_q=%lld seq_k=%lld inferred=%lld min=%.3f max=%.3f\n",
-                    (long long) seq_q, (long long) seq_k, (long long) inferred, (double) min_v, (double) max_v);
             }
             // Decode: similar to prefill, prefer runtime->seqlen_k_real if available
             // Host side has already accumulated: prev_seqlen_k_real + seqlen_q
             if (runtime && runtime->seqlen_k_real > 0) {
                 // Host side has already done the accumulation, use it
                 seqlen_k_real = clamp_seq(runtime->seqlen_k_real);
-            } else {
-                // Fallback: local accumulation (shouldn't happen in normal flow)
-                int64_t prev = seqlen_k_real;
-                if (prev <= 0 || prev > seq_k) {
-                    prev = seq_q;
-                }
-                int64_t candidate = prev + seq_q;
-                if (inferred > 0 && inferred <= seq_k) {
-                    candidate = std::max<int64_t>(candidate, inferred);
-                }
-                seqlen_k_real = clamp_seq(candidate);
             }
             GGML_DL_FATTN_DEBUG_PRINT(
                 "decode seqlen_k_real updated for layer %p: new=%lld (runtime=%lld, max=%lld)\n",

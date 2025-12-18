@@ -87,7 +87,7 @@ cmake -G Ninja -B ${build_dir} \\
     -DGGML_DLCU=ON \\
     -DCMAKE_BUILD_TYPE=Release \\
     -DGGML_BACKEND_DL=ON \\
-    -DGGML_CPU_ALL_VARIANTS=OFF \\
+    -DGGML_CPU_ALL_VARIANTS=ON \\
     -DGGML_OPENMP=OFF \\
     -DGGML_LLAMAFILE=OFF \\
     -DGGML_INTERNAL_MATMUL_INT8=OFF \\

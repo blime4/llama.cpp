@@ -175,18 +175,20 @@ configure_platform() {
             ;;
         aarch64)
             log_info "Configuring aarch64 platform parameters"
-            CMAKE_ARGS="-DGGML_CPU_ARM_ARCH=armv8-a -DGGML_NATIVE=OFF -DGGML_RVV=OFF"
+            # CMAKE_ARGS="-DGGML_CPU_ARM_ARCH=armv8-a -DGGML_NATIVE=OFF -DGGML_RVV=OFF"
+            CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF"
             TEST_TIMEOUT=600
             export HC_CE_DISPATCH_MODE=1
             ;;
         loongarch64)
             log_info "Configuring loongarch64 platform parameters"
-            CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF"
+            log_info "GGML_CPU_ALL_VARIANTS is disabled for loongarch64 platform"
+            CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF -DGGML_NATIVE=OFF"
             TEST_TIMEOUT=600
             ;;
         android)
             log_info "Configuring Android platform parameters (cross-compilation)"
-            CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=OFF -DGGML_RVV=OFF -DGGML_NATIVE=OFF"
+            CMAKE_ARGS="-DGGML_CPU_ALL_VARIANTS=ON -DGGML_RVV=OFF -DGGML_NATIVE=OFF"
             TEST_TIMEOUT=300  # Shorter timeout for cross-compiled binaries
             log_warn "Android platform detected - tests will be limited (cross-compilation target)"
             ;;

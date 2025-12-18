@@ -1,3 +1,6 @@
 [submodule "third/kineto"]
 	path = third/kineto
 	url = ../pytorch_mirrors/kineto
+[submodule ".dlci/devops-scripts"]
+	path = .dlci/devops-scripts
+	url = ../devops-scripts.git
