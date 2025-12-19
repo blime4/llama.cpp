@@ -742,8 +742,10 @@ bool llama_context::apply_adapter_cvec(
 // Must run after set_inputs so that mask->extra (runtime metadata) is ready,
 // but before graph_compute to keep CUDA graph capture stable.
 static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_cgraph * gf) {
-    bool prepared = false;
     const int n_nodes = ggml_graph_n_nodes(gf);
+
+    // We only ever need to prepare once per graph. As soon as we successfully
+    // call into the backend helper, we can return.
     for (int i = 0; i < n_nodes; ++i) {
         ggml_tensor * node = ggml_graph_node(gf, i);
         if (node == nullptr || node->op != GGML_OP_FLASH_ATTN_EXT) {
@@ -760,8 +762,13 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
         if (buf == nullptr) {
             continue;
         }
+
         ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf);
-        const char * buft_name = buft ? ggml_backend_buft_name(buft) : nullptr;
+        if (buft == nullptr) {
+            continue;
+        }
+
+        const char * buft_name = ggml_backend_buft_name(buft);
         if (buft_name == nullptr || strstr(buft_name, "CUDA") == nullptr) {
             continue;
         }
@@ -774,8 +781,17 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
         }
 
         ggml_backend_dev_t dev = ggml_backend_get_device(backend);
-        ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
-        auto * prepare_fn = reg ? ggml_backend_reg_get_proc_address(reg, "flash_attn_ext_dldnn_prepare_varlen_buffers_backend") : nullptr;
+        if (dev == nullptr) {
+            continue;
+        }
+
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg == nullptr) {
+            continue;
+        }
+
+        auto * prepare_fn = ggml_backend_reg_get_proc_address(
+            reg, "flash_attn_ext_dldnn_prepare_varlen_buffers_backend");
         if (prepare_fn == nullptr) {
             continue;
         }
@@ -783,8 +799,9 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
         using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *);
         auto fn = reinterpret_cast<prepare_backend_fn_t>(prepare_fn);
         fn(backend, node);
-        prepared = true;
-        break; // all layers share the same varlen layout; prepare once per graph
+
+        // All layers share the same varlen layout; prepare once per graph.
+        return;
     }
 }
 #endif
@@ -801,10 +818,24 @@ llm_graph_result_i * llama_context::process_ubatch(const llama_ubatch & ubatch, 
     auto * res = gf_res_prev.get();
     auto * gf  = res->get_gf();
 
+    // timing stats for steps 1-5 + total
+    const auto t_total_start_us = ggml_time_us();
+    double t_params_ms  = 0.0;
+    double t_reuse_ms   = 0.0;
+    double t_inputs_ms  = 0.0;
+    double t_prepare_ms = 0.0;
+    double t_compute_ms = 0.0;
+    double t_total_ms   = 0.0;
+
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
+    // 1
+    const auto t_params_start_us = ggml_time_us();
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    t_params_ms = (ggml_time_us() - t_params_start_us) / 1000.0;
 
+    // 2
+    const auto t_reuse_start_us = ggml_time_us();
     if (res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
@@ -833,29 +864,44 @@ llm_graph_result_i * llama_context::process_ubatch(const llama_ubatch & ubatch, 
             return nullptr;
         }
     }
+    t_reuse_ms = (ggml_time_us() - t_reuse_start_us) / 1000.0;
 
+    // 3
     // set the input data for the input tensors
     {
-        //const auto t_start_us = ggml_time_us();
+        const auto t_start_us = ggml_time_us();
 
         res->set_inputs(&ubatch);
 
-        //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+        t_inputs_ms = (ggml_time_us() - t_start_us) / 1000.0;
     }
 
+    // 4
 #ifdef GGML_USE_DLFA
     // Prepare varlen buffers for flash attention after set_inputs and before graph_compute
     // This enables async overlap of cudaMemcpyAsync with subsequent graph_compute operations
+    const auto t_prepare_start_us = ggml_time_us();
     prepare_flash_attn_varlen_buffers(sched.get(), gf);
+    t_prepare_ms = (ggml_time_us() - t_prepare_start_us) / 1000.0;
 #endif
 
+    // 5
+    const auto t_compute_start_us = ggml_time_us();
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    t_compute_ms = (ggml_time_us() - t_compute_start_us) / 1000.0;
+    t_total_ms   = (ggml_time_us() - t_total_start_us) / 1000.0;
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
+        LLAMA_LOG_INFO("\n%s timings (ms): [1] params=%.3f [2] reuse/build=%.3f [3] set_inputs=%.3f [4] prepare=%.3f [5] compute=%.3f [total]=%.3f\n",
+            __func__, t_params_ms, t_reuse_ms, t_inputs_ms, t_prepare_ms, t_compute_ms, t_total_ms);
         ret = status;
         return nullptr;
     }
     ret = GGML_STATUS_SUCCESS;
+
+    // 6
+    LLAMA_LOG_INFO("\n%s timings (ms): [1] params=%.3f [2] reuse/build=%.3f [3] set_inputs=%.3f [4] prepare=%.3f [5] compute=%.3f [total]=%.3f\n",
+        __func__, t_params_ms, t_reuse_ms, t_inputs_ms, t_prepare_ms, t_compute_ms, t_total_ms);
 
     return res;
 }
