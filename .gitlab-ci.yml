@@ -10,14 +10,6 @@ variables:
   # SDK_TAG, LOCAL_MODEL_PATH and Docker images - now managed by unified config in .dlci/config.yml
   # These variables are set by the utils.sh script in each job
 
-workflow:
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" &&
-           $CI_COMMIT_REF_NAME == "dl-main" &&
-           $CI_COMMIT_MESSAGE =~ /^Merge branch/'
-      when: never
-    - when: always
-
 .docker_envs: &docker_envs |
   DOCKER_ENVS=()
   while IFS='=' read -r key value; do
