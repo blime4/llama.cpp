@@ -4831,7 +4831,11 @@ struct test_flash_attn_ext : public test_case {
             return t;
         };
 
+#ifndef GGML_USE_DLFA
         ggml_tensor * q = create_permuted(GGML_TYPE_F32, hsk_padded, nb, nh*nr23[0], nr23[1], false);
+#else
+        ggml_tensor * q = create_permuted(GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE ? GGML_TYPE_F32 : type_KV, hsk_padded, nb, nh*nr23[0], nr23[1], false);
+#endif
         ggml_set_name(q, "q");
 
         ggml_tensor * k = create_permuted(type_KV,       hsk_padded, kv, nh,         nr23[1], true); // the K tensor is usually a view of the K cache

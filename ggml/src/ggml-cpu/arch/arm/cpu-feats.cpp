@@ -33,7 +33,9 @@ struct aarch64_features {
         has_dotprod = !!(hwcap & HWCAP_ASIMDDP);
         has_fp16_va = !!(hwcap & HWCAP_FPHP);
         has_sve     = !!(hwcap & HWCAP_SVE);
-        //has_sve2    = !!(hwcap2 & HWCAP2_SVE2);
+#ifndef GGML_DLCU
+        has_sve2    = !!(hwcap2 & HWCAP2_SVE2);
+#endif
         has_i8mm    = !!(hwcap2 & HWCAP2_I8MM);
         has_sme     = !!(hwcap2 & HWCAP2_SME);
 #elif defined(__APPLE__)

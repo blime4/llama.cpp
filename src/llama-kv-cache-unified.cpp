@@ -1280,20 +1280,6 @@ void llama_kv_cache_unified::set_input_k_shift(ggml_tensor * dst) const {
     }
 }
 
-void llama_kv_cache_unified::set_input_k_shift(ggml_tensor * dst) const {
-    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
-
-    int32_t * data = (int32_t *) dst->data;
-
-    for (uint32_t s = 0; s < n_stream; ++s) {
-        const auto & cells = v_cells[s];
-
-        for (uint32_t i = 0; i < cells.size(); ++i) {
-            data[i] = cells.is_empty(i) ? 0 : cells.get_shift(i);
-        }
-    }
-}
-
 void llama_kv_cache_unified::set_input_kq_mask(
         ggml_tensor * dst,
         const llama_ubatch * ubatch,
@@ -1383,6 +1369,30 @@ void llama_kv_cache_unified::set_input_kq_mask(
         info.has_alibi_bias = hparams.use_alibi;
         *out_info = info;
     }
+
+#ifdef GGML_USE_DLFA
+    if (out_info != nullptr) {
+        ggml_flash_attn_mask_params info{};
+        info.present          = true;
+        info.is_causal        = causal_attn;
+        info.window_right     = causal_attn ? 0 : -1;
+        info.window_left      = (swa_type == LLAMA_SWA_TYPE_STANDARD && n_swa > 0)
+                                    ? (int32_t) n_swa - 1
+                                    : -1;
+        info.per_token_window = (swa_type == LLAMA_SWA_TYPE_CHUNKED);
+
+        bool multi_seq = (ubatch->n_seqs_unq > 1);
+        for (uint32_t i = 0; i < n_tokens && !multi_seq; ++i) {
+            if (ubatch->n_seq_id[i] > 1) {
+                multi_seq = true;
+            }
+        }
+        info.multi_sequence = multi_seq;
+        info.has_alibi_bias = hparams.use_alibi;
+        *out_info = info;
+    }
+    dst->extra = nullptr;
+#endif
 }
 
 void llama_kv_cache_unified::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {

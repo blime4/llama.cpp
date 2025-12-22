@@ -586,7 +586,7 @@ static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, co
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
         dup->nb[i] = tensor->nb[i];
     }
-#if defined(GGML_USE_DLFA)
+#if defined(GGML_USE_DLFA) // DL-TODO, check if this need to remove.
     memcpy(dup->op_params, tensor->op_params, sizeof(dup->op_params));
 #endif
     return dup;
@@ -1107,6 +1107,11 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
 
             const int node_backend_id = tensor_backend_id(node);
 
+            if (node_backend_id == -1) {
+                printf("for debug : node: %s\n", node->name);
+                printf("for debug : node_backend_id: %d\n", node_backend_id);
+                GGML_ABORT("for debug : node: %s is not assigned to a backend\n", node->name);
+            }
             assert(node_backend_id != -1); // all nodes should be assigned by now, this can happen if there is no CPU fallback
 
             // check if we should start a new split based on the sources of the current node

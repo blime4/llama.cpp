@@ -9,6 +9,8 @@ file(GLOB   GGML_SOURCES_CUDA "../ggml-cuda/*.cu")
 # Add DL-specific sources (in this directory)
 file(GLOB   GGML_SOURCES_DLCU "*.cu")
 list(APPEND GGML_SOURCES_CUDA ${GGML_SOURCES_DLCU})
+file(GLOB   GGML_DLCU_FP16_SRCS "fp16/*.cu")
+list(APPEND GGML_SOURCES_CUDA ${GGML_DLCU_FP16_SRCS})
 
 # TODO:  optimize this, cause DL do not fully support all the template instances
 #        it will just waste time to compile all the template instances.

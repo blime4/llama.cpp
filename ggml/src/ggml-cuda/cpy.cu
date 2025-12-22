@@ -19,9 +19,7 @@ static __global__ void cpy_flt(const char * cx, char * cdst_direct, const int ne
     }
 
     char * cdst = (cdst_indirect != nullptr) ? cdst_indirect[graph_cpynode_index]: cdst_direct;
-    const int64_t ext_1 = ne00 * ne01 * ne02;
-    const int64_t ext_2 = ne10 * ne11 * ne12;
-
+    
     // determine indices i03/i13, i02/i12, i01/i11, i00/i10 as a function of index i of flattened tensor
     // then combine those indices with the corresponding byte offsets to get the total offsets
     const int64_t i03      = i / (ext_1);

@@ -318,9 +318,9 @@ static void group_norm_f32_cuda(
     }
 }
 
-template <typename T>
-static void rms_norm_cuda(
-        const T * x, T * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
+
+static void rms_norm_f32_cuda(
+        const float * x, float * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
         const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps, cudaStream_t stream) {
     const dim3 blocks_num(nrows, nchannels, nsamples);
     if (ncols < 1024) {
@@ -351,6 +351,7 @@ static void rms_norm_mul_f32_cuda(
         rms_norm_f32<1024, true><<<blocks_num, block_dims, 0, stream>>>(x, dst, ncols, stride_row, stride_channel, stride_sample, eps, mul, mul_stride_row, mul_stride_channel, mul_stride_sample, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples);
     }
 }
+
 
 static void rms_norm_back_f32_cuda(const float * grad, const float * xf, float * dst, const int ncols, const int nrows, const float eps, cudaStream_t stream) {
     if (ncols < 1024) {
@@ -443,11 +444,11 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     if (src0->type == GGML_TYPE_F16) {
         const half * src0_d = (const half *) src0->data;
         half * dst_d = (half *) dst->data;
-        rms_norm_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+        rms_norm_f16_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
     } else {
         const float * src0_d = (const float *) src0->data;
         float * dst_d = (float *) dst->data;
-        rms_norm_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+        rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
     }
 }
 

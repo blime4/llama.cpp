@@ -36,7 +36,11 @@ endif()
 
 if (GGML_ALL_WARNINGS)
     if (NOT MSVC)
-        list(APPEND WARNING_FLAGS -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-gnu-line-marker -Wno-unused-parameter -Wno-invalid-noreturn -Wno-unused-variable)
+        if (NOT DLCU)
+            list(APPEND WARNING_FLAGS -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function)
+        else()
+            list(APPEND WARNING_FLAGS -Wall -Wextra -Wpedantic -Wcast-qual -Wno-unused-function -Wno-gnu-line-marker -Wno-unused-parameter -Wno-invalid-noreturn -Wno-unused-variable)
+        endif()
         list(APPEND C_FLAGS       -Wshadow -Wstrict-prototypes -Wpointer-arith -Wmissing-prototypes
                                   -Werror=implicit-int -Werror=implicit-function-declaration)
         list(APPEND CXX_FLAGS     -Wmissing-declarations -Wmissing-noreturn)
