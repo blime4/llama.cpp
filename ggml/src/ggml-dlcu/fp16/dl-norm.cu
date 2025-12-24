@@ -3,7 +3,7 @@
 template <int block_size, bool do_multiply = false>
 static __global__ void rms_norm_f16(
         const half * x, half * dst, const int ncols, const int64_t stride_row, const int64_t stride_channel,
-        const int64_t stride_sample, const float eps, const half * mul = nullptr, const int64_t mul_stride_row = 0,
+        const int64_t stride_sample, const float eps, const float * mul = nullptr, const int64_t mul_stride_row = 0,
         const int64_t mul_stride_channel = 0, const int64_t mul_stride_sample = 0, const int mul_ncols = 0,
         const int mul_nrows = 0, const int mul_nchannels = 0, const int mul_nsamples = 0) {
     const int nrows     = gridDim.x;
@@ -27,7 +27,7 @@ static __global__ void rms_norm_f16(
     float tmp = 0.0f; // partial sum for thread in warp
 
     for (int col = tid; col < ncols; col += block_size) {
-        const float xi = static_cast<float>(x[col]);
+        const float xi = __half2float(x[col]);
         tmp += xi * xi;
     }
 
@@ -50,11 +50,13 @@ static __global__ void rms_norm_f16(
     const float scale = rsqrtf(mean + eps);
 
     for (int col = tid; col < ncols; col += block_size) {
+        const float xf = __half2float(x[col]);
         if constexpr (do_multiply) {
             const int mul_col = col % mul_ncols;
-            dst[col] = static_cast<half>(scale * static_cast<float>(x[col]) * static_cast<float>(mul[mul_col]));
+            const float mf = mul[mul_col];
+            dst[col] = __float2half_rn(scale * xf * mf);
         } else {
-            dst[col] = static_cast<half>(scale * static_cast<float>(x[col]));
+            dst[col] = __float2half_rn(scale * xf);
         }
     }
 }
@@ -73,7 +75,7 @@ void rms_norm_f16_cuda(
 }
 
 void rms_norm_mul_f16_cuda(
-        const half * x, const half * mul, half * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
+        const half * x, const float * mul, half * dst, const int ncols, const int nrows, const int nchannels, const int nsamples,
         const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample,
         const int64_t mul_stride_row, const int64_t mul_stride_channel, const int64_t mul_stride_sample,
         const int mul_ncols, const int mul_nrows, const int mul_nchannels, const int mul_nsamples,

@@ -466,21 +466,21 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     memcpy(&eps, dst->op_params, sizeof(float));
 
-    const float * src0_d = (const float *) rms_norm_src->data;
-    const float * mul_d = nullptr;
+    const void * src_dev_ptr = rms_norm_src->data;
+    const void * mul_dev_ptr = nullptr;
     const ggml_tensor * mul_src = nullptr;
 
     if (mul_tensor->src[0] == dst) {
-        mul_d = (float *) mul_tensor->src[1]->data;
+        mul_dev_ptr = mul_tensor->src[1]->data;
         mul_src = mul_tensor->src[1];
     } else if(mul_tensor->src[1] == dst) {
-        mul_d = (float *) mul_tensor->src[0]->data;
+        mul_dev_ptr = mul_tensor->src[0]->data;
         mul_src = mul_tensor->src[0];
     } else {
         GGML_ASSERT(false);
     }
 
-    float * dst_d = (float *) mul_tensor->data;
+    void * dst_dev_ptr = mul_tensor->data;
     cudaStream_t stream = ctx.stream();
 
 #ifndef GGML_USE_DLCU
@@ -491,6 +491,8 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * 
     GGML_ASSERT(rms_norm_src->type == GGML_TYPE_F32 || rms_norm_src->type == GGML_TYPE_F16);
     GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
     GGML_ASSERT(mul_tensor->type == GGML_TYPE_F32 || mul_tensor->type == GGML_TYPE_F16);
+    GGML_ASSERT(rms_norm_src->type == dst->type);
+    GGML_ASSERT(mul_tensor->type == dst->type);
 #endif
     GGML_ASSERT(eps >= 0.0f);
 
@@ -518,14 +520,13 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
 #ifdef GGML_USE_DLCU // DL-FP16
     if (rms_norm_src->type == GGML_TYPE_F16) {
-        rms_norm_mul_f16_cuda((const half *)src0_d, (const half *)mul_d, (half *)dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
+        rms_norm_mul_f16_cuda((const half *)src_dev_ptr, (const float *)mul_dev_ptr, (half *)dst_dev_ptr, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
     } else {
-        rms_norm_mul_f32_cuda(src0_d, mul_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
+        rms_norm_mul_f32_cuda((const float *)src_dev_ptr, (const float *)mul_dev_ptr, (float *)dst_dev_ptr, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
     }
 #else
     rms_norm_mul_f32_cuda(src0_d, mul_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
 #endif
-
 }
 
 void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
