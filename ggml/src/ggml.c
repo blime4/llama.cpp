@@ -3672,7 +3672,11 @@ struct ggml_tensor * ggml_set_rows(
     GGML_ASSERT(b->ne[2] % c->ne[1] == 0);
     GGML_ASSERT(b->ne[3] % c->ne[2] == 0);
     GGML_ASSERT(c->ne[3] == 1);
+#ifdef GGML_USE_DLCU // DL-FP16
+    GGML_ASSERT(b->type == GGML_TYPE_F32 || b->type == GGML_TYPE_F16);
+#else
     GGML_ASSERT(b->type == GGML_TYPE_F32);
+#endif
     GGML_ASSERT(c->type == GGML_TYPE_I64);
 
     GGML_ASSERT(ggml_is_contiguous_rows(a));
