@@ -185,6 +185,14 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
                 ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_expert_used, 512);
                 op_tensor = ggml_mul_mat_id(ctx, w, b, ids);
             } break;
+// #ifdef GGML_USE_DLCU
+        case GGML_OP_MOE_SUM:
+            {
+                int n_expert_used = hparams.n_expert_used;
+                ggml_tensor * a = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, w->ne[0], n_expert_used, 512);
+                op_tensor = ggml_moe_sum(ctx, a, n_expert_used);
+            } break;
+// #endif
         case GGML_OP_ADD:
             {
                 ggml_tensor * a = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, w->ne[0], w->ne[1], w->ne[2], w->ne[3]);

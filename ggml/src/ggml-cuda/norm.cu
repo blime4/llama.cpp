@@ -1,5 +1,7 @@
 #include "norm.cuh"
 #include <cstdint>
+#include <cstdio>
+#include <cuda_fp16.h>
 
 template <int block_size>
 static __global__ void norm_f32(
@@ -424,9 +426,11 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     cudaStream_t stream = ctx.stream();
 
-    // DL support fp16
+#ifdef GGML_USE_DLCU // DL-FP16
     GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
-    // GGML_ASSERT( dst->type == GGML_TYPE_F32);
+#else
+    GGML_ASSERT( dst->type == GGML_TYPE_F32);
+#endif
     GGML_ASSERT(src0->type == dst->type);
 
     GGML_TENSOR_UNARY_OP_LOCALS;
@@ -441,15 +445,19 @@ void ggml_cuda_op_rms_norm(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int64_t s02 = nb02 / ts0;
     const int64_t s03 = nb03 / ts0;
 
+#ifdef GGML_USE_DLCU // DL-FP16
+    /* Use generic device pointers so we can print from a single merged block below */
+    const void * src_dev_ptr = src0->data;
+    void * dst_dev_ptr = dst->data;
+
     if (src0->type == GGML_TYPE_F16) {
-        const half * src0_d = (const half *) src0->data;
-        half * dst_d = (half *) dst->data;
-        rms_norm_f16_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+        rms_norm_f16_cuda((const half *)src_dev_ptr, (half *)dst_dev_ptr, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
     } else {
-        const float * src0_d = (const float *) src0->data;
-        float * dst_d = (float *) dst->data;
-        rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+        rms_norm_f32_cuda((const float *)src_dev_ptr, (float *)dst_dev_ptr, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
     }
+#else
+    rms_norm_f32_cuda(src0_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, eps, stream);
+#endif // GGML_USE_DLCU
 }
 
 void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_tensor * mul_tensor) {
@@ -475,9 +483,15 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * 
     float * dst_d = (float *) mul_tensor->data;
     cudaStream_t stream = ctx.stream();
 
+#ifndef GGML_USE_DLCU
     GGML_ASSERT(rms_norm_src->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type == GGML_TYPE_F32);
     GGML_ASSERT(mul_tensor->type == GGML_TYPE_F32);
+#else // DL-FP16
+    GGML_ASSERT(rms_norm_src->type == GGML_TYPE_F32 || rms_norm_src->type == GGML_TYPE_F16);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(mul_tensor->type == GGML_TYPE_F32 || mul_tensor->type == GGML_TYPE_F16);
+#endif
     GGML_ASSERT(eps >= 0.0f);
 
     const int64_t ne00 = rms_norm_src->ne[0];
@@ -502,7 +516,16 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int mul_nchannels = mul_src->ne[2];
     const int mul_nsamples  = mul_src->ne[3];
 
+#ifdef GGML_USE_DLCU // DL-FP16
+    if (rms_norm_src->type == GGML_TYPE_F16) {
+        rms_norm_mul_f16_cuda((const half *)src0_d, (const half *)mul_d, (half *)dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
+    } else {
+        rms_norm_mul_f32_cuda(src0_d, mul_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
+    }
+#else
     rms_norm_mul_f32_cuda(src0_d, mul_d, dst_d, ne00, ne01, ne02, ne03, s01, s02, s03, mul_s01, mul_s02, mul_s03, mul_ncols, mul_nrows, mul_nchannels, mul_nsamples, eps, stream);
+#endif
+
 }
 
 void ggml_cuda_op_rms_norm_back(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

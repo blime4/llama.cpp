@@ -2970,6 +2970,7 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, 
         const ggml_tensor *rms_norm = cgraph->nodes[node_idx];
         const ggml_tensor *mul      = cgraph->nodes[node_idx+1];
 
+#ifndef GGML_USE_DLCU
         GGML_ASSERT(rms_norm->src[0]->type == GGML_TYPE_F32);
         GGML_ASSERT(rms_norm->type == GGML_TYPE_F32);
 
@@ -2979,6 +2980,17 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph * cgraph, int node_idx, 
             mul->type != GGML_TYPE_F32) {
             return false;
         }
+#else
+        GGML_ASSERT(rms_norm->src[0]->type == GGML_TYPE_F32 || rms_norm->src[0]->type == GGML_TYPE_F16);
+        GGML_ASSERT(rms_norm->type == GGML_TYPE_F32 || rms_norm->type == GGML_TYPE_F16);
+
+        //rms norm only supports F32 and F16
+        if (!((mul->src[0]->type == GGML_TYPE_F32 || mul->src[0]->type == GGML_TYPE_F16) &&
+              (mul->src[1]->type == GGML_TYPE_F32 || mul->src[1]->type == GGML_TYPE_F16) &&
+              (mul->type == GGML_TYPE_F32 || mul->type == GGML_TYPE_F16))) {
+            return false;
+        }
+#endif
 
         //if rms norm is the B operand, then we don't handle broadcast
         if (rms_norm == mul->src[1] && !ggml_are_same_shape(mul->src[0], rms_norm->src[1])) {

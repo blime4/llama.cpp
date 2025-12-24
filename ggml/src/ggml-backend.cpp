@@ -1082,7 +1082,7 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         }
     }
 
-    // pass 5: split graph, find tensors that need to be copied
+    // pass 5: split graph, fxind tensors that need to be copied
     {
         int i_split = 0;
         struct ggml_backend_sched_split * split = &sched->splits[0];

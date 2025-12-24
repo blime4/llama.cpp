@@ -42,6 +42,10 @@
 #define CUDART_HMAX   11070 // CUDA 11.7, min. ver. for which __hmax and __hmax2 are known to work (may be higher than needed)
 #define CUDART_HMASK  12000 // CUDA 12.0, min. ver. for half2 -> uint mask comparisons
 
+#if defined(GGML_USE_DLCU)
+#include "../ggml-dlcu/fp16/dl-fp16.cuh"
+#endif
+
 #define GGML_CUDA_CC_PASCAL          600
 #define GGML_CUDA_CC_DP4A            610 // minimum compute capability for __dp4a, an intrinsic for byte-wise dot products
 #define GGML_CUDA_CC_VOLTA           700
@@ -902,6 +906,7 @@ struct ggml_backend_cuda_context {
     }
 };
 
+#ifdef GGML_USE_DLCU
 inline void ggml_debug_tensor(ggml_backend_cuda_context& ctx, const char* name, const void* tdata, ggml_type type) {
 #ifndef NDEBUG
     auto stream = ctx.stream();
@@ -982,7 +987,7 @@ inline void ggml_dump_tensor(ggml_backend_cuda_context& ctx, const ggml_tensor *
             fprintf(fp, "%zu %d\n", i, data[i]);
         }
         fclose(fp);
-    } else if (tensor->type == GGML_TYPE_F32) { 
+    } else if (tensor->type == GGML_TYPE_F32) {
         std::vector<float> data(tensor->ne[0] * tensor->ne[1] * tensor->ne[2] * tensor->ne[3]);
         CUDA_CHECK(cudaDeviceSynchronize());
         CUDA_CHECK(cudaMemcpy(data.data(), tensor->data, ggml_nbytes(tensor), cudaMemcpyDeviceToHost));
@@ -1003,3 +1008,4 @@ inline void ggml_dump_tensor(ggml_backend_cuda_context& ctx, const ggml_tensor *
     }
 #endif
 }
+#endif // GGML_USE_DLCU
