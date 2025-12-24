@@ -158,47 +158,6 @@ struct GGMLTensorDescriptor {
         ));
     }
 
-    // For seqlens_k: [B] -> expand to [1, 1, B] for cuDNN compatibility
-    void set_from_dims_1d(int dim_0, cudnnDataType_t data_type) const {
-        // cuDNN requires at least 3 dimensions, so expand [B] to [1, 1, B]
-        // Validation expects: dims must be [1, 1, batch]
-        int dims[3] = {1, 1, dim_0};
-        int strides[3] = {dim_0, dim_0, 1};  // strides: [batch, batch, 1] to maintain correct layout
-
-        GGML_DL_FATTN_DEBUG_PRINT("Setting 1D descriptor (expanded to 3D): dims=[1, 1, %d], strides=[%d, %d, 1]\n",
-            dim_0, dim_0, dim_0);
-
-        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
-            desc,
-            data_type,
-            3,
-            dims,
-            strides
-        ));
-    }
-
-    // For ALiBi slopes: [batch_size, 1, num_heads]
-    void set_from_dims_3d(int dim_0, int dim_1, int dim_2, enum ggml_type type) const {
-        cudnnDataType_t data_type = ggml_type_to_cudnn_type(type);
-        int dims[3] = {dim_0, dim_1, dim_2};
-        int strides[3] = {
-            dim_1 * dim_2,  // batch stride
-            dim_2,          // seq_len stride (should be 1 for ALiBi)
-            1               // num_heads stride
-        };
-
-        GGML_DL_FATTN_DEBUG_PRINT("Setting 3D descriptor: dims=[%d, %d, %d], strides=[%d, %d, %d]\n",
-                      dims[0], dims[1], dims[2], strides[0], strides[1], strides[2]);
-
-        CUDNN_CHECK(cudnnSetTensorNdDescriptor(
-            desc,
-            data_type,
-            3,
-            dims,
-            strides
-        ));
-    }
-
     cudnnTensorDescriptor_t get() const { return desc; }
 };
 
@@ -639,6 +598,19 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
             int strides[3] = { dim1 * dim2, dim2, 1 };
             CUDNN_CHECK(cudnnSetTensorNdDescriptor(d, dt, 3, dims, strides));
         };
+        // Use tensor->nb to compute strides for Q descriptor so varlen layout is supported.
+        // dims = [total_q_max, H, D]  (total_q_max = batch * max_seqlen_q)
+        // We expect GGML tensor layout ne[0]=D, ne[1]=S, ne[2]=H, ne[3]=B with nb[] in bytes.
+        // Strides must be provided in element units (not bytes) relative to nb[0].
+        auto set_desc_3d_q_packed = [&](cudnnTensorDescriptor_t d, const ggml_tensor * tensor, int dim0, int dim1, int dim2, cudnnDataType_t dt) {
+            int dims[3] = { dim0, dim1, dim2 };
+            int strides[3] = {
+                static_cast<int>(tensor->nb[1] / tensor->nb[0]), // stride for total_q (seq stride in elements)
+                static_cast<int>(tensor->nb[2] / tensor->nb[0]), // stride for H (head stride in elements)
+                1                                                // stride for D
+            };
+            CUDNN_CHECK(cudnnSetTensorNdDescriptor(d, dt, 3, dims, strides));
+        };
         auto set_desc_4d_paged = [](cudnnTensorDescriptor_t d, int num_blocks, int page_block_size, int heads, int dim, cudnnDataType_t dt) {
             int dims[4] = { num_blocks, page_block_size, heads, dim };
             int strides[4] = {
@@ -652,7 +624,7 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
 
         // q/out 3D: [total_q_max, H_q, D]  (total_q_max = batch * max_seqlen_q)
         const int total_q_max = (int) (B * max_seqlen_q);
-        set_desc_3d_contig(q_desc.desc, total_q_max, (int) H_q, (int) D, ggml_type_to_cudnn_type(Q->type));
+        set_desc_3d_q_packed(q_desc.desc, Q, total_q_max, (int) H_q, (int) D, ggml_type_to_cudnn_type(Q->type));
         set_desc_3d_contig(out_desc.desc, total_q_max, (int) H_q, (int) D, ggml_type_to_cudnn_type(Q->type));
 
         const int num_blocks = (int)(B * num_blocks_per_seq_runtime);
@@ -914,11 +886,7 @@ void flash_attn_ext_dldnn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     // Use varlen path when CUDA graphs are enabled, otherwise fall back to legacy cudnnMHAForward.
     if (ggml_dlfa_graphs_enabled()) {
-        if (dst->src[0]->ne[1] == 1) { // cudnnMHAVarlenForward prefill is not supported yet.
-            flash_attn_ext_dldnn_mha_varlen_forward(ctx, dst);
-        } else {
-            flash_attn_ext_dldnn_mha_forward(ctx, dst);
-        }
+        flash_attn_ext_dldnn_mha_varlen_forward(ctx, dst);
     } else {
         flash_attn_ext_dldnn_mha_forward(ctx, dst);
     }
