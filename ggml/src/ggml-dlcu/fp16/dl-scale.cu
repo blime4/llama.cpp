@@ -8,7 +8,7 @@ static __global__ void scale_f16(const half * x, half * dst, const float scale, 
         return;
     }
 
-    dst[i] = static_cast<half>(scale * static_cast<float>(x[i]));
+    dst[i] = static_cast<half>(scale * static_cast<float>(x[i]) + bias);
 }
 
 void scale_f16_cuda(const half * x, half * dst, const float scale, const float bias, const int k, cudaStream_t stream) {
