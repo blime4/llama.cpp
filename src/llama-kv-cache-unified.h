@@ -262,7 +262,6 @@ private:
     // model layer id -> KV cache layer id
     std::unordered_map<int32_t, int32_t> map_layer_ids;
 
-
     // return non-empty vector if cells have been moved
     defrag_info defrag_prepare(int32_t n_max_nodes) const;
 

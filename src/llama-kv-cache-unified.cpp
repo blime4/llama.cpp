@@ -1365,9 +1365,6 @@ void llama_kv_cache_unified::set_input_kq_mask(
                 }
             }
         }
-        info.multi_sequence = multi_seq;
-        info.has_alibi_bias = hparams.use_alibi;
-        *out_info = info;
     }
 
 #ifdef GGML_USE_DLFA

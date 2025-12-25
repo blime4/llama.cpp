@@ -657,11 +657,6 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     inp_rs->set_input(ubatch);
 }
 
-llm_graph_input_i * llm_graph_result::add_input(llm_graph_input_ptr input) {
-    inputs.emplace_back(std::move(input));
-    return inputs.back().get();
-}
-
 //
 // llm_graph_result
 //
@@ -1416,9 +1411,7 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * kq_b,
          ggml_tensor * kq_mask,
          ggml_tensor * v_mla,
-             float     kq_scale
-         ) const {
-
+             float     kq_scale) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed

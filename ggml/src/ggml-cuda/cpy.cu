@@ -22,50 +22,17 @@ static __global__ void cpy_flt(const char * cx, char * cdst_direct, const int ne
     
     // determine indices i03/i13, i02/i12, i01/i11, i00/i10 as a function of index i of flattened tensor
     // then combine those indices with the corresponding byte offsets to get the total offsets
-    const int64_t i03      = i / (ext_1);
-    const int64_t i02      = (i - i03 * ext_1) / (ne00 * ne01);
-    const int64_t i01      = (i - i03 * ext_1 - i02 * ne01 * ne00) / ne00;
-    const int64_t i00      = i - i03 * ext_1 - i02 * ne01 * ne00 - i01 * ne00;
-    const int64_t x_offset = i00 * nb00 + i01 * nb01 + i02 * nb02 + i03 * nb03;
+    const int64_t i03 = i/(ne00 * ne01 * ne02);
+    const int64_t i02 = (i - i03*ne00*ne01*ne02 )/ (ne00*ne01);
+    const int64_t i01 = (i - i03*ne00*ne01*ne02  -  i02*ne01*ne00) / ne00;
+    const int64_t i00 = i - i03*ne00*ne01*ne02 - i02*ne01*ne00 - i01*ne00;
+    const int64_t x_offset = i00*nb00 + i01*nb01 + i02*nb02 + i03 * nb03;
 
-    const int64_t i13        = i / (ext_2);
-    const int64_t i12        = (i - i13 * ext_2) / (ne10 * ne11);
-    const int64_t i11        = (i - i13 * ext_2 - i12 * ne10 * ne11) / ne10;
-    const int64_t i10        = i - i13 * ext_2 - i12 * ne10 * ne11 - i11 * ne10;
-    const int64_t dst_offset = i10 * nb10 + i11 * nb11 + i12 * nb12 + i13 * nb13;
-
-    cpy_1(cx + x_offset, cdst + dst_offset);
-}
-
-template <cpy_kernel_t cpy_1>
-static __global__ void cpy_f32_f16_small(const char * cx, char * cdst_direct, const int ne,
-                                   const int ne00, const int ne01, const int ne02, const int nb00, const int nb01, const int nb02,
-                                   const int nb03, const int ne10, const int ne11, const int ne12, const int nb10, const int nb11,
-                                   const int nb12, const int nb13,char ** cdst_indirect, int graph_cpynode_index) {
-    const int32_t i = blockDim.x*blockIdx.x + threadIdx.x;
-
-    if (i >= ne) {
-        return;
-    }
-
-    char * cdst = (cdst_indirect != nullptr) ? cdst_indirect[graph_cpynode_index]: cdst_direct;
-
-    const int32_t ext_1 = ne00 * ne01 * ne02;
-    const int32_t ext_2 = ne10 * ne11 * ne12;
-
-    // determine indices i03/i13, i02/i12, i01/i11, i00/i10 as a function of index i of flattened tensor
-    // then combine those indices with the corresponding byte offsets to get the total offsets
-    const int32_t i03      = i / (ne00 * ne01 * ne02);
-    const int32_t i02      = (i - i03 * ext_1) / (ne00 * ne01);
-    const int32_t i01      = (i - i03 * ext_1 - i02 * ne01 * ne00) / ne00;
-    const int32_t i00      = i - i03 * ext_1 - i02 * ne01 * ne00 - i01 * ne00;
-    const int64_t x_offset = i00 * nb00 + i01 * nb01 + i02 * nb02 + i03 * nb03;
-
-    const int32_t i13        = i / (ext_2);
-    const int32_t i12        = (i - i13 * ext_2) / (ne10 * ne11);
-    const int32_t i11        = (i - i13 * ext_2 - i12 * ne10 * ne11) / ne10;
-    const int32_t i10        = i - i13 * ext_2 - i12 * ne10 * ne11 - i11 * ne10;
-    const int64_t dst_offset = i10 * nb10 + i11 * nb11 + i12 * nb12 + i13 * nb13;
+    const int64_t i13 = i/(ne10 * ne11 * ne12);
+    const int64_t i12 = (i - i13*ne10*ne11*ne12) / (ne10*ne11);
+    const int64_t i11 = (i - i13*ne10*ne11*ne12 - i12*ne10*ne11) / ne10;
+    const int64_t i10 = i - i13*ne10*ne11*ne12 - i12*ne10*ne11 - i11*ne10;
+    const int64_t dst_offset = i10*nb10 + i11*nb11 + i12*nb12 + i13 * nb13;
 
     cpy_1(cx + x_offset, cdst + dst_offset);
 }
