@@ -12,7 +12,6 @@
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
 #include "ggml.h"
-#include "../ggml-dlpti-hooks.h"
 
 #include <CL/cl.h>
 
@@ -2293,13 +2292,11 @@ static ggml_status ggml_backend_opencl_graph_compute(ggml_backend_t backend, ggm
             continue;
         }
 
-        GGML_DLPTI_TRACE_OPERATOR(node, {
         bool ok = ggml_cl_compute_forward(backend, node);
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
         GGML_ASSERT(ok);
-        });
     }
 
     return GGML_STATUS_SUCCESS;

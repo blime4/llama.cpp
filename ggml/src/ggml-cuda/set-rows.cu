@@ -117,6 +117,9 @@ static __global__ void k_set_rows(
     const src_t* src_elem = src0_row + i00;
     dst_t* dst_elem = dst_row_ptr + i00;
     set_rows_1(src_elem, dst_elem);
+
+    GGML_UNUSED(ne10);
+    GGML_UNUSED(ne13);
 }
 
 template<typename src_t, typename dst_t>

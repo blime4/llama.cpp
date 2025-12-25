@@ -45,7 +45,6 @@
 #include "ggml-sycl/sycl_hw.hpp"
 #include "ggml-sycl/getrows.hpp"
 #include "ggml.h"
-#include "../ggml-dlpti-hooks.h"
 
 static bool g_sycl_loaded = false;
 int g_ggml_sycl_debug = 0;
@@ -4063,13 +4062,11 @@ static void ggml_backend_sycl_graph_compute_impl(ggml_backend_sycl_context * syc
             }
         }
 #endif
-        GGML_DLPTI_TRACE_OPERATOR(node, {
         bool ok = ggml_sycl_compute_forward(*sycl_ctx, node);
         if (!ok) {
             GGML_LOG_ERROR("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
         GGML_ASSERT(ok);
-        });
     }
 }
 

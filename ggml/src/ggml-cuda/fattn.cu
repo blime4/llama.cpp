@@ -279,7 +279,6 @@ static void ggml_cuda_flash_attn_ext_vec_f32(ggml_backend_cuda_context & ctx, gg
     on_no_fattn_vec_case(Q->ne[0]);
 }
 
-
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV  = dst;
     const ggml_tensor * Q    = dst->src[0];
@@ -399,6 +398,7 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     // The MMA implementation needs Turing or newer, use the old WMMA code for Volta:
     if (fp16_mma_available(cc) && !new_mma_available(cc)) {
         ggml_cuda_flash_attn_ext_wmma_f16(ctx, dst);
+        return;
     }
 
 #ifdef GGML_USE_DLCU

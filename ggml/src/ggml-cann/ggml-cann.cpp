@@ -40,7 +40,6 @@
 #include "ggml-cann/aclnn_ops.h"
 #include "ggml-cann/common.h"
 #include "ggml.h"
-#include "../ggml-dlpti-hooks.h"
 
 #define GGML_COMMON_DECL_C
 
@@ -2059,7 +2058,6 @@ static enum ggml_status ggml_backend_cann_graph_compute(
             continue;
         }
 
-        GGML_DLPTI_TRACE_OPERATOR(node, {
         bool ok = ggml_cann_compute_forward(*cann_ctx, node);
 
         if (!ok) {
@@ -2067,7 +2065,6 @@ static enum ggml_status ggml_backend_cann_graph_compute(
                     node->name, ggml_op_name(node->op));
         }
         GGML_ASSERT(ok);
-        });
     }
 
     return GGML_STATUS_SUCCESS;

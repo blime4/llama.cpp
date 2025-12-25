@@ -12,7 +12,6 @@
 #include <unordered_map>
 #include <vector>
 
-
 struct llama_cparams;
 struct llama_ubatch;
 struct llama_model_loader;

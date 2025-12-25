@@ -1,7 +1,6 @@
 #include "ggml-impl.h"
 #include "ggml-blas.h"
 #include "ggml-backend-impl.h"
-#include "../ggml-dlpti-hooks.h"
 
 #include <future>
 #include <vector>
@@ -231,7 +230,6 @@ static enum ggml_status ggml_backend_blas_graph_compute(ggml_backend_t backend, 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         struct ggml_tensor * node = cgraph->nodes[i];
 
-        GGML_DLPTI_TRACE_OPERATOR(node, {
         switch (node->op) {
             case GGML_OP_MUL_MAT:
                 ggml_backend_blas_mul_mat(ctx, node);
@@ -251,7 +249,6 @@ static enum ggml_status ggml_backend_blas_graph_compute(ggml_backend_t backend, 
             default:
                 GGML_ABORT("%s: unsupported op %s\n", __func__, ggml_op_desc(node));
         }
-        });
     }
 
     return GGML_STATUS_SUCCESS;
