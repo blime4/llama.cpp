@@ -2921,6 +2921,13 @@ struct test_norm : public test_case {
 
         return out;
     }
+
+#ifdef GGML_USE_DLCU // DL-FP16
+    double max_nmse_err() override {
+        return type == GGML_TYPE_F16 ? 1e-6 : 1e-7;
+    }
+#endif
+
 };
 
 // GGML_OP_RMS_NORM
@@ -2961,6 +2968,12 @@ struct test_rms_norm : public test_case {
             init_tensor_uniform(t, -10.f, 10.f);
         }
     }
+
+#ifdef GGML_USE_DLCU // DL-FP16
+    double max_nmse_err() override {
+        return type == GGML_TYPE_F16 ? 1e-6 : 1e-7;
+    }
+#endif
 
     float grad_eps() override {
         return 1.0f;
@@ -3004,6 +3017,13 @@ struct test_rms_norm_back : public test_case {
             init_tensor_uniform(t, -10.f, 10.f);
         }
     }
+
+#ifdef GGML_USE_DLCU // DL-FP16
+    double max_nmse_err() override {
+        return type == GGML_TYPE_F16 ? 1e-5 : 1e-7;
+    }
+#endif
+
 };
 
 // GGML_OP_RMS_NORM + GGML_OP_MUL + GGML_OP_ADD
