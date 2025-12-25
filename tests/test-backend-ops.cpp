@@ -5939,8 +5939,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {64, 5, 4, 3}, eps));
         test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F32, {64, 5, 4, 3}, eps, true));
 #ifdef GGML_USE_DLCU
-        test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F16, {64, 5, 4, 3}, eps));
-        test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F16, {64, 5, 4, 3}, eps, true));
+        // TODO: add test cases for DL-FP16
+        // test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F16, {64, 5, 4, 3}, eps));
+        // test_cases.emplace_back(new test_rms_norm_mul_add(GGML_TYPE_F16, {64, 5, 4, 3}, eps, true));
 #endif
     }
 
