@@ -43,6 +43,7 @@
 #define CUDART_HMASK  12000 // CUDA 12.0, min. ver. for half2 -> uint mask comparisons
 
 #if defined(GGML_USE_DLCU)
+static const bool GGML_IS_TEST= std::getenv("GGML_IS_TEST") != nullptr;
 #include "../ggml-dlcu/fp16/dl-fp16.cuh"
 #endif
 

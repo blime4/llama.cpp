@@ -53,7 +53,6 @@ static int GGML_QUANT_BITS = []() {
     return 4;
 }();
 
-static const bool GGML_IS_TEST= std::getenv("GGML_IS_TEST") != nullptr;
 
 // ============================================================================
 // CUDA Kernels for GPTQ Quantization

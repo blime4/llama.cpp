@@ -272,9 +272,41 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const GGMLTensorDescriptor * k_desc_ptr = &pack.k_desc;
     const GGMLTensorDescriptor * v_desc_ptr = &pack.v_desc;
 
+    auto infer_seq_k_from_mask = [&](const ggml_tensor * tensor, int64_t token_idx) -> int64_t {
+        const int64_t mask_sk = tensor->ne[0];
+        const size_t elem_size = ggml_type_size(tensor->type);
+        const size_t row_bytes = (size_t) mask_sk * elem_size;
+        std::vector<uint8_t> row_buf(row_bytes);
+        ggml_backend_tensor_get(tensor, row_buf.data(), token_idx * tensor->nb[1], row_bytes);
+
+        auto read_val = [&](int64_t col) {
+            switch (tensor->type) {
+                case GGML_TYPE_F32:
+                    return reinterpret_cast<float *>(row_buf.data())[col];
+                case GGML_TYPE_F16:
+                    return ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[col]);
+                case GGML_TYPE_BF16:
+                    return ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[col]);
+                default:
+                    return -INFINITY;
+            }
+        };
+
+        int64_t last_valid = -1;
+        for (int64_t c = mask_sk - 1; c >= 0; --c) {
+            const float val = read_val(c);
+            if (!(std::isinf(val) && val < 0)) {
+                last_valid = c;
+                break;
+            }
+        }
+        return last_valid + 1;
+    };
+
     if (mask != nullptr) {
         auto set_trunc_desc = [&](const ggml_tensor * tensor, GGMLTensorDescriptor & desc, int64_t trunc_seq_len) {
             const int64_t clamped_seq = std::min<int64_t>(trunc_seq_len, tensor->ne[1]);
+            GGML_ASSERT(clamped_seq > 0);
             int dims[4] = {
                 static_cast<int>(tensor->ne[3]),
                 static_cast<int>(clamped_seq),
@@ -357,6 +389,19 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
             if (runtime && runtime->seqlen_k_real > 0) {
                 // Host side has already done the accumulation, use it
                 seqlen_k_real = clamp_seq(runtime->seqlen_k_real);
+            } else {
+                GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
+                // Fallback: local accumulation (shouldn't happen in normal flow)
+                int64_t inferred = infer_seq_k_from_mask(mask, /*token_idx*/ 0);
+                int64_t prev = seqlen_k_real;
+                if (prev <= 0 || prev > seq_k) {
+                    prev = seq_q;
+                }
+                int64_t candidate = prev + seq_q;
+                if (inferred > 0 && inferred <= seq_k) {
+                    candidate = std::max<int64_t>(candidate, inferred);
+                }
+                seqlen_k_real = clamp_seq(candidate);
             }
             GGML_DL_FATTN_DEBUG_PRINT(
                 "decode seqlen_k_real updated for layer %p: new=%lld (runtime=%lld, max=%lld)\n",
@@ -384,20 +429,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     memcpy(&logit_softcap, ((const int32_t *) dst->op_params) + 2, sizeof(logit_softcap));
     GGML_UNUSED(max_bias);
     GGML_UNUSED(logit_softcap);
-
-    auto debug_desc = [&](const char *name, const GGMLTensorDescriptor *d) {
-        if (!env_dl_fattn_debug || strcmp(env_dl_fattn_debug, "1") != 0) return;
-        int dims[4], strides[4], nb_dims = 0;
-        cudnnDataType_t dt;
-        CUDNN_CHECK(cudnnGetTensorNdDescriptor(d->get(), 4, &dt, &nb_dims, dims, strides));
-        GGML_DL_FATTN_DEBUG_PRINT("desc %s: dims=[%d,%d,%d,%d] strides=[%d,%d,%d,%d]\n",
-            name, dims[0], dims[1], dims[2], dims[3], strides[0], strides[1], strides[2], strides[3]);
-    };
-
-    debug_desc("Q", &pack.q_desc);
-    debug_desc("K_use", k_desc_ptr);
-    debug_desc("V_use", v_desc_ptr);
-    debug_desc("OUT", &pack.out_desc);
 
     GGML_DL_FATTN_DEBUG_PRINT("calling cudnnGetMHAForwardWorkspaceSize...\n");
     GGML_DL_FATTN_DEBUG_PRINT("INFO: params scale=%.6f max_bias=%.6f logit_softcap=%.6f\n", scale, max_bias, logit_softcap);
@@ -526,6 +557,15 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
         const int page_block_size = 256;  // dldnn paged KV block size
         const int num_blocks_per_seq = (int)((S_k + page_block_size - 1) / page_block_size);
 
+        // Use runtime metadata directly - no need to store in meta
+        const bool runtime_has_layout =
+            runtime && runtime->block_table_stride > 0 && runtime->seqlen_q > 0 && runtime->seqlen_k_real > 0 && runtime->batch > 0;
+        if (!runtime_has_layout) {
+            GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
+            GGML_DL_FATTN_DEBUG_PRINT("varlen runtime metadata missing; falling back to non-varlen dldnn path\n");
+            flash_attn_ext_dldnn_mha_forward(ctx, dst);
+            return;
+        }
         const int max_seqlen_q = (int) S_q;
         const int max_seqlen_k = (int) S_k;
         const int num_blocks_per_seq_runtime = num_blocks_per_seq;

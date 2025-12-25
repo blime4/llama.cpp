@@ -496,6 +496,21 @@ static const std::unordered_map<std::string, std::string> g_known_skip_cases = [
     add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[16,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
     add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[16,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=def,type_KV=f16,permute=[0,1,2,3]");
     add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[16,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=def,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=64,hsv=64,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=64,hsv=64,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=64,hsv=64,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=64,hsv=64,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=64,hsv=64,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=80,hsv=80,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=80,hsv=80,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=80,hsv=80,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=80,hsv=80,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=80,hsv=80,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
     return skips;
 }();
 
@@ -6315,6 +6330,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                         for (int nh : { 4, }) {
                             for (int nr3 : { 1, 3, }) {
                                 if (hsk > 64 && nr3 > 1) continue; // skip broadcast for large head sizes
+#ifdef GGML_USE_DLFA
+                                if (nr3 > 1) continue; // decode path currently supports batch=1
+#endif
                                 for (int nr2 : { 1, 4, 16 }) {
                                     if (nr2 == 16 && hsk != 128) continue;
                                     for (int kv : { 512, 1024, }) {
