@@ -744,6 +744,13 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
     const struct ggml_tensor * K = dst->src[1];
     const struct ggml_tensor * V = dst->src[2];
     const struct ggml_tensor * mask = dst->src[3];
+    const struct ggml_tensor * sinks = dst->src[4];
+
+    if(sinks){
+        // DL-TODO: support attention sinks later.
+        return false;
+    }
+
     ggml_dl::flash_attn_dlfa_runtime * runtime =
         mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
 
