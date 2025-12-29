@@ -2783,6 +2783,15 @@ struct ggml_cplan ggml_graph_plan(
                         }
                     } break;
                 case GGML_OP_SOFT_MAX:
+                    {
+                        if (node->src[0]->type == GGML_TYPE_F16) {
+                            // DL-TODO: checkout how to optim it.
+                            // F16 softmax needs extra space for temporary F32 buffers
+                            cur = ggml_type_size(GGML_TYPE_F32) * node->ne[0] * n_tasks * 2;
+                        } else {
+                            cur = ggml_type_size(GGML_TYPE_F32) * node->ne[0] * n_tasks;
+                        }
+                    } break;
                 case GGML_OP_ROPE:
                 case GGML_OP_ROPE_BACK:
                     {

@@ -6138,6 +6138,7 @@ static void ggml_compute_forward_soft_max_f16(
 
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
+    const ggml_tensor * src2 = dst->src[2];
 
     assert(ggml_is_contiguous(dst));
     assert(ggml_are_same_shape(src0, dst));
@@ -6179,6 +6180,9 @@ static void ggml_compute_forward_soft_max_f16(
     float * wp = (float *) params->wdata + (ne00 + CACHE_LINE_SIZE_F32) * ith;
 
     const bool use_f16 = (src1 && src1->type == GGML_TYPE_F16);
+
+    // sinks
+    const float * sk = src2 ? (float *)((char *) src2->data) : nullptr;
 
     for (int64_t i03 = 0; i03 < ne03; i03++) {
         for (int64_t i02 = 0; i02 < ne02; i02++) {
@@ -6235,10 +6239,19 @@ static void ggml_compute_forward_soft_max_f16(
                 float max = -INFINITY;
                 ggml_vec_max_f32(ne00, &max, wp);
 
+                // if we have sinks, make a correction as if they were included in the softmax
+                if (sk) {
+                    max = MAX(max, sk[i02]);
+                }
+
                 // Use temporary f32 buffer for softmax computation
                 float * dp_f32 = (float *) params->wdata + (ne00 + CACHE_LINE_SIZE_F32) * nth + (ne00 + CACHE_LINE_SIZE_F32) * ith;
                 ggml_float sum = ggml_vec_soft_max_f32(ne00, dp_f32, wp, max);
                 assert(sum > 0.0);
+
+                if (sk) {
+                    sum += (ggml_float) expf(sk[i02] - max);
+                }
 
                 sum = 1.0/sum;
                 ggml_vec_scale_f32(ne00, dp_f32, sum);

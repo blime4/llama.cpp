@@ -1,3 +1,4 @@
+#include "cuda_fp16.h"
 #include "dl-fp16.cuh"
 #include "../../ggml-cuda/softmax.cuh"
 
@@ -10,6 +11,7 @@
 template <bool use_shared, int ncols_template, int block_size_template, typename T>
 static __global__ void soft_max_f16(
         const half * x, const T * mask, const float * sinks, half * dst, const soft_max_params p) {
+    using TempT = typename std::conditional_t<use_shared, float, T>;
     const int ncols = ncols_template == 0 ? p.ncols : ncols_template;
 
     const int tid  = threadIdx.x;
@@ -39,8 +41,7 @@ static __global__ void soft_max_f16(
     extern __shared__ float data_soft_max_f32[];
     float * buf_iw = data_soft_max_f32; // shared memory buffer for inter-warp communication
     // shared memory buffer to cache values between iterations:
-    // For fp16, when shared memory is sufficient, use shared memory; otherwise we need external buffer
-    float * vals = use_shared ? buf_iw + WARP_SIZE : (float*)dst;
+    TempT * vals = use_shared ? (TempT *)(buf_iw + WARP_SIZE) : (TempT *)(dst);
 
     float max_val = sinks ? sinks[i02] : -INFINITY;
 
@@ -52,9 +53,9 @@ static __global__ void soft_max_f16(
             break;
         }
 
-        const float val = __half2float(x[col])*p.scale + (mask ? slope*(float)mask[col] : 0.0f);
+        const float val = static_cast<float>(x[col])*p.scale + (mask ? slope*t2f32(mask[col]) : 0.0f);
 
-        vals[col] = val;
+        vals[col] = static_cast<TempT>(val);
         max_val = max(max_val, val);
     }
 
@@ -85,9 +86,9 @@ static __global__ void soft_max_f16(
             break;
         }
 
-        const float val = expf(vals[col] - max_val);
+        const float val = expf(static_cast<float>(vals[col]) - max_val);
         tmp += val;
-        vals[col] = val;
+        vals[col] = static_cast<TempT>(val);
     }
 
     // find the sum of exps in the block
@@ -122,7 +123,7 @@ static __global__ void soft_max_f16(
             return;
         }
 
-        dst[col] = __float2half(vals[col] * inv_sum);
+        dst[col] = static_cast<half>(static_cast<float>(vals[col]) * inv_sum);
     }
 }
 #ifdef __clang__
@@ -142,7 +143,7 @@ static void launch_soft_max_fp16_kernels(const half * x, const T * mask, const f
 
         if (p.ncols == ncols) {
             CUDA_SET_SHARED_MEMORY_LIMIT((soft_max_f16<true, ncols, block, T>), smpbo);
-            soft_max_f16<true, ncols, block><<<block_nums, block_dims, nbytes_shared, stream>>>
+            soft_max_f16<true, ncols, block, T><<<block_nums, block_dims, nbytes_shared, stream>>>
                 (x, mask, sinks, dst, p);
             return true;
         }
@@ -156,7 +157,7 @@ static void launch_soft_max_fp16_kernels(const half * x, const T * mask, const f
 
     //default case
     CUDA_SET_SHARED_MEMORY_LIMIT((soft_max_f16<true, 0, 0, T>), smpbo);
-    soft_max_f16<true, 0, 0><<<block_nums, block_dims, nbytes_shared, stream>>>(x, mask, sinks, dst, p);
+    soft_max_f16<true, 0, 0, T><<<block_nums, block_dims, nbytes_shared, stream>>>(x, mask, sinks, dst, p);
 }
 
 template<typename T>
@@ -175,22 +176,11 @@ void soft_max_f16_cuda(const half * x, const T * mask, const float * sinks, half
     const size_t smpbo = ggml_cuda_info().devices[id].smpbo;
 
 
-    // For fp16, we always need enough shared memory for intermediate float calculations
-    // Unlike fp32, we cannot directly compute on half-precision dst buffer
     if (nbytes_shared <= smpbo) {
         launch_soft_max_fp16_kernels<32, 64, 128, 256, 512, 1024, 2048, 4096>(x, mask, sinks, dst, params, stream, block_dims, block_nums, nbytes_shared);
     } else {
-        // For fp16, we cannot fall back to low-memory mode as we need float precision for intermediate calculations
-        // Force the use of available shared memory, even if it's less than ideal
-        // This may cause issues if shared memory is too small, but fp16 requires precision
-        const size_t nbytes_shared_available = smpbo;
-        if (nbytes_shared_available >= (GGML_PAD(ncols_x, WARP_SIZE) + WARP_SIZE) * sizeof(float)) {
-            // We have enough memory after all
-            launch_soft_max_fp16_kernels<32, 64, 128, 256, 512, 1024, 2048, 4096>(x, mask, sinks, dst, params, stream, block_dims, block_nums, nbytes_shared);
-        } else {
-            // Use as much shared memory as possible
-            soft_max_f16<true, 0, 0><<<block_nums, block_dims, nbytes_shared_available, stream>>>(x, mask, sinks, dst, params);
-        }
+        const size_t nbytes_shared_low = WARP_SIZE*sizeof(float);
+        soft_max_f16<false, 0, 0><<<block_nums, block_dims, nbytes_shared_low, stream>>>(x, mask, sinks, dst, params);
     }
 }
 

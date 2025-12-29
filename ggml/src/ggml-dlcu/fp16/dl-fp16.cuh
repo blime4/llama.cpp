@@ -18,6 +18,16 @@ void scale_f16_cuda(const half * x, half * dst, const float scale, const float b
 
 void softcap_f16_cuda(const half * x, half * dst, const float scale, const float softcap, const int k, cudaStream_t stream);
 
+template <typename T>
+static __device__ __forceinline__ float t2f32(T val) {
+    return (float) val;
+}
+
+template <>
+__device__ float __forceinline__ t2f32<half>(half val) {
+    return __half2float(val);
+}
+
 struct soft_max_params {
 
     int64_t nheads;
