@@ -5112,7 +5112,52 @@ struct test_flash_attn_ext : public test_case {
                 init_tensor_uniform(t);
             }
         }
+#ifdef GGML_USE_DLFA
+        auto set_tensor_ones = [](ggml_tensor * t) {
+            if (t == nullptr) {
+                return;
+            }
+
+            const size_t nbytes = ggml_nbytes(t);
+            std::vector<uint8_t> buffer(nbytes);
+
+            switch (t->type) {
+                case GGML_TYPE_F32: {
+                    float * data = reinterpret_cast<float *>(buffer.data());
+                    std::fill(data, data + ggml_nelements(t), 1.0f);
+                } break;
+                case GGML_TYPE_F16: {
+                    ggml_fp16_t * data = reinterpret_cast<ggml_fp16_t *>(buffer.data());
+                    const ggml_fp16_t one = ggml_fp32_to_fp16(1.0f);
+                    std::fill(data, data + ggml_nelements(t), one);
+                } break;
+                default:
+                    return;
+            }
+
+            ggml_backend_tensor_set(t, buffer.data(), 0, nbytes);
+        };
+
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->name[0] == '\0') {
+                continue;
+            }
+
+            if (strcmp(t->name, "q") == 0 || strcmp(t->name, "k") == 0 || strcmp(t->name, "v") == 0) {
+                if (g_use_fixed_inputs) {
+                set_tensor_ones(t);
+                }
+            } else if (strcmp(t->name, "m") == 0) {
+                if (g_fa_mask_causal_only) {
+                    write_causal_mask_tensor(t);
+                } else if (g_use_fixed_inputs) {
+                    set_tensor_ones(t);
+                }
+            }
+        }
+#endif
     }
+
 
     bool grad_precise() override {
         return true;
@@ -6636,9 +6681,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                     for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
 #ifdef GGML_USE_DLFA
                                                         if (sinks) continue; // DL-TODO: support attention sinks later.
-                                                        if (max_bias > 0.0f) continue;
+                                                        if (max_bias > 0.0f) continue; // alibi not support now.
                                                         if (nr3 > 1) continue; // decode path currently supports batch=1
-                                                        if (type_KV != GGML_TYPE_F16 && type_KV != GGML_TYPE_BF16) continue;
+                                                        if (type_KV != GGML_TYPE_F16) continue; // only support fp16.
+                                                        if (!GGML_DLFA_SUPPORT_NONZERO_LOGIT_SOFTCAP && logit_softcap > 0.0f) continue;
 #endif
                                                         test_cases.emplace_back(new test_flash_attn_ext(
                                                                     hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV));
