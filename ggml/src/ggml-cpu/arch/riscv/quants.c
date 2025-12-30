@@ -23,6 +23,11 @@
 
 #define UNUSED GGML_UNUSED
 
+#ifdef GGML_USE_DLCU
+// Disable RISC-V vector instructions for this file when DLCU is enabled
+#undef __riscv_v
+#endif
+
 void quantize_row_q8_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, int64_t k) {
     assert(QK8_0 == 32);
     assert(k % QK8_0 == 0);
@@ -30,7 +35,7 @@ void quantize_row_q8_0(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
 
     block_q8_0 * GGML_RESTRICT y = vy;
 
-#if defined(__riscv_v) && (__riscv_v > 0)
+#if defined(__riscv_v)
 
     size_t vl = QK8_0;
 
@@ -70,7 +75,7 @@ void quantize_row_q8_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
 
     block_q8_1 * GGML_RESTRICT y = vy;
 
-#if defined(__riscv_v) && (__riscv_v > 0)
+#if defined(__riscv_v)
 
     size_t vl = QK8_1;
 
@@ -116,11 +121,7 @@ void quantize_row_q8_1(const float * GGML_RESTRICT x, void * GGML_RESTRICT vy, i
 //===================================== Dot products =================================
 
 void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-#ifdef GGML_USE_DLCU
-#if defined(__riscv_v) && (__riscv_v > 0)
-#else
 #if defined(__riscv_v)
-#endif
     const int qk = QK8_0;
     const int nb = n / qk;
 
@@ -175,11 +176,7 @@ void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 }
 
 void ggml_vec_dot_q4_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-#ifdef GGML_USE_DLCU
-#if defined(__riscv_v) && (__riscv_v > 0)
-#else
 #if defined(__riscv_v)
-#endif
     const int qk = QK8_1;
     const int nb = n / qk;
 
@@ -230,11 +227,7 @@ void ggml_vec_dot_q4_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const voi
 }
 
 void ggml_vec_dot_q5_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-#ifdef GGML_USE_DLCU
-#if defined(__riscv_v) && (__riscv_v > 0)
-#else
 #if defined(__riscv_v)
-#endif
     const int qk = QK8_0;
     const int nb = n / qk;
 
@@ -288,11 +281,7 @@ void ggml_vec_dot_q5_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 }
 
 void ggml_vec_dot_q5_1_q8_1(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
-#ifdef GGML_USE_DLCU
-#if defined(__riscv_v) && (__riscv_v > 0)
-#else
 #if defined(__riscv_v)
-#endif
     const int qk = QK8_1;
     const int nb = n / qk;
 
@@ -361,7 +350,7 @@ void ggml_vec_dot_q8_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
     int ib = 0;
     float sumf = 0;
 
-#if defined(__riscv_v) && (__riscv_v > 0)
+#if defined(__riscv_v)
     size_t vl = qk;
 
     for (; ib < nb; ++ib) {
@@ -1796,4 +1785,5 @@ void ggml_vec_dot_q6_K_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const voi
     ggml_vec_dot_q6_K_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
 #endif
 }
+
 
