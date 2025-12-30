@@ -2840,7 +2840,6 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to batch size > 1 [%s] [%ld %ld %ld %ld]\n", __func__, node->name, node->ne[0], node->ne[1], node->ne[2], node->ne[3]);
 #endif
         }
-        #endif
 
         if (node->op == GGML_OP_CPY) {
 
