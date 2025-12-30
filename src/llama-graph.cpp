@@ -296,7 +296,7 @@ static void set_flash_attn_runtime(
         int seqlen_q,
         const ggml_flash_attn_mask_params * mask_params = nullptr) {
     GGML_ASSERT(batch == 1 && "DL TODO: nowadays batch is always 1, figure out how to handle multiple sequences.");
-    if (!mask) return;
+    GGML_ASSERT(mask);
 
     // Keep a running seqlen_k_real on CPU during decode:
     // - decode (seqlen_q == 1): accumulate previous seqlen_k_real + seqlen_q
@@ -312,7 +312,6 @@ static void set_flash_attn_runtime(
     if (it_runtime != runtime_map.end()) {
         runtime = it_runtime->second.get();
     }
-    const int prev_seqlen_k_real = runtime ? runtime->seqlen_k_real : 0;
 
     // Debug: print key and runtime lookup status
     // printf("for debug : mask key = '%s', mask name = '%s', mask ptr = %p, runtime found = %d, prev_seqlen_k_real = %d\n",
@@ -322,20 +321,16 @@ static void set_flash_attn_runtime(
     //        runtime != nullptr ? 1 : 0,
     //        prev_seqlen_k_real);
 
-    int seqlen_k_real = seqlen_q;
+    // Helper to infer from mask if available
     const int64_t mask_sk = mask->ne[0];  // key sequence length (padded)
     const int64_t mask_sq = mask->ne[1];  // query sequence length
-
-    // Helper to infer from mask if available
     auto infer_from_mask_last_row = [&]() -> int {
-        if (mask->data == nullptr) {
-            return -1;
-        }
+        GGML_ASSERT(mask->data);
+        
         const size_t elem_size = ggml_type_size(mask->type);
-        const int64_t last_row_idx = mask_sq - 1;
-        const size_t row_bytes = (size_t) mask_sk * elem_size;
+        const size_t row_bytes = (size_t) mask_sq*mask_sk * elem_size;
         std::vector<uint8_t> row_buf(row_bytes);
-        ggml_backend_tensor_get(mask, row_buf.data(), last_row_idx * mask->nb[1], row_bytes);
+        ggml_backend_tensor_get(mask, row_buf.data(), 0, row_bytes);
 
         auto read_val = [&](int64_t col) -> float {
             switch (mask->type) {
@@ -351,49 +346,29 @@ static void set_flash_attn_runtime(
         };
 
         int64_t last_valid = -1;
-        for (int64_t c = mask_sk - 1; c >= 0; --c) {
-            const float val = read_val(c);
-            if (!(std::isinf(val) && val < 0)) {
-                last_valid = c;
-                break;
+        for (int32_t i = mask_sq - 1; i >=0; --i) {
+            for (int64_t c = mask_sk - 1; c >= 0; --c) {
+                const float val = read_val(i*mask_sk + c);
+                if (!(std::isinf(val))) {
+                    last_valid = c;
+                    return c + 1;
+                }
             }
         }
         return last_valid >= 0 ? (int) (last_valid + 1) : -1;
     };
 
-    if (seqlen_q == 1) {
-        // decode: accumulate
-        seqlen_k_real = (prev_seqlen_k_real > 0 ? prev_seqlen_k_real : 0) + seqlen_q;
-        const int inferred = infer_from_mask_last_row();
-        if (inferred > 0) {
-            seqlen_k_real = std::max(seqlen_k_real, inferred);
-        }
-    } else {
-        // prefill: keep accumulating across rounds instead of resetting to the new prompt length
-        // IMPORTANT: In multi-round conversations, the mask's last row only reflects the current
-        // prompt length, not the total conversation length. So we should NOT use inferred value
-        // to override the accumulated length. Only use inferred as a sanity check.
-        seqlen_k_real = (prev_seqlen_k_real > 0 ? prev_seqlen_k_real : 0) + seqlen_q;
-        const int inferred = infer_from_mask_last_row();
-        // Only use inferred value if it's larger than our accumulated value (shouldn't happen
-        // in normal cases, but acts as a safety check)
-        if (inferred > 0 && inferred > seqlen_k_real) {
-            // printf("for debug : WARNING: inferred (%d) > accumulated (%d), using inferred\n", inferred, seqlen_k_real);
-            seqlen_k_real = inferred;
-        }
-    }
+    int seqlen_k_real = infer_from_mask_last_row();
+    GGML_ASSERT(seqlen_k_real > 0);
 
     // Clamp to padded length
-    // int seqlen_k_real_no_clamp = seqlen_k_real;
-    seqlen_k_real = std::min<int64_t>(seqlen_k_real, mask_sk);
     // const char * stage = seqlen_q == 1 ? "decode" : "prefill";
     // printf("for debug : stage : %s, seqlen_q : %d, seqlen_k_real_no_clamp : %d, mask_sk : %d\n", stage, seqlen_q, seqlen_k_real_no_clamp, mask_sk);
     // printf("for debug : seqlen_k_real : %d (prev=%d)\n", seqlen_k_real, prev_seqlen_k_real);
 
     // block table is built from padded kv size (n_kv = mask_sk) with 256 page blocks
     const int page_block = 256;
-    GGML_ASSERT(mask_sk % page_block == 0);
-    const int bt_stride = std::max<int>(1, mask_sk / page_block);
+    const int bt_stride = (seqlen_k_real + page_block - 1) / page_block;
 
     if (!runtime) {
         auto ptr = std::make_unique<ggml_dl::flash_attn_dlfa_runtime>();
@@ -401,13 +376,9 @@ static void set_flash_attn_runtime(
         runtime_map[key] = std::move(ptr);
     }
     runtime->batch = batch;
-    // Persist prefill seqlen_q so cu_seqlens_q stays constant across decode steps.
-    if (seqlen_q > 1) {
-        runtime->seqlen_q = seqlen_q;
-    }
-    const int seqlen_q_for_cu = runtime->seqlen_q > 0 ? runtime->seqlen_q : seqlen_q;
+    runtime->seqlen_q = seqlen_q;
     runtime->seqlen_k_real = seqlen_k_real;
-    runtime->block_table_stride = bt_stride;
+    runtime->block_table_stride = (mask_sk + page_block - 1) / page_block;
     if (mask_params != nullptr) {
         runtime->mask_params = *mask_params;
         runtime->has_mask_params = true;
@@ -416,7 +387,7 @@ static void set_flash_attn_runtime(
     runtime->seqused_k.resize(batch);
     runtime->block_table.resize((size_t) batch * bt_stride);
     for (int b = 0; b <= batch; ++b) {
-        runtime->cu_seqlens_q[b] = b * seqlen_q_for_cu;
+        runtime->cu_seqlens_q[b] = b * seqlen_q;
         // printf("for debug : cu_seqlens_q[%d] = %d\n", b, runtime->cu_seqlens_q[b]);
         if (b < batch) {
             runtime->seqused_k[b] = seqlen_k_real;
@@ -488,7 +459,6 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
 
         info.multi_sequence = multi_seq;
         info.has_alibi_bias = hparams.use_alibi;
-
         set_flash_attn_runtime(kq_mask, 1, (int) n_tokens, &info);
         if (kq_mask_cnv && kq_mask_cnv != kq_mask) {
             kq_mask_cnv->extra = kq_mask->extra;
@@ -514,7 +484,7 @@ void llm_graph_input_attn_kv_unified::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn, info_ptr);
 
     if (info_ptr) {
-        const int64_t n_tokens = ubatch->n_tokens;
+        const int64_t n_tokens = ubatch->real_n_tokens;
         set_flash_attn_runtime(self_kq_mask, 1, (int) n_tokens, &info);
         if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
             self_kq_mask_cnv->extra = self_kq_mask->extra;

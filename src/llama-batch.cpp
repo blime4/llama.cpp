@@ -383,6 +383,26 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
         udata->seq_id_unq.push_back(s);
     }
 
+    #ifdef GGML_USE_DLFA
+    llama_ubatch res {
+        /*.b_equal_seqs =*/ true,
+        /*.n_tokens     =*/ n_tokens,
+        /*.n_seq_tokens =*/ n_seq_tokens,
+        /*.n_seqs       =*/ n_seqs,
+        /*.n_seqs_unq   =*/ n_seqs,
+
+        /*.token        =*/ udata->token.data(),
+        /*.embd         =*/ nullptr,
+        /*.pos          =*/ udata->pos.data(),
+        /*.n_seq_id     =*/ udata->n_seq_id.data(),
+        /*.seq_id       =*/ udata->seq_id.data(),
+        /*.seq_id_unq   =*/ udata->seq_id_unq.data(),
+        /*.seq_idx      =*/ udata->seq_idx.data(),
+        /*.output       =*/ udata->output.data(),
+        /*.padding      =*/ n_tokens,
+        /*.data         =*/ std::move(udata),
+    };
+    #else
     llama_ubatch res {
         /*.b_equal_seqs =*/ true,
         /*.n_tokens     =*/ n_tokens,
@@ -400,9 +420,18 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
         /*.output       =*/ udata->output.data(),
         /*.data         =*/ std::move(udata),
     };
+    #endif
 
     return res;
 }
+
+#ifdef GGML_USE_DLFA
+void llama_batch_allocr::set_cuda_graph_capture_sizes(const std::vector<uint32_t>& sizes) {
+    cuda_graph_capture_sizes = sizes;
+    cuda_graph_capture_sizes.push_back(0);
+    std::sort(cuda_graph_capture_sizes.begin(), cuda_graph_capture_sizes.end(), std::greater<>{});
+}
+#endif
 
 const llama_batch & llama_batch_allocr::get_batch() const {
     return batch;
@@ -580,6 +609,19 @@ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential)
     return ubatch_add(idxs, n_seqs, true);
 }
 
+#ifdef GGML_USE_DLFA
+uint32_t llama_batch_allocr::get_cuda_graph_padding(uint32_t n_tokens) {
+    if (n_tokens == 1) return 1;
+    if (cuda_graph_capture_sizes.empty()) return n_tokens;
+    for(size_t i = 0; i < cuda_graph_capture_sizes.size() - 1; ++i) {
+        if (cuda_graph_capture_sizes[i] >= n_tokens && cuda_graph_capture_sizes[i + 1] < n_tokens) {
+            return cuda_graph_capture_sizes[i];
+        }
+    }
+    return n_tokens;
+}
+#endif
+
 llama_ubatch llama_batch_allocr::split_seq(uint32_t n_ubatch) {
     // find the first unused token
     uint32_t cur_idx = 0;
@@ -656,7 +698,21 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     auto udata = std::make_shared<llama_ubatch::data_t>();
 
     const int32_t n_pos_cur = batch.embd ? n_pos_per_embd : 1;
+    #ifdef GGML_USE_DLFA
+    const uint32_t padding_size = get_cuda_graph_padding(n_tokens);
+    const int64_t n_embd_all = batch.embd ? (int64_t) padding_size*n_embd : 0;
+    const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_cur;
 
+    udata->token     .resize(padding_size);
+    udata->embd      .resize(n_embd_all);
+    udata->pos       .resize(n_pos_all);
+    udata->n_seq_id  .resize(padding_size);
+    udata->seq_id    .resize(padding_size);
+    udata->seq_id_unq.resize(0);
+    udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
+    udata->output    .resize(padding_size);
+    udata->real_n_tokens = n_tokens;
+    #else
     const int64_t n_embd_all = batch.embd ? (int64_t) n_tokens*n_embd : 0;
     const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_cur;
 
@@ -668,6 +724,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     udata->seq_id_unq.resize(0);
     udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
     udata->output    .resize(n_tokens);
+    #endif
 
     seq_set_t seq_set_unq;
 
@@ -704,6 +761,34 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         }
     }
 
+    #ifdef GGML_USE_DLFA
+    for (size_t i = idxs.size(); i < padding_size; ++i) {
+        udata->n_seq_id[i] = 0;
+        udata->seq_id[i]   = batch.seq_id[0];
+        udata->output[i]   = 0;
+    }
+    #endif
+
+    #ifdef GGML_USE_DLFA
+    llama_ubatch res {
+        /*.equal_seqs   =*/ equal_seqs,
+        /*.n_tokens     =*/ padding_size,
+        /*.n_seq_tokens =*/ n_tokens/n_seqs,
+        /*.n_seqs       =*/ n_seqs,
+        /*.n_seqs_unq   =*/ (uint32_t) udata->seq_id_unq.size(),
+
+        /*.token        =*/ batch.token ? udata->token.data() : nullptr,
+        /*.embd         =*/ batch.embd ? udata->embd.data() : nullptr,
+        /*.pos          =*/ udata->pos.data(),
+        /*.n_seq_id     =*/ udata->n_seq_id.data(),
+        /*.seq_id       =*/ udata->seq_id.data(),
+        /*.seq_id_unq   =*/ udata->seq_id_unq.data(),
+        /*.seq_idx      =*/ udata->seq_idx.data(),
+        /*.output       =*/ udata->output.data(),
+        /*.real_n_tokens=*/ udata->real_n_tokens,
+        /*.data         =*/ std::move(udata),
+    };
+    #else
     llama_ubatch res {
         /*.b_equal_seqs =*/ equal_seqs,
         /*.n_tokens     =*/ n_tokens,
@@ -721,6 +806,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         /*.output       =*/ udata->output.data(),
         /*.data         =*/ std::move(udata),
     };
+    #endif
 
     if (debug > 0) {
         LLAMA_LOG_DEBUG("%s: added ubatch to split:\n", __func__);

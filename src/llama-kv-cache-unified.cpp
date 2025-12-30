@@ -797,7 +797,11 @@ llama_kv_cache_unified::slot_info llama_kv_cache_unified::find_slot(const llama_
         }
     }
 
+    #ifdef GGML_USE_DLFA
+    uint32_t n_tokens = ubatch.real_n_tokens;
+    #else
     uint32_t n_tokens = ubatch.n_tokens;
+    #endif
     uint32_t n_seqs   = 1;
 
     if (n_stream > 1) {
@@ -935,8 +939,11 @@ void llama_kv_cache_unified::apply_ubatch(const slot_info & sinfo, const llama_u
     for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
         seq_pos_max_rm[s] = -1;
     }
-
+    #ifdef GGML_USE_DLFA
+    assert(ubatch.real_n_tokens == sinfo.n_stream()*sinfo.size());
+    #else
     assert(ubatch.n_tokens == sinfo.n_stream()*sinfo.size());
+    #endif
 
     for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
         for (uint32_t ii = 0; ii < sinfo.size(); ++ii) {
@@ -1199,8 +1206,11 @@ void llama_kv_cache_unified::set_input_k_idxs(ggml_tensor * dst, const llama_uba
     if (!supports_set_rows) {
         return;
     }
-
+    #ifdef GGML_USE_DLFA
+    const uint32_t n_tokens = ubatch->real_n_tokens;
+    #else
     const uint32_t n_tokens = ubatch->n_tokens;
+    #endif
     GGML_ASSERT(n_tokens == (int64_t) sinfo.size()*sinfo.n_stream());
 
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
@@ -1220,7 +1230,11 @@ void llama_kv_cache_unified::set_input_v_idxs(ggml_tensor * dst, const llama_uba
         return;
     }
 
+    #ifdef GGML_USE_DLFA
+    const uint32_t n_tokens = ubatch->real_n_tokens;
+    #else
     const uint32_t n_tokens = ubatch->n_tokens;
+    #endif
     GGML_ASSERT(n_tokens == (int64_t) sinfo.size()*sinfo.n_stream());
 
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
@@ -1275,7 +1289,11 @@ void llama_kv_cache_unified::set_input_kq_mask(
         ggml_flash_attn_mask_params * out_info
 #endif
         ) const {
+    #ifdef GGML_USE_DLFA
+    const uint32_t n_tokens = ubatch->real_n_tokens;
+    #else
     const uint32_t n_tokens = ubatch->n_tokens;
+    #endif
 
     GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
     float * data = (float *) dst->data;
@@ -1290,7 +1308,11 @@ void llama_kv_cache_unified::set_input_kq_mask(
 
     // n_tps == n_tokens_per_stream
     const int64_t n_tps     = n_tokens/n_stream;
+    #ifndef GGML_USE_DLFA
     const int64_t n_tps_pad = GGML_PAD(n_tps, GGML_KQ_MASK_PAD);
+    #else
+    const int64_t n_tps_pad = GGML_PAD( ubatch->n_tokens/n_stream, GGML_KQ_MASK_PAD);
+    #endif
 
     std::fill(data, data + ggml_nelements(dst), -INFINITY);
 
@@ -2448,19 +2470,9 @@ uint32_t llama_kv_cache_unified::get_padding(const llama_cparams & cparams) {
         return 32u;
     }
 
-    static bool LLAMA_USE_CONTEXT_PADDING = []() {
-        const char* env = std::getenv("LLAMA_USE_CONTEXT_PADDING");
-        if (env && env[0] == '1' && env[1] == 'y' && env[2] == 'Y') {
-            return true;
-        }
-        return false;
-    }();
-
     uint32_t next_power_of_two = 256u;
-    if (!LLAMA_USE_CONTEXT_PADDING) {
-        while (next_power_of_two < cparams.n_ctx) {
-            next_power_of_two <<= 1;
-        }
+    while (next_power_of_two < cparams.n_ctx) {
+        next_power_of_two <<= 1;
     }
     return next_power_of_two;
 #else

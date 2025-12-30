@@ -6516,6 +6516,22 @@ struct ggml_cgraph * ggml_new_graph_custom(struct ggml_context * ctx, size_t siz
     // check that we allocated the correct amount of memory
     assert(obj_size == (size_t)((char *)p - (char *)cgraph));
 
+    #ifdef GGML_USE_DLFA
+    *cgraph = (struct ggml_cgraph) {
+        /*.size         =*/ size,
+        /*.n_nodes      =*/ 0,
+        /*.n_leafs      =*/ 0,
+        /*.nodes        =*/ nodes_ptr,
+        /*.grads        =*/ grads_ptr,
+        /*.grad_accs    =*/ grad_accs_ptr,
+        /*.leafs        =*/ leafs_ptr,
+        /*.use_counts   =*/ use_counts_ptr,
+        /*.hash_table   =*/ { hash_size, hash_used, hash_keys_ptr },
+        /*.order        =*/ GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT,
+         /*.n_tokens     =*/ 0,
+        /*.flash_attn   =*/ false,
+    };
+    #else
     *cgraph = (struct ggml_cgraph) {
         /*.size         =*/ size,
         /*.n_nodes      =*/ 0,
@@ -6528,6 +6544,7 @@ struct ggml_cgraph * ggml_new_graph_custom(struct ggml_context * ctx, size_t siz
         /*.hash_table   =*/ { hash_size, hash_used, hash_keys_ptr },
         /*.order        =*/ GGML_CGRAPH_EVAL_ORDER_LEFT_TO_RIGHT,
     };
+    #endif
 
     ggml_hash_set_reset(&cgraph->visited_hash_set);
     if (grads) {
@@ -6543,6 +6560,23 @@ struct ggml_cgraph * ggml_new_graph(struct ggml_context * ctx) {
 }
 
 struct ggml_cgraph ggml_graph_view(struct ggml_cgraph * cgraph0, int i0, int i1) {
+    #ifdef GGML_USE_DLFA
+    struct ggml_cgraph cgraph = {
+        /*.size             =*/ 0,
+        /*.n_nodes          =*/ i1 - i0,
+        /*.n_leafs          =*/ 0,
+        
+        /*.nodes            =*/ cgraph0->nodes + i0,
+        /*.grads            =*/ NULL, // gradients would need visited_hash_set
+        /*.grad_accs        =*/ NULL,
+        /*.leafs            =*/ NULL,
+        /*.use_counts       =*/ cgraph0->use_counts,
+        /*.visited_hash_set =*/ cgraph0->visited_hash_set,
+        /*.order            =*/ cgraph0->order,
+        /*.n_tokens         =*/ cgraph0->n_tokens,
+        /*.flash_attn       =*/ cgraph0->flash_attn,
+    };
+    #else
     struct ggml_cgraph cgraph = {
         /*.size             =*/ 0,
         /*.n_nodes          =*/ i1 - i0,
@@ -6555,6 +6589,7 @@ struct ggml_cgraph ggml_graph_view(struct ggml_cgraph * cgraph0, int i0, int i1)
         /*.visited_hash_set =*/ cgraph0->visited_hash_set,
         /*.order            =*/ cgraph0->order,
     };
+    #endif
 
     return cgraph;
 }
@@ -6688,6 +6723,16 @@ struct ggml_tensor ** ggml_graph_nodes(struct ggml_cgraph * cgraph) {
 int ggml_graph_n_nodes(struct ggml_cgraph * cgraph) {
     return cgraph->n_nodes;
 }
+
+#ifdef GGML_USE_DLFA
+void ggml_graph_set_n_tokens(struct ggml_cgraph * cgraph, int n_tokens) {
+    cgraph->n_tokens = n_tokens;
+}
+
+void ggml_graph_set_flash_attn(struct ggml_cgraph * cgraph, bool status) {
+    cgraph->flash_attn = status;
+}
+#endif
 
 void ggml_graph_add_node(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor) {
     GGML_ASSERT(cgraph->size > cgraph->n_nodes);

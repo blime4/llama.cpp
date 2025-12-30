@@ -261,6 +261,7 @@ struct cmd_params {
     std::vector<bool>                use_mmap;
     std::vector<bool>                embeddings;
     std::vector<bool>                no_op_offload;
+    std::vector<int>                 cuda_graph_capture_sizes;
     ggml_numa_strategy               numa;
     int                              reps;
     ggml_sched_priority              prio;
@@ -298,6 +299,7 @@ static const cmd_params cmd_params_defaults = {
     /* use_mmap             */ { true },
     /* embeddings           */ { false },
     /* no_op_offload        */ { false },
+    /* cuda_graph_capture_sizes */ {},
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
     /* reps                 */ 5,
     /* prio                 */ GGML_SCHED_PRIO_NORMAL,
@@ -377,6 +379,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -ot --override-tensors <tensor name pattern>=<buffer type>;...\n");
     printf("                                            (default: disabled)\n");
     printf("  -nopo, --no-op-offload <0|1>              (default: 0)\n");
+    printf("  --cuda-graph-capture-sizes <n>            (default: disabled)\n");
     printf("\n");
     printf(
         "Multiple values can be given for each parameter by separating them with ','\n"
@@ -664,6 +667,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<bool>(argv[i], split_delim);
                 params.no_op_offload.insert(params.no_op_offload.end(), p.begin(), p.end());
+            } else if (arg == "--cuda-graph-capture-sizes") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = parse_int_range(argv[i]);
+                params.cuda_graph_capture_sizes.insert(params.cuda_graph_capture_sizes.end(), p.begin(), p.end());
             } else if (arg == "-ts" || arg == "--tensor-split") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -926,6 +936,7 @@ struct cmd_params_instance {
     bool               use_mmap;
     bool               embeddings;
     bool               no_op_offload;
+    std::vector<int>   cuda_graph_capture_sizes;
 
     llama_model_params to_llama_mparams() const {
         llama_model_params mparams = llama_model_default_params();
@@ -1059,6 +1070,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .use_mmap     = */ mmp,
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
+                /* .cuda_graph_capture_sizes = */ params.cuda_graph_capture_sizes,
             };
             instances.push_back(instance);
         }
@@ -1092,6 +1104,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .use_mmap     = */ mmp,
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
+                /* .cuda_graph_capture_sizes = */ params.cuda_graph_capture_sizes,
             };
             instances.push_back(instance);
         }
@@ -1125,6 +1138,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .use_mmap     = */ mmp,
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
+                /* .cuda_graph_capture_sizes = */ params.cuda_graph_capture_sizes,
             };
             instances.push_back(instance);
         }

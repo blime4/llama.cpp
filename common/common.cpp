@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <algorithm>
 
 #if defined(__APPLE__) && defined(__MACH__)
 #include <sys/types.h>
@@ -1067,6 +1068,46 @@ struct common_init_result common_init_from_params(common_params & params) {
         llama_perf_context_reset(lctx);
         llama_set_warmup(lctx, false);
     }
+    #ifdef GGML_USE_DLFA
+    if (getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr && params.flash_attn) {
+        if (params.cuda_graph_capture_sizes.empty()) {
+            params.cuda_graph_capture_sizes = {1,64,128,192,256,320,384,448,512};
+        }
+        uint32_t n_ubatch = *std::max_element(params.cuda_graph_capture_sizes.begin(), params.cuda_graph_capture_sizes.end());
+        llama_set_u_nbatch(lctx, n_ubatch);
+        LOG_WRN("Reset n_ubatch to %d\n", n_ubatch);
+        llama_set_cuda_graph_capture_sizes(lctx, params.cuda_graph_capture_sizes.data(), params.cuda_graph_capture_sizes.size());
+        LOG_WRN("Capturing cuda graphs");
+        for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
+            int32_t size = params.cuda_graph_capture_sizes[i];
+            std::vector<llama_token> tmp;
+            llama_token bos = llama_vocab_bos(vocab);
+            llama_token eos = llama_vocab_eos(vocab);
+
+            for (int32_t j = 0; j < size; ++j) {
+                tmp.push_back(0);
+            }
+
+            if (llama_model_has_encoder(model)) {
+                llama_encode(lctx, llama_batch_get_one(tmp.data(), tmp.size()));
+                llama_token decoder_start_token_id = llama_model_decoder_start_token(model);
+                if (decoder_start_token_id == LLAMA_TOKEN_NULL) {
+                    decoder_start_token_id = bos;
+                }
+                tmp.clear();
+                tmp.push_back(decoder_start_token_id);
+            }
+            if (llama_model_has_decoder(model)) {
+                llama_decode(lctx, llama_batch_get_one(tmp.data(), std::min(tmp.size(), (size_t) params.n_batch)));
+            }
+            llama_memory_clear(llama_get_memory(lctx), true);
+            llama_synchronize(lctx);
+            llama_perf_context_reset(lctx);
+            LOG_WRN(".");
+        }
+        LOG_WRN("\n");
+    }
+    #endif
 
     iparams.model.reset(model);
     iparams.context.reset(lctx);

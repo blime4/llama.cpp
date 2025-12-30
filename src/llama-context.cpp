@@ -856,6 +856,11 @@ llm_graph_result_i * llama_context::process_ubatch(const llama_ubatch & ubatch, 
             return nullptr;
         }
 
+        #ifdef GGML_USE_DLFA
+        ggml_graph_set_n_tokens(gf, ubatch.n_tokens);
+        ggml_graph_set_flash_attn(gf, cparams.flash_attn);
+        #endif
+
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
@@ -1181,7 +1186,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
             int32_t n_outputs_new = 0;
 
             if (n_outputs_all == n_tokens_all) {
+                #ifdef GGML_USE_DLFA
+                // if use prompt padding, ubatch.n_tokens is padding and decode n_tokens_all = 1, and n_outputs_all = 1, n_tokens = padding size, which cause error
+                n_outputs_new = n_tokens_all == 1? 1 : ubatch.n_tokens;
+                #else
                 n_outputs_new = ubatch.n_tokens;
+                #endif
             } else {
                 for (uint32_t i = 0; i < ubatch.n_tokens; i++) {
                     n_outputs_new += (int32_t) (ubatch.output[i] != 0);
@@ -1613,6 +1623,15 @@ llm_graph_cb llama_context::graph_get_cb() const {
         }
     };
 }
+
+#ifdef GGML_USE_DLFA
+void llama_context::set_cuda_graph_capture_sizes(const std::vector<uint32_t>& sizes) {
+    balloc->set_cuda_graph_capture_sizes(sizes);
+}
+void llama_context::set_u_nbatch(uint32_t n_ubatch) {
+    cparams.n_ubatch = n_ubatch;
+}
+#endif
 
 //
 // state save/load
@@ -2605,6 +2624,15 @@ void llama_memory_clear(llama_memory_t mem, bool data) {
 
     mem->clear(data);
 }
+
+#ifdef GGML_USE_DLFA
+void llama_set_cuda_graph_capture_sizes(struct llama_context * ctx, uint32_t* sizes, size_t n_size) {
+    ctx->set_cuda_graph_capture_sizes(std::vector<uint32_t>(sizes, sizes + n_size));
+}
+void llama_set_u_nbatch(struct llama_context * ctx, uint32_t n_ubatch) {
+    ctx->set_u_nbatch(n_ubatch);
+}
+#endif
 
 bool llama_memory_seq_rm(
         llama_memory_t mem,

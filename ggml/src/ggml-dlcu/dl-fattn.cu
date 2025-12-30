@@ -526,17 +526,9 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
         const int page_block_size = 256;  // dldnn paged KV block size
         const int num_blocks_per_seq = (int)((S_k + page_block_size - 1) / page_block_size);
 
-        // Use runtime metadata directly - no need to store in meta
-        const bool runtime_has_layout =
-            runtime && runtime->block_table_stride > 0 && runtime->seqlen_q > 0 && runtime->seqlen_k_real > 0 && runtime->batch > 0;
-        if (!runtime_has_layout) {
-            GGML_DL_FATTN_DEBUG_PRINT("varlen runtime metadata missing; falling back to non-varlen dldnn path\n");
-            flash_attn_ext_dldnn_mha_forward(ctx, dst);
-            return;
-        }
         const int max_seqlen_q = (int) S_q;
         const int max_seqlen_k = (int) S_k;
-        const int num_blocks_per_seq_runtime = runtime_has_layout ? runtime->block_table_stride : num_blocks_per_seq;
+        const int num_blocks_per_seq_runtime = num_blocks_per_seq;
 
         // Device buffers should already be prepared and copied in flash_attn_ext_dldnn
         // (called before this function for async overlap). Just retrieve pointers from cache.
@@ -548,7 +540,6 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
             GGML_ASSERT((int) runtime->batch == (int) B);
             GGML_ASSERT((int) runtime->cu_seqlens_q.size() == (int) B + 1);
             GGML_ASSERT((int) runtime->seqused_k.size() == (int) B);
-            const size_t bt_elems = (size_t) B * (size_t) num_blocks_per_seq_runtime;
 
             // Device cache should already be initialized by flash_attn_ext_dldnn_prepare_varlen_buffers.
             // Multi-GPU runs may execute on a different device than the one that primed the cache,
@@ -795,26 +786,20 @@ bool flash_attn_dldnn_available(ggml_backend_cuda_context & ctx, ggml_tensor * d
 void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int id = ggml_cuda_get_device();
     const ggml_tensor * mask = dst->src[3];
-    ggml_dl::flash_attn_dlfa_runtime * runtime =
-        mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
-
-    if (!runtime) {
-        return; // Not a varlen case
-    }
+    GGML_ASSERT(mask);
+    ggml_dl::flash_attn_dlfa_runtime * runtime = static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra);
 
     const ggml_tensor * K = dst->src[1];
     const int64_t B = dst->src[0]->ne[3];
     const int64_t S_k = K->ne[1];
     const int page_block_size = 256;
-    const int num_blocks_per_seq = (int)((S_k + page_block_size - 1) / page_block_size);
+    const int max_num_seqs = 1;
 
     const bool runtime_has_layout =
         runtime && runtime->block_table_stride > 0 && runtime->seqlen_q > 0 && runtime->seqlen_k_real > 0 && runtime->batch > 0;
-    if (!runtime_has_layout) {
-        return; // Not ready for varlen
-    }
+    GGML_ASSERT(runtime_has_layout);
 
-    const int num_blocks_per_seq_runtime = runtime->block_table_stride;
+    const int num_blocks_per_seq = runtime->block_table_stride;
 
     GGML_ASSERT((int) runtime->batch == (int) B);
     GGML_ASSERT((int) runtime->cu_seqlens_q.size() == (int) B + 1);
@@ -822,12 +807,15 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
 
     const size_t cu_bytes = runtime->cu_seqlens_q.size() * sizeof(int32_t);
     const size_t su_bytes = runtime->seqused_k.size() * sizeof(int32_t);
-    const size_t bt_elems = (size_t) B * (size_t) num_blocks_per_seq_runtime;
-    const size_t bt_bytes = bt_elems * sizeof(int);
+    const size_t bt_elems = (size_t)((runtime->seqlen_k_real + page_block_size - 1) / page_block_size);
+
+    const size_t bt_bytes = bt_elems * sizeof(int32_t);
 
     // Ensure device-side cached buffers exist (per runtime/mask) and are large enough.
     if (!runtime->device_cache) {
         runtime->device_cache = new flash_attn_device_layout_cache();
+        flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
+        cache->device = id;
     }
     flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
     if (cache->device != id) {
@@ -836,7 +824,7 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
         cache->combined_ptr = cache->cu_seqlens_ptr = cache->seqused_ptr = cache->block_table_ptr = nullptr;
     }
 
-    const size_t total_elems = runtime->cu_seqlens_q.size() + runtime->seqused_k.size() + bt_elems;
+    const size_t total_elems = runtime->cu_seqlens_q.size() + runtime->seqused_k.size() + num_blocks_per_seq;
     if (cache->combined_cap < total_elems) {
         if (cache->combined_ptr) {
             ggml_cuda_set_device(id);

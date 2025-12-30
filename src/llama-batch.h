@@ -40,6 +40,10 @@ struct llama_ubatch {
     int32_t      *  seq_idx;    // [LLAMA_MAX_SEQ]    | -   | seq_idx
     int8_t       *  output;     // [n_tokens]         | i   | -
 
+    #ifdef GGML_USE_DLFA
+    uint32_t real_n_tokens;     // real tokens used
+    #endif
+
     // DL note --------------------------------------------------
     // token: [A0, A1, A2, A3, B0, B1, B2, B3, C0, C1, C2, C3]
     // pos:   [ 0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3]
@@ -66,6 +70,9 @@ struct llama_ubatch {
         std::vector<llama_seq_id>   seq_id_unq;
         std::vector<int32_t>        seq_idx;
         std::vector<int8_t>         output;
+        #ifdef GGML_USE_DLFA
+        uint32_t real_n_tokens;     // real tokens used
+        #endif
     };
 
     // the llama_ubatch pointers above point to this data if set. otherwise - points to non-owning data
@@ -116,6 +123,12 @@ public:
     // a helper method for creating a well-defined ubatch of tokens
     // TODO: support embeddings if needed in the future
     llama_ubatch ubatch_reserve(uint32_t n_seq_tokens, uint32_t n_seqs);
+
+    #ifdef GGML_USE_DLFA
+    void set_cuda_graph_capture_sizes(const std::vector<uint32_t>& sizes);
+
+    uint32_t get_cuda_graph_padding(uint32_t n_tokens);
+    #endif
 
 private:
     void clear();
@@ -174,4 +187,8 @@ private:
     std::vector<bool> used;
 
     int debug;
+
+    #ifdef GGML_USE_DLFA
+    std::vector<uint32_t> cuda_graph_capture_sizes;
+    #endif
 };

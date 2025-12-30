@@ -3290,6 +3290,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.vocoder.speaker_file = value;
         }
     ).set_examples({LLAMA_EXAMPLE_TTS}));
+    #ifdef GGML_USE_DLFA
+    add_opt(common_arg(
+        {"-cgcs", "--cuda-graph-capture-sizes"}, "n0,n1,...",
+        "cuda graph capture sizes",
+        [](common_params & params, const std::string & value) {
+            auto p = string_split<int>(value, ',');
+            params.cuda_graph_capture_sizes.insert(params.cuda_graph_capture_sizes.end(), p.begin(), p.end());
+        }
+    ));
+    #endif
 
     // model-specific
     add_opt(common_arg(

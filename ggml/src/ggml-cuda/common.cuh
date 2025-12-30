@@ -835,7 +835,13 @@ struct ggml_backend_cuda_context {
     cublasHandle_t cublas_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
     cudnnHandle_t cudnn_handles[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
+    #ifdef GGML_USE_DLFA
+    ggml_cuda_graph* cuda_graph = nullptr;
+    std::unordered_map<int, std::unique_ptr<ggml_cuda_graph>> cuda_graph_map;
+    std::unique_ptr<ggml_cuda_graph> unique_cuda_graph;
+    #else
     std::unique_ptr<ggml_cuda_graph> cuda_graph;
+    #endif
 
     explicit ggml_backend_cuda_context(int device) :
         device(device),

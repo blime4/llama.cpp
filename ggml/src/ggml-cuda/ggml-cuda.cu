@@ -2788,7 +2788,16 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
 #endif
         }
 #endif
-
+        #ifdef GGML_USE_DLFA
+        if (!cgraph->flash_attn && node->op == GGML_OP_ADD && node->src[1] && node->src[1]->ne[1] > 1) {
+            // disable CUDA graphs for batch size > 1 for now.
+            // Changes in batch size or context size can cause changes to the grid size of some kernels.
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to batch size > 1 [%s] [%ld %ld %ld %ld]\n", __func__, node->name, node->ne[0], node->ne[1], node->ne[2], node->ne[3]);
+#endif
+        }
+        #else
         if (node->op == GGML_OP_ADD && node->src[1] && node->src[1]->ne[1] > 1) {
             // disable CUDA graphs for batch size > 1 for now.
             // Changes in batch size or context size can cause changes to the grid size of some kernels.
@@ -2797,6 +2806,7 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to batch size > 1 [%s] [%ld %ld %ld %ld]\n", __func__, node->name, node->ne[0], node->ne[1], node->ne[2], node->ne[3]);
 #endif
         }
+        #endif
 
         if (node->op == GGML_OP_CPY) {
 
@@ -2807,7 +2817,7 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
             // store a pointer to each copy op CUDA kernel to identify it later
             void * ptr = ggml_cuda_cpy_fn(node->src[0], node->src[1]);
             if (!ptr) {
-                // use_cuda_graph = false;
+                use_cuda_graph = false;
 #ifndef NDEBUG
                 GGML_LOG_DEBUG("%s: disabling CUDA graphs due to unsupported copy op\n", __func__);
 #endif
@@ -2822,7 +2832,11 @@ static bool check_node_graph_compatibility_and_refresh_copy_ops(ggml_backend_cud
     if (use_cuda_graph) {
         cuda_ctx->cuda_graph->use_cpy_indirection = true;
         // copy pointers to GPU so they can be accessed via indirection within CUDA graph
+        #ifdef GGML_USE_DLFA
+        ggml_cuda_cpy_dest_ptrs_copy(cuda_ctx->cuda_graph, cuda_ctx->cuda_graph->cpy_dest_ptrs.data(), cuda_ctx->cuda_graph->cpy_dest_ptrs.size(), cuda_ctx->stream());
+        #else
         ggml_cuda_cpy_dest_ptrs_copy(cuda_ctx->cuda_graph.get(), cuda_ctx->cuda_graph->cpy_dest_ptrs.data(), cuda_ctx->cuda_graph->cpy_dest_ptrs.size(), cuda_ctx->stream());
+        #endif
     }
 
     return use_cuda_graph;
@@ -2886,6 +2900,12 @@ static bool is_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, 
     if (cuda_ctx->cuda_graph->instance == nullptr) {
         cuda_graph_update_required = true;
     }
+    #ifdef GGML_USE_DLFA
+    // do not check properties, as chunked prefill graph output is different with full prefill even prompt lenght is the same
+    if (cgraph->flash_attn) {
+        return cuda_graph_update_required;
+    }
+    #endif
 
     // Check if the graph size has changed
     if (cuda_ctx->cuda_graph->ggml_graph_properties.size() != (size_t)cgraph->n_nodes) {
@@ -2998,9 +3018,15 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
         if (cuda_ctx->cuda_graph->instance == nullptr) { // Create executable graph from captured graph.
             CUDA_CHECK(cudaGraphInstantiate(&cuda_ctx->cuda_graph->instance, cuda_ctx->cuda_graph->graph, NULL, NULL, 0));
         }
+        #ifdef GGML_USE_DLFA
+        if (!cgraph->flash_attn && cuda_graph_update_required) { // Update graph executable
+            update_cuda_graph_executable(cuda_ctx);
+        }
+        #else
         if (cuda_graph_update_required) { // Update graph executable
             update_cuda_graph_executable(cuda_ctx);
         }
+        #endif
         // Launch graph
         CUDA_CHECK(cudaGraphLaunch(cuda_ctx->cuda_graph->instance, cuda_ctx->stream()));
 #else
@@ -3018,10 +3044,25 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 #ifdef USE_CUDA_GRAPH
     static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
 
+    #ifdef GGML_USE_DLFA
+    if (cgraph->flash_attn) {
+        if (!cuda_ctx->cuda_graph_map.count(cgraph->n_tokens)) {
+            // Objects required for CUDA Graph
+            cuda_ctx->cuda_graph_map[cgraph->n_tokens] = std::make_unique<ggml_cuda_graph>();
+        }
+        cuda_ctx->cuda_graph = cuda_ctx->cuda_graph_map[cgraph->n_tokens].get();
+    } else {
+        if (cuda_ctx->cuda_graph == nullptr) {
+            cuda_ctx->unique_cuda_graph.reset(new ggml_cuda_graph());
+        }
+        cuda_ctx->cuda_graph = cuda_ctx->unique_cuda_graph.get();
+    }
+    #else
     // Objects required for CUDA Graph
     if (cuda_ctx->cuda_graph == nullptr) {
         cuda_ctx->cuda_graph.reset(new ggml_cuda_graph());
     }
+    #endif
 
     bool use_cuda_graph = true;
     bool cuda_graph_update_required = false;
