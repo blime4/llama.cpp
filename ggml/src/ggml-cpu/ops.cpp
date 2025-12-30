@@ -4213,10 +4213,11 @@ static void ggml_compute_forward_rms_norm_f16(
             for (int64_t i01 = ith; i01 < ne01; i01 += nth) {
                 const ggml_fp16_t * x = (ggml_fp16_t *) ((char *) src0->data + i01*nb01 + i02*nb02 + i03*nb03);
 
-                ggml_float sum = 0.0;
+                // Use float for sum calculation to match CUDA implementation
+                float sum = 0.0f;
                 for (int64_t i00 = 0; i00 < ne00; i00++) {
                     const float x_val = GGML_CPU_FP16_TO_FP32(x[i00]);
-                    sum += (ggml_float)(x_val * x_val);
+                    sum += x_val * x_val;
                 }
 
                 const float mean = sum/ne00;
@@ -4229,6 +4230,9 @@ static void ggml_compute_forward_rms_norm_f16(
                 // }
 
                 const float scale = 1.0f/sqrtf(mean + eps);
+
+                // if you hit this, likely you got an inf somewhere earlier
+                assert(scale > 0.0f);
 
                 ggml_vec_scale_f16(ne00, y, scale);
             }

@@ -63,6 +63,7 @@ echo "=== Environment Summary ==="
 echo "SDK_DIR: $SDK_DIR"
 echo "BUILD_BIN: $BUILD_BIN_PATH"
 echo "PATH includes build/bin: $(echo $PATH | grep -q build/bin && echo "Yes" || echo "No")"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-Not set}"
 
 # alias
 ALIAS_FILE="$(dirname "${BASH_SOURCE[0]}")/aliases.sh"

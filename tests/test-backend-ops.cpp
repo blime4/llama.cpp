@@ -139,7 +139,12 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
 
     if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_I32) {
         ggml_backend_tensor_set(tensor, data.data(), 0, nels * sizeof(float));
-    } else if (ggml_is_quantized(tensor->type) || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
+    } else if (tensor->type == GGML_TYPE_F16) {
+        // Special handling for F16 to avoid quantization issues on some platforms
+        std::vector<ggml_fp16_t> data_f16(nels);
+        ggml_fp32_to_fp16_row(data.data(), data_f16.data(), nels);
+        ggml_backend_tensor_set(tensor, data_f16.data(), 0, nels * sizeof(ggml_fp16_t));
+    } else if (ggml_is_quantized(tensor->type) || tensor->type == GGML_TYPE_BF16) {
         GGML_ASSERT(nels % ggml_blck_size(tensor->type) == 0);
 
          // dummy importance matrix

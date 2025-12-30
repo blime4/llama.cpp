@@ -213,6 +213,13 @@ append_env_var "LLVM"
 append_env_var "DLGPU_X86_SDK_DIR"
 append_env_var "llvm_devel_path"
 
+# CUDA configuration
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    DOCKER_ENVS+=(--env "CUDA_VISIBLE_DEVICES=0")
+else
+    DOCKER_ENVS+=(--env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
+fi
+
 echo "Number of Docker environment variables: ${#DOCKER_ENVS[@]}"
 
 # Step 5: Compile if requested

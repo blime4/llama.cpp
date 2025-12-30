@@ -50,13 +50,13 @@ static __global__ void rms_norm_f16(
     const float scale = rsqrtf(mean + eps);
 
     for (int col = tid; col < ncols; col += block_size) {
-        const float xf = __half2float(x[col]);
+        const float xf = static_cast<float>(x[col]);
         if constexpr (do_multiply) {
             const int mul_col = col % mul_ncols;
             const float mf = mul[mul_col];
-            dst[col] = __float2half_rn(scale * xf * mf);
+            dst[col] = static_cast<half>(scale * xf * mf);
         } else {
-            dst[col] = __float2half_rn(scale * xf);
+            dst[col] = static_cast<half>(scale * xf);
         }
     }
 }
