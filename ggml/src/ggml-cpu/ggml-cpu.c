@@ -1529,7 +1529,11 @@ static void ggml_compute_forward_mul_mat_id(
     GGML_ASSERT(nb10 == ggml_type_size(src1->type));
 
     // dst cannot be transposed or permuted
+#ifndef GGML_USE_DLCU
     GGML_ASSERT(nb0 == sizeof(float));
+#else
+    GGML_ASSERT(nb0 == sizeof(float) || nb0 == sizeof(ggml_fp16_t));
+#endif
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
@@ -1564,7 +1568,11 @@ static void ggml_compute_forward_mul_mat_id(
         const size_t nbw3 = nbw2*ne12;
 
         assert(params->wsize >= ne13*nbw3);
+#ifndef GGML_USE_DLCU
         GGML_ASSERT(src1->type == GGML_TYPE_F32);
+#else
+        GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
+#endif
 
 #if 0
         for (int64_t i13 = 0; i13 < ne13; ++i13) {

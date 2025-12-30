@@ -8635,6 +8635,49 @@ static void ggml_compute_forward_argsort_f32(
     }
 }
 
+#ifdef GGML_USE_DLCU
+static void ggml_compute_forward_argsort_f16(
+    const ggml_compute_params * params,
+    ggml_tensor * dst) {
+
+    const ggml_tensor * src0 = dst->src[0];
+
+    GGML_TENSOR_UNARY_OP_LOCALS
+
+    // GGML_ASSERT(nb0 == sizeof(ggml_fp16_t));
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t nr = ggml_nrows(src0);
+
+    ggml_sort_order order = (ggml_sort_order) ggml_get_op_params_i32(dst, 0);
+
+    for (int64_t i = ith; i < nr; i += nth) {
+        int32_t * dst_data = (int32_t *)((char *) dst->data + i*nb1);
+        const ggml_fp16_t * src_data = (ggml_fp16_t *)((char *) src0->data + i*nb01);
+
+        for (int64_t j = 0; j < ne0; j++) {
+            dst_data[j] = j;
+        }
+
+        // C doesn't have a functional sort, so we do a bubble sort instead
+        for (int64_t j = 0; j < ne0; j++) {
+            for (int64_t k = j + 1; k < ne0; k++) {
+                const float val_j = GGML_FP16_TO_FP32(src_data[dst_data[j]]);
+                const float val_k = GGML_FP16_TO_FP32(src_data[dst_data[k]]);
+                if ((order == GGML_SORT_ORDER_ASC  && val_j > val_k) ||
+                    (order == GGML_SORT_ORDER_DESC && val_j < val_k)) {
+                    int32_t tmp = dst_data[j];
+                    dst_data[j] = dst_data[k];
+                    dst_data[k] = tmp;
+                }
+            }
+        }
+    }
+}
+#endif
+
 void ggml_compute_forward_argsort(
     const ggml_compute_params * params,
     ggml_tensor * dst) {
@@ -8646,6 +8689,12 @@ void ggml_compute_forward_argsort(
             {
                 ggml_compute_forward_argsort_f32(params, dst);
             } break;
+#ifdef GGML_USE_DLCU
+        case GGML_TYPE_F16:
+            {
+                ggml_compute_forward_argsort_f16(params, dst);
+            } break;
+#endif
         default:
             {
                 GGML_ABORT("fatal error");

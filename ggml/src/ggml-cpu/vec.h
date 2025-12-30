@@ -278,12 +278,8 @@ inline static void ggml_vec_mad_f32(const int n, float * GGML_RESTRICT y, const 
 }
 
 inline static void ggml_vec_mad_f16(const int n, ggml_fp16_t * GGML_RESTRICT y, const ggml_fp16_t * GGML_RESTRICT x, const float v) {
-    // Force scalar version on loongarch64 due to SIMD implementation issues
-    #ifdef __loongarch64
-    for (int i = 0; i < n; ++i) {
-        y[i] = GGML_CPU_FP32_TO_FP16(GGML_CPU_FP16_TO_FP32(y[i]) + GGML_CPU_FP16_TO_FP32(x[i])*v);
-    }
-    #elif defined(GGML_SIMD)
+// Force scalar version on loongarch64 due to SIMD implementation issues
+#if defined(GGML_SIMD) && !defined(__loongarch64)
     const int np = (n & ~(GGML_F16_STEP - 1));
 
     GGML_F16_VEC vx = GGML_F16_VEC_SET1(v);
@@ -474,8 +470,8 @@ inline static void ggml_vec_scale_f32(const int n, float * y, const float   v) {
 }
 
 inline static void ggml_vec_scale_f16(const int n, ggml_fp16_t * y, const float v) {
-    // Force scalar version on loongarch64 due to SIMD implementation issues
-    #ifdef __loongarch64
+// Force scalar version on loongarch64 due to SIMD implementation issues
+#if defined(GGML_SIMD) && !defined(__loongarch64)
     for (int i = 0; i < n; ++i) {
         y[i] = GGML_CPU_FP32_TO_FP16(GGML_CPU_FP16_TO_FP32(y[i])*v);
     }
