@@ -1696,8 +1696,8 @@ run_full_test_suite() {
     full_suite_prepare_part2_cases
 
     test_cases=(
-        # "${test_cases_part1[@]}"
-        # "${test_cases_part2[@]}"
+        "${test_cases_part1[@]}"
+        "${test_cases_part2[@]}"
         "${qwen_model_tests[@]}"
     )
 
