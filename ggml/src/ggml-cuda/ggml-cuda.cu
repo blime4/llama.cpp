@@ -3997,21 +3997,19 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_graph_compute");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
+    ggml_cuda_set_device(cuda_ctx->device);
+
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;
 
     // graph_optimize calls set_cuda_graph_enabled, in-case it not called (i.e. graph_compute is directly called)
     // we call it here instead.
 #ifdef USE_CUDA_GRAPH
-    if (!cuda_ctx->cuda_graph) {
-        #ifdef GGML_USE_DLFA // DL-TODO: remove flash_attn parameter once DL-FA is fully integrated.
-        use_cuda_graph = ggml_cuda_set_cuda_graph_enabled(cuda_ctx, cgraph);
-        #else
-        use_cuda_graph = ggml_cuda_set_cuda_graph_enabled(cuda_ctx);
-        #endif
-    } else {
-        use_cuda_graph = cuda_ctx->cuda_graph && cuda_ctx->cuda_graph->cuda_graphs_enabled;
-    }
+    #ifdef GGML_USE_DLFA // DL-TODO: remove flash_attn parameter once DL-FA is fully integrated.
+    use_cuda_graph = ggml_cuda_set_cuda_graph_enabled(cuda_ctx, cgraph);
+    #else
+    use_cuda_graph = ggml_cuda_set_cuda_graph_enabled(cuda_ctx);
+    #endif
 
     if (use_cuda_graph) {
 
@@ -4028,8 +4026,9 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
                 cuda_ctx->cuda_graph->number_consecutive_updates = 0;
             }
 
-            if (cuda_ctx->cuda_graph->number_consecutive_updates >= 4) {
-                cuda_ctx->cuda_graph->disable_due_to_too_many_updates = true;
+        if (cuda_ctx->cuda_graph->number_consecutive_updates >= 4) {
+            cuda_ctx->cuda_graph->disable_due_to_too_many_updates = true;
+            cuda_ctx->cuda_graph->cuda_graphs_enabled = false;
 #ifndef NDEBUG
                 GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
 #endif
