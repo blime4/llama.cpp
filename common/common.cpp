@@ -1320,13 +1320,8 @@ common_init_result_ptr common_init_from_params(common_params & params) {
             LOG_WRN("Capturing cuda graphs");
             for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
                 int32_t size = params.cuda_graph_capture_sizes[i];
-                std::vector<llama_token> tmp;
+                std::vector<llama_token> tmp(size, 0);
                 llama_token bos = llama_vocab_bos(vocab);
-                llama_token eos = llama_vocab_eos(vocab);
-
-                for (int32_t j = 0; j < size; ++j) {
-                    tmp.push_back(0);
-                }
 
                 if (llama_model_has_encoder(model)) {
                     llama_encode(lctx, llama_batch_get_one(tmp.data(), tmp.size()));

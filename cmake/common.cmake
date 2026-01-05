@@ -2,7 +2,6 @@ include("ggml/cmake/common.cmake")
 
 function(llama_add_compile_flags)
     list(APPEND CXX_FLAGS -DGGML_USE_DLFA)
-    list(APPEND CXX_FLAGS -DGGML_USE_DLFA)
     if (LLAMA_FATAL_WARNINGS)
         if (CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             list(APPEND C_FLAGS   -Werror)

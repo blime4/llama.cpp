@@ -1475,7 +1475,11 @@ static void ggml_cuda_op_mul_mat_cublas(
 static void ggml_cuda_set_peer_access(const int n_tokens, int main_device) {
     static bool peer_access_enabled = false;
 
+#ifndef GGML_USE_DLCU
+    const bool enable_peer_access = n_tokens <= GGML_CUDA_PEER_MAX_BATCH_SIZE;
+#else
     const bool enable_peer_access = true;
+#endif
 
     if (peer_access_enabled == enable_peer_access) {
         return;
@@ -2350,13 +2354,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
 #ifdef GGML_USE_DLCU
-    const char* which_branch = "";
     bool dlblas_available = ggml_dl::is_dlblas_available(ctx, src0, src1, dst, split);
     if (dlblas_available) {
         ggml_dl::mul_mat_dlblas(ctx, src0, src1, dst);
-        which_branch = "ggml_dl::mul_mat_dlblas";
         // Emit a debug line once per invocation so we can see which GPU path executed.
-        GGML_DL_MULMAT_DEBUG_PRINT("ggml_cuda_mul_mat: selected CUDA branch '%s'\n", which_branch);
         return;
     }
 #else
@@ -2371,10 +2372,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_mul_mat_f(ctx, src0, src1, nullptr, dst);
     } else if (!split && use_mul_mat_vec_q) {
         ggml_cuda_mul_mat_vec_q(ctx, src0, src1, nullptr, dst);
-        which_branch = "!split && use_mul_mat_vec_q";
-    // DL: non-split follows the ggml_cuda_op_mul_mat_cublas branch
-    //} else if (!split && use_mul_mat_q) {
-    //    ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
+#ifndef GGML_USE_DLCU
+    } else if (!split && use_mul_mat_q) {
+        ggml_cuda_mul_mat_q(ctx, src0, src1, nullptr, dst);
+#endif
     } else if (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)
         && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
         // general KQ + KQV multi-batch without FlashAttention
@@ -2383,24 +2384,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_f, nullptr);
     } else if (use_mul_mat_vec_q) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_q, quantize_row_q8_1_cuda);
-        which_branch = "use_mul_mat_vec_q";
     } else if (use_mul_mat_q) {
 #if defined(GGML_USE_DLCU)
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, quantize_mmq_q8_1_cuda);
 #else
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
 #endif
-        which_branch = "use_mul_mat_q";
     } else {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
-        which_branch = "ggml_cuda_op_mul_mat";
     }
-    // Emit a debug line once per invocation so we can see which GPU path executed.
-    GGML_DL_MULMAT_DEBUG_PRINT("ggml_cuda_mul_mat: selected CUDA branch '%s' (dst=%s, src0_type=%s, src1_type=%s)\n",
-                   which_branch[0] ? which_branch : "unknown",
-                   dst->name,
-                   ggml_type_name(src0->type),
-                   ggml_type_name(src1->type));
 }
 
 
@@ -2410,7 +2402,6 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const ggml_tensor * ids  = dst->src[2];
 
 #ifdef GGML_USE_DLCU
-// #if 0
     {
         ggml_dl::mul_mat_id_dlblas(ctx, src0, src1, ids, dst);
         return;
@@ -4664,10 +4655,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                         return false;
                     }
                 }
-                // DL: support fp16
-                // if (b->type == GGML_TYPE_F16 && a->type != GGML_TYPE_F16) {
-                //     return false;
-                // }
+#ifndef GGML_USE_DLCU // DL-FP16
+                if (b->type == GGML_TYPE_F16 && a->type != GGML_TYPE_F16) {
+                    return false;
+                }
+#endif
 #ifdef GGML_USE_MUSA
                 const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
                 if (b->ne[2]*b->ne[3] > 1 && !ggml_is_transposed(a) && !ggml_is_transposed(b)) {

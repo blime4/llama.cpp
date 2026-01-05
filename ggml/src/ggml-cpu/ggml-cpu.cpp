@@ -112,7 +112,6 @@ struct ggml_backend_cpu_context {
 };
 
 static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_get_name");
     GGML_UNUSED(backend);
     return "CPU";
 }

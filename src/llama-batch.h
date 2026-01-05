@@ -72,23 +72,6 @@ struct llama_ubatch {
     uint32_t real_n_tokens;     // real tokens used
     #endif
 
-    // DL note --------------------------------------------------
-    // token: [A0, A1, A2, A3, B0, B1, B2, B3, C0, C1, C2, C3]
-    // pos:   [ 0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3]
-    // n_seq_id: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
-    // seq_id:   [→[0], →[0], →[0], →[0], →[1], →[1], →[1], →[1], →[2], →[2], →[2], →[2]]
-    // seq_id_unq: [0, 1, 2]
-    // seq_idx: 0, 1, 2, ... n_seqs_unq - 1
-    // output:
-
-    // if use shared prefix. maybe one token belongs to multiple sequences.
-    // token:      [A0, A1, A2, A3, B2, B3, C0, C1, C2, C3]
-    // pos:        [ 0,  1,  2,  3,  2,  3,  0,  1,  2,  3]
-    // n_seq_id:   [2, 2, 1, 1, 1, 1, 1, 1, 1, 1]
-    // seq_id[0] → [0, 1]
-    // seq_id[1] → [0, 1]
-    // seq_id[2] → [0]
-    // DL note --------------------------------------------------
     struct data_t {
         std::vector<llama_token>    token;
         std::vector<float>          embd;

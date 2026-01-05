@@ -1001,12 +1001,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 #ifdef GGML_USE_DLFA
     // Prepare varlen buffers for flash attention after set_inputs and before graph_compute
     // This enables async overlap of cudaMemcpyAsync with subsequent graph_compute operations
-    // const auto t_prepare_start_us = ggml_time_us();
     prepare_flash_attn_varlen_buffers(sched.get(), gf);
-    // t_prepare_ms = (ggml_time_us() - t_prepare_start_us) / 1000.0;
 #endif
 
-    // const auto t_compute_start_us = ggml_time_us();
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
     // t_compute_ms = (ggml_time_us() - t_compute_start_us) / 1000.0;
     // t_total_ms   = (ggml_time_us() - t_total_start_us) / 1000.0;
