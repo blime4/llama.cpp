@@ -996,7 +996,6 @@ static enum ggml_status ggml_backend_cuda_split_buffer_init_tensor(ggml_backend_
     return GGML_STATUS_SUCCESS;
 }
 
-
 static void ggml_backend_cuda_split_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_set_tensor");
     // split tensors must always be set in their entirety at once
@@ -3145,12 +3144,12 @@ static bool is_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, 
     if (cuda_ctx->cuda_graph->instance == nullptr) {
         cuda_graph_update_required = true;
     }
-    #ifdef GGML_USE_DLFA
-    // do not check properties, as chunked prefill graph output is different with full prefill even prompt lenght is the same
-    if (cgraph->flash_attn) {
-        return cuda_graph_update_required;
-    }
-    #endif
+    // #ifdef GGML_USE_DLFA
+    // // do not check properties, as chunked prefill graph output is different with full prefill even prompt lenght is the same
+    // if (cgraph->flash_attn) {
+    //     return cuda_graph_update_required;
+    // }
+    // #endif
 
     // Check if the graph size has changed
     if (cuda_ctx->cuda_graph->ggml_graph_properties.size() != (size_t)cgraph->n_nodes) {
@@ -3899,7 +3898,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
             CUDA_CHECK(cudaGraphInstantiate(&cuda_ctx->cuda_graph->instance, cuda_ctx->cuda_graph->graph, NULL, NULL, 0));
         }
         #ifdef GGML_USE_DLFA
-        if (!cgraph->flash_attn && cuda_graph_update_required) { // Update graph executable
+        if (cgraph->flash_attn && cuda_graph_update_required) { // Update graph executable
             update_cuda_graph_executable(cuda_ctx);
         }
         #else
@@ -4019,9 +4018,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
         if (cuda_ctx->cuda_graph->number_consecutive_updates >= 4) {
             cuda_ctx->cuda_graph->disable_due_to_too_many_updates = true;
-            cuda_ctx->cuda_graph->cuda_graphs_enabled = false;
 #ifndef NDEBUG
-                GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
 #endif
             }
         }
