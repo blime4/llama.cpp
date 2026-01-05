@@ -928,7 +928,6 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
 #endif
 
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
-    GGML_DLPTI_TRACE_FUNCTION(__func__);
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -1023,7 +1022,6 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 }
 
 int llama_context::encode(const llama_batch & batch_inp) {
-    GGML_DLPTI_TRACE_FUNCTION(__func__);
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
     if (batch_inp.n_tokens == 0) {
@@ -1186,7 +1184,6 @@ int llama_context::encode(const llama_batch & batch_inp) {
 }
 
 int llama_context::decode(const llama_batch & batch_inp) {
-    GGML_DLPTI_TRACE_FUNCTION(__func__);
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
     if (!memory) {
@@ -1524,7 +1521,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
 //
 
 uint32_t llama_context::output_reserve(int32_t n_outputs) {
-    GGML_DLPTI_TRACE_FUNCTION(__func__);
     const auto & hparams = model.hparams;
     const auto & vocab   = model.vocab;
 
@@ -1639,7 +1635,6 @@ llm_graph_result * llama_context::get_gf_res_reserve() const {
 ggml_cgraph * llama_context::graph_reserve(
         uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx, bool split_only, size_t * sizes) {
     LLAMA_LOG_DEBUG("%s: reserving a graph for ubatch with n_tokens = %4u, n_seqs = %2u, n_outputs = %4u\n", __func__, n_tokens, n_seqs, n_outputs);
-    GGML_DLPTI_TRACE_FUNCTION(__func__);
     GGML_ASSERT(n_outputs >= 1);
 
     if (n_tokens % n_seqs != 0) {

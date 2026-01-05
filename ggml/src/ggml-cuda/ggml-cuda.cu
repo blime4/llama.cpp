@@ -604,7 +604,6 @@ struct ggml_backend_cuda_buffer_context {
 };
 
 static void ggml_backend_cuda_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_free_buffer");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
     delete ctx;
 }
@@ -614,13 +613,11 @@ static bool ggml_backend_buffer_is_cuda(ggml_backend_buffer_t buffer) {
 }
 
 static void * ggml_backend_cuda_buffer_get_base(ggml_backend_buffer_t buffer) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_get_base");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
     return ctx->dev_ptr;
 }
 
 static enum ggml_status ggml_backend_cuda_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_init_tensor");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     if (tensor->view_src != NULL) {
@@ -642,7 +639,6 @@ static enum ggml_status ggml_backend_cuda_buffer_init_tensor(ggml_backend_buffer
 }
 
 static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_memset_tensor");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
@@ -651,7 +647,6 @@ static void ggml_backend_cuda_buffer_memset_tensor(ggml_backend_buffer_t buffer,
 }
 
 static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_set_tensor");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
@@ -660,7 +655,6 @@ static void ggml_backend_cuda_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
 }
 
 static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_get_tensor");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
@@ -669,7 +663,6 @@ static void ggml_backend_cuda_buffer_get_tensor(ggml_backend_buffer_t buffer, co
 }
 
 static bool ggml_backend_cuda_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * src, ggml_tensor * dst) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_cpy_tensor");
     if (ggml_backend_buffer_is_cuda(src->buffer)) {
         ggml_backend_cuda_buffer_context * src_ctx = (ggml_backend_cuda_buffer_context *)src->buffer->context;
         ggml_backend_cuda_buffer_context * dst_ctx = (ggml_backend_cuda_buffer_context *)dst->buffer->context;
@@ -691,7 +684,6 @@ static bool ggml_backend_cuda_buffer_cpy_tensor(ggml_backend_buffer_t buffer, co
 }
 
 static void ggml_backend_cuda_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_buffer_clear");
     ggml_backend_cuda_buffer_context * ctx = (ggml_backend_cuda_buffer_context *)buffer->context;
 
     ggml_cuda_set_device(ctx->device);
@@ -932,13 +924,11 @@ struct ggml_backend_cuda_split_buffer_context {
 
 
 static void ggml_backend_cuda_split_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_free_buffer");
     ggml_backend_cuda_split_buffer_context * ctx = (ggml_backend_cuda_split_buffer_context *)buffer->context;
     delete ctx;
 }
 
 static void * ggml_backend_cuda_split_buffer_get_base(ggml_backend_buffer_t buffer) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_get_base");
     // the pointers are stored in the tensor extras, this is just a dummy address and never dereferenced
     return (void *)0x1000;
 
@@ -946,7 +936,6 @@ static void * ggml_backend_cuda_split_buffer_get_base(ggml_backend_buffer_t buff
 }
 
 static enum ggml_status ggml_backend_cuda_split_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_init_tensor");
     GGML_ASSERT(tensor->view_src == nullptr); // views of split tensors are not supported
     GGML_ASSERT(ggml_is_contiguous(tensor) && "split buffers only supported for contiguous tensors");
 
@@ -997,7 +986,6 @@ static enum ggml_status ggml_backend_cuda_split_buffer_init_tensor(ggml_backend_
 }
 
 static void ggml_backend_cuda_split_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_set_tensor");
     // split tensors must always be set in their entirety at once
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(size == ggml_nbytes(tensor));
@@ -1037,7 +1025,6 @@ static void ggml_backend_cuda_split_buffer_set_tensor(ggml_backend_buffer_t buff
 }
 
 static void ggml_backend_cuda_split_buffer_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_get_tensor");
     // split tensors must always be set in their entirety at once
     GGML_ASSERT(offset == 0);
     GGML_ASSERT(size == ggml_nbytes(tensor));
@@ -1077,7 +1064,6 @@ static void ggml_backend_cuda_split_buffer_get_tensor(ggml_backend_buffer_t buff
 }
 
 static void ggml_backend_cuda_split_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_split_buffer_clear");
     GGML_UNUSED(buffer);
     GGML_UNUSED(value);
 }
@@ -2903,14 +2889,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
 // backend
 
 static const char * ggml_backend_cuda_get_name(ggml_backend_t backend) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_get_name");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
     return cuda_ctx->name.c_str();
 }
 
 static void ggml_backend_cuda_free(ggml_backend_t backend) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_free");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
     delete cuda_ctx;
@@ -2918,7 +2902,6 @@ static void ggml_backend_cuda_free(ggml_backend_t backend) {
 }
 
 static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_set_tensor_async");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
@@ -2928,7 +2911,6 @@ static void ggml_backend_cuda_set_tensor_async(ggml_backend_t backend, ggml_tens
 }
 
 static void ggml_backend_cuda_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_get_tensor_async");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
 
@@ -2938,7 +2920,6 @@ static void ggml_backend_cuda_get_tensor_async(ggml_backend_t backend, const ggm
 }
 
 static bool ggml_backend_cuda_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, const ggml_tensor * src, ggml_tensor * dst) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_cpy_tensor_async");
     ggml_backend_buffer_t buf_src = src->view_src ? src->view_src->buffer : src->buffer;
     ggml_backend_buffer_t buf_dst = dst->view_src ? dst->view_src->buffer : dst->buffer;
 
@@ -2994,7 +2975,6 @@ static bool ggml_backend_cuda_cpy_tensor_async(ggml_backend_t backend_src, ggml_
 }
 
 static void ggml_backend_cuda_synchronize(ggml_backend_t backend) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_synchronize");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
     CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
@@ -3984,7 +3964,6 @@ static bool ggml_cuda_set_cuda_graph_enabled(ggml_backend_cuda_context * cuda_ct
 }
 
 static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_graph_compute");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
     ggml_cuda_set_device(cuda_ctx->device);
@@ -4044,14 +4023,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 }
 
 static void ggml_backend_cuda_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_event_record");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
     CUDA_CHECK(cudaEventRecord((cudaEvent_t)event->context, cuda_ctx->stream()));
 }
 
 static void ggml_backend_cuda_event_wait(ggml_backend_t backend, ggml_backend_event_t event) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cuda_event_wait");
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *)backend->context;
 
     if (ggml_backend_is_cuda(backend)) {

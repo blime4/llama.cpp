@@ -2119,7 +2119,6 @@ bool ggml_backend_compare_graph_backend(ggml_backend_t backend1, ggml_backend_t 
 // CPU backend - buffer
 
 static void * ggml_backend_cpu_buffer_get_base(ggml_backend_buffer_t buffer) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_get_base");
     GGML_ASSERT(buffer);
     uintptr_t data = (uintptr_t)buffer->context;
 
@@ -2132,13 +2131,11 @@ static void * ggml_backend_cpu_buffer_get_base(ggml_backend_buffer_t buffer) {
 }
 
 static void ggml_backend_cpu_buffer_free_buffer(ggml_backend_buffer_t buffer) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_free_buffer");
     GGML_ASSERT(buffer);
     ggml_aligned_free(buffer->context, buffer->size);
 }
 
 static void ggml_backend_cpu_buffer_memset_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_memset_tensor");
     GGML_ASSERT(tensor);
     memset((char *)tensor->data + offset, value, size);
 
@@ -2146,7 +2143,6 @@ static void ggml_backend_cpu_buffer_memset_tensor(ggml_backend_buffer_t buffer, 
 }
 
 static void ggml_backend_cpu_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_set_tensor");
     GGML_ASSERT(tensor);
     memcpy((char *)tensor->data + offset, data, size);
 
@@ -2154,7 +2150,6 @@ static void ggml_backend_cpu_buffer_set_tensor(ggml_backend_buffer_t buffer, str
 }
 
 static void ggml_backend_cpu_buffer_get_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_get_tensor");
     GGML_ASSERT(tensor);
     memcpy(data, (const char *)tensor->data + offset, size);
 
@@ -2162,7 +2157,6 @@ static void ggml_backend_cpu_buffer_get_tensor(ggml_backend_buffer_t buffer, con
 }
 
 static bool ggml_backend_cpu_buffer_cpy_tensor(ggml_backend_buffer_t buffer, const struct ggml_tensor * src, struct ggml_tensor * dst) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_cpy_tensor");
     GGML_ASSERT(src);
     if (ggml_backend_buffer_is_host(src->buffer)) {
         memcpy(dst->data, src->data, ggml_nbytes(src));
@@ -2174,7 +2168,6 @@ static bool ggml_backend_cpu_buffer_cpy_tensor(ggml_backend_buffer_t buffer, con
 }
 
 static void ggml_backend_cpu_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_buffer_clear");
     GGML_ASSERT(buffer);
     memset(buffer->context, value, buffer->size);
 }

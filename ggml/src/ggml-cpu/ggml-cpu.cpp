@@ -117,7 +117,6 @@ static const char * ggml_backend_cpu_get_name(ggml_backend_t backend) {
 }
 
 static void ggml_backend_cpu_free(ggml_backend_t backend) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_free");
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
     delete[] cpu_ctx->work_data;
     delete cpu_ctx;
@@ -130,7 +129,6 @@ struct ggml_backend_plan_cpu {
 };
 
 static ggml_backend_graph_plan_t ggml_backend_cpu_graph_plan_create(ggml_backend_t backend, const struct ggml_cgraph * cgraph) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_graph_plan_create");
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
     struct ggml_backend_plan_cpu * cpu_plan = new ggml_backend_plan_cpu;
@@ -153,7 +151,6 @@ static ggml_backend_graph_plan_t ggml_backend_cpu_graph_plan_create(ggml_backend
 }
 
 static void ggml_backend_cpu_graph_plan_free(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_graph_plan_free");
     struct ggml_backend_plan_cpu * cpu_plan = (struct ggml_backend_plan_cpu *)plan;
 
     delete[] cpu_plan->cplan.work_data;
@@ -163,7 +160,6 @@ static void ggml_backend_cpu_graph_plan_free(ggml_backend_t backend, ggml_backen
 }
 
 static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backend, ggml_backend_graph_plan_t plan) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_graph_plan_compute");
     struct ggml_backend_plan_cpu * cpu_plan = (struct ggml_backend_plan_cpu *)plan;
 
     GGML_UNUSED(backend);
@@ -171,7 +167,6 @@ static enum ggml_status ggml_backend_cpu_graph_plan_compute(ggml_backend_t backe
 }
 
 static enum ggml_status ggml_backend_cpu_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-    GGML_DLPTI_TRACE_FUNCTION("ggml_backend_cpu_graph_compute");
     struct ggml_backend_cpu_context * cpu_ctx = (struct ggml_backend_cpu_context *)backend->context;
 
     struct ggml_cplan cplan = ggml_graph_plan(cgraph, cpu_ctx->n_threads, cpu_ctx->threadpool);
