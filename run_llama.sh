@@ -868,6 +868,7 @@ compile_llama_cpp() {
         -DGGML_BACKEND_DL=ON
         -DGGML_CUDA_GRAPHS=ON
         -DLLAMA_CURL=OFF
+        -DLLAMA_OPENSSL=ON
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
         -DGGML_CUDA_FA=ON
         -DGGML_CUDA_FA_ALL_QUANTS=ON

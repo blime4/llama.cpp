@@ -3979,7 +3979,6 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         if (use_cuda_graph) {
 
             cuda_graph_update_required = is_cuda_graph_update_required(cuda_ctx, cgraph);
-            if(cuda_graph_update_required) printf("\nfor debug : is_cuda_graph_update_required\n");
 
             // Disable CUDA graphs (from the next token) if the use-case is demanding too many consecutive graph updates.
             if (cuda_graph_update_required) {
