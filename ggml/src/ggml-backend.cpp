@@ -650,9 +650,6 @@ static struct ggml_tensor * ggml_dup_tensor_layout(struct ggml_context * ctx, co
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
         dup->nb[i] = tensor->nb[i];
     }
-#if defined(GGML_USE_DLFA) // DL-TODO, check if this need to remove.
-    memcpy(dup->op_params, tensor->op_params, sizeof(dup->op_params));
-#endif
     return dup;
 }
 

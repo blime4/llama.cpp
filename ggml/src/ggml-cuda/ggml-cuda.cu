@@ -2040,7 +2040,6 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
 
         // there is no broadcast and src0, src1 are contiguous across dims 2, 3
         // use cublasGemmStridedBatchedEx
-        GGML_DL_MULMAT_DEBUG_PRINT("for debug : cublasGemmStridedBatchedEx\n");
         CUBLAS_CHECK(
         cublasGemmStridedBatchedEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne10,
@@ -2080,7 +2079,6 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
 
         CUDA_CHECK(cudaGetLastError());
 
-        GGML_DL_MULMAT_DEBUG_PRINT("for debug : cublasGemmBatchedEx\n");
         CUBLAS_CHECK(
         cublasGemmBatchedEx(ctx.cublas_handle(), CUBLAS_OP_T, CUBLAS_OP_N,
                 ne01, ne11, ne10,
@@ -3124,12 +3122,12 @@ static bool is_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, 
     if (cuda_ctx->cuda_graph->instance == nullptr) {
         cuda_graph_update_required = true;
     }
-    // #ifdef GGML_USE_DLFA
-    // // do not check properties, as chunked prefill graph output is different with full prefill even prompt lenght is the same
-    // if (cgraph->flash_attn) {
-    //     return cuda_graph_update_required;
-    // }
-    // #endif
+    #ifdef GGML_USE_DLFA
+    // do not check properties, as chunked prefill graph output is different with full prefill even prompt lenght is the same
+    if (cgraph->flash_attn) {
+        return cuda_graph_update_required;
+    }
+    #endif
 
     // Check if the graph size has changed
     if (cuda_ctx->cuda_graph->ggml_graph_properties.size() != (size_t)cgraph->n_nodes) {
@@ -3877,15 +3875,9 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
         if (cuda_ctx->cuda_graph->instance == nullptr) { // Create executable graph from captured graph.
             CUDA_CHECK(cudaGraphInstantiate(&cuda_ctx->cuda_graph->instance, cuda_ctx->cuda_graph->graph, NULL, NULL, 0));
         }
-        #ifdef GGML_USE_DLFA
-        if (cgraph->flash_attn && cuda_graph_update_required) { // Update graph executable
-            update_cuda_graph_executable(cuda_ctx);
-        }
-        #else
         if (cuda_graph_update_required) { // Update graph executable
             update_cuda_graph_executable(cuda_ctx);
         }
-        #endif
         // Launch graph
         CUDA_CHECK(cudaGraphLaunch(cuda_ctx->cuda_graph->instance, cuda_ctx->stream()));
 #else
@@ -3987,6 +3979,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         if (use_cuda_graph) {
 
             cuda_graph_update_required = is_cuda_graph_update_required(cuda_ctx, cgraph);
+            if(cuda_graph_update_required) printf("\nfor debug : is_cuda_graph_update_required\n");
 
             // Disable CUDA graphs (from the next token) if the use-case is demanding too many consecutive graph updates.
             if (cuda_graph_update_required) {

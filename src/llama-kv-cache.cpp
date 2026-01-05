@@ -1,5 +1,6 @@
 #include "llama-kv-cache.h"
 
+#include "llama-cparams.h"
 #include "llama-impl.h"
 #include "llama-io.h"
 #include "llama-model.h"
@@ -1008,6 +1009,7 @@ bool llama_kv_cache::get_has_shift() const {
     return result;
 }
 
+#ifndef GGML_USE_DLFA
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
     uint32_t result = 0;
 
@@ -1023,6 +1025,13 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
 
     return result;
 }
+#else
+uint32_t llama_kv_cache::get_n_kv(const llama_context * lctx) const {
+    // DL: decode use one cuda graph.
+    const auto & cparams = lctx->get_cparams();
+    return cparams.n_ctx;
+}
+#endif
 
 ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
     const int32_t ikv = map_layer_ids.at(il);
@@ -2105,7 +2114,11 @@ bool llama_kv_cache_context::apply() {
     }
 
     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
+#ifndef GGML_USE_DLFA
     n_kv = kv->get_n_kv(sinfos[i_cur]);
+#else
+    n_kv = kv->get_n_kv(lctx);
+#endif
 
     return true;
 }

@@ -161,7 +161,11 @@ public:
     // graph_build API
     //
 
+#ifndef GGML_USE_DLFA
     uint32_t get_n_kv(const slot_info & sinfo) const;
+#else
+    uint32_t get_n_kv(const llama_context * lctx) const;
+#endif
 
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
