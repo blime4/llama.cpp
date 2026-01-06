@@ -11,6 +11,13 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
     inpL = build_inp_embd(model.tok_embd);
     cb(inpL, "model.embed_tokens", -1);
 
+#ifdef GGML_USE_DLCU // DL-FP16
+    ggml_type compute_type = cparams.use_fp16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
+    if (compute_type != GGML_TYPE_F32) {
+        inpL = ggml_cast(ctx0, inpL, compute_type);
+    }
+#endif
+
     auto * inp = build_inp_mem_hybrid();
 
     ggml_tensor * inp_pos     = build_inp_pos();
@@ -81,6 +88,14 @@ llm_build_qwen3next::llm_build_qwen3next(const llama_model & model, const llm_gr
     cur = build_lora_mm(model.output, cur);
 
     cb(cur, "result_output", -1);
+
+#ifdef GGML_USE_DLCU
+    if (compute_type != GGML_TYPE_F32) {
+        cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
+        cb(cur, "result_output_f32", -1);
+    }
+#endif
+
     res->t_logits = cur;
 
     ggml_build_forward_expand(gf, cur);

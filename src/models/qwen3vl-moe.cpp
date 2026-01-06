@@ -13,6 +13,13 @@ llm_build_qwen3vlmoe::llm_build_qwen3vlmoe(const llama_model & model, const llm_
 
     inpL = build_inp_embd(model.tok_embd);
 
+#ifdef GGML_USE_DLCU // DL-FP16
+    ggml_type compute_type = cparams.use_fp16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
+    if (compute_type != GGML_TYPE_F32) {
+        inpL = ggml_cast(ctx0, inpL, compute_type);
+    }
+#endif
+
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
 
@@ -142,6 +149,14 @@ llm_build_qwen3vlmoe::llm_build_qwen3vlmoe(const llama_model & model, const llm_
     cur = build_lora_mm(model.output, cur);
 
     cb(cur, "result_output", -1);
+
+#ifdef GGML_USE_DLCU
+    if (compute_type != GGML_TYPE_F32) {
+        cur = ggml_cast(ctx0, cur, GGML_TYPE_F32);
+        cb(cur, "result_output_f32", -1);
+    }
+#endif
+
     res->t_logits = cur;
 
     ggml_build_forward_expand(gf, cur);
