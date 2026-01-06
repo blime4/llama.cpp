@@ -21,7 +21,7 @@
 #include <memory>
 #include <vector>
 
-// Per-runtime device buffer cache (shared by varlen/non-varlen forward paths).
+// Per-device buffer cache for multi-GPU support (following llama.cpp official pattern)
 struct flash_attn_device_layout_cache {
     int device = -1;
     size_t combined_cap = 0;             // capacity in ints for the combined buffer
@@ -32,7 +32,19 @@ struct flash_attn_device_layout_cache {
     int * seqused_ptr = nullptr;
     int * block_table_ptr = nullptr;
 
-    ~flash_attn_device_layout_cache() = default; // rely on process teardown to free
+    ~flash_attn_device_layout_cache() {
+        // Cleanup device memory
+        if (combined_ptr) {
+            cudaSetDevice(device);
+            cudaFree(combined_ptr);
+            combined_ptr = nullptr;
+        }
+        // Cleanup pinned host memory
+        if (host_combined_ptr) {
+            cudaFreeHost(host_combined_ptr);
+            host_combined_ptr = nullptr;
+        }
+    }
 };
 
 static inline bool ggml_dlfa_graphs_enabled() {
@@ -202,8 +214,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     ggml_cuda_pool_alloc<float> softmax_lse_mem(ctx.pool(id));
     ggml_cuda_pool_alloc<uint8_t> workspace_mem(ctx.pool(id));
 
-    // Persist layout buffers per runtime/mask so they are allocated once and reused across layers.
-
     const struct ggml_tensor * KQV  = dst;
     const struct ggml_tensor * Q    = dst->src[0];
     const struct ggml_tensor * K    = dst->src[1];
@@ -214,9 +224,13 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
 
     const char* env_dl_fattn_debug = getenv("GGML_DL_FATTN_DEBUG");
     ggml_flash_attn_mask_params mask_info{};
-    if (runtime && runtime->has_mask_params) {
-        mask_info = runtime->mask_params;
-    } else {
+    bool have_mask_params = false;
+
+    // Read mask params from attn tensor's op_params (following ggml.c pattern)
+    have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
+
+    // Fallback to default values
+    if (!have_mask_params) {
         mask_info.present = mask != nullptr;
         mask_info.is_causal = false;
         mask_info.window_left = -1;
@@ -224,10 +238,6 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
         mask_info.per_token_window = false;
         mask_info.multi_sequence = false;
         mask_info.has_alibi_bias = false;
-    }
-    if (!(runtime && runtime->has_mask_params)) {
-        // Fallback to reading params already stored on the attn tensor (op params)
-        ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
     }
 
     const bool mask_supports_cudnn = mask_info.present && !mask_info.per_token_window && !mask_info.multi_sequence;
@@ -513,9 +523,13 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
     ggml_dl::flash_attn_dlfa_runtime * runtime =
         mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
     ggml_flash_attn_mask_params mask_info{};
-    if (runtime && runtime->has_mask_params) {
-        mask_info = runtime->mask_params;
-    } else {
+    bool have_mask_params = false;
+
+    // Read mask params from attn tensor's op_params (following ggml.c pattern)
+    have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
+
+    // Fallback to default values
+    if (!have_mask_params) {
         mask_info.present = mask != nullptr;
         mask_info.is_causal = false;
         mask_info.window_left = -1;
@@ -570,7 +584,7 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
         const int max_seqlen_k = (int) S_k;
         const int num_blocks_per_seq_runtime = num_blocks_per_seq;
 
-        // Device buffers should already be prepared and copied in flash_attn_ext_dldnn
+        // Device buffers should already be prepared and copied in flash_attn_ext_dldnn_prepare_varlen_buffers
         // (called before this function for async overlap). Just retrieve pointers from cache.
         int * cu_seqlens_q_dev = nullptr;
         int * seqused_k_dev    = nullptr;
@@ -581,22 +595,25 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
             GGML_ASSERT((int) runtime->cu_seqlens_q.size() == (int) B + 1);
             GGML_ASSERT((int) runtime->seqused_k.size() == (int) B);
 
-            // Device cache should already be initialized by flash_attn_ext_dldnn_prepare_varlen_buffers.
-            // Multi-GPU runs may execute on a different device than the one that primed the cache,
-            // so re-prepare if the device does not match.
-            if (!runtime->device_cache || static_cast<flash_attn_device_layout_cache *>(runtime->device_cache)->device != id) {
+            // Multi-GPU support: get or create device-specific cache
+            auto it = runtime->device_caches.find(id);
+            if (it == runtime->device_caches.end() || it->second == nullptr) {
+                // Cache doesn't exist for this device, prepare it
                 ggml_cuda_set_device(ctx.device);
                 ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst);
+                it = runtime->device_caches.find(id);
             }
-            GGML_ASSERT(runtime->device_cache != nullptr);
-            flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
+
+            GGML_ASSERT(it != runtime->device_caches.end() && it->second != nullptr);
+            flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(it->second);
+
+            // Verify device matches
             if (cache->device != id) {
-                // As a last resort, rebuild the cache on this device.
+                // Device mismatch, rebuild cache for this device
                 cache->device = id;
                 cache->combined_cap = 0;
                 cache->combined_ptr = cache->cu_seqlens_ptr = cache->seqused_ptr = cache->block_table_ptr = nullptr;
                 ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst);
-                cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
             }
 
             // Retrieve device pointers (buffers already allocated and copied)
@@ -777,10 +794,12 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
     // const bool has_softcap = (logit_softcap != 0.0f);
     ggml_flash_attn_mask_params mask_info{};
     bool have_mask_params = false;
-    if (runtime && runtime->has_mask_params) {
-        mask_info = runtime->mask_params;
-        have_mask_params = true;
-    } else {
+
+    // Read mask params from attn tensor's op_params (following ggml.c pattern)
+    have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
+
+    // Fallback to default values
+    if (!have_mask_params) {
         mask_info.present = mask != nullptr;
         mask_info.is_causal = false;
         mask_info.window_left = -1;
@@ -788,9 +807,6 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
         mask_info.per_token_window = false;
         mask_info.multi_sequence = false;
         mask_info.has_alibi_bias = false;
-    }
-    if (!have_mask_params) {
-        have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
     }
 
     // Check for GQA (Grouped Query Attention) support
@@ -837,9 +853,7 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
 
     const ggml_tensor * K = dst->src[1];
     const int64_t B = dst->src[0]->ne[3];
-    const int64_t S_k = K->ne[1];
     const int page_block_size = 256;
-    const int max_num_seqs = 1;
 
     const bool runtime_has_layout =
         runtime && runtime->block_table_stride > 0 && runtime->seqlen_q > 0 && runtime->seqlen_k_real > 0 && runtime->batch > 0;
@@ -854,23 +868,30 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
     const size_t cu_bytes = runtime->cu_seqlens_q.size() * sizeof(int32_t);
     const size_t su_bytes = runtime->seqused_k.size() * sizeof(int32_t);
     const size_t bt_elems = (size_t)((runtime->seqlen_k_real + page_block_size - 1) / page_block_size);
-
     const size_t bt_bytes = bt_elems * sizeof(int32_t);
 
-    // Ensure device-side cached buffers exist (per runtime/mask) and are large enough.
-    if (!runtime->device_cache) {
-        runtime->device_cache = new flash_attn_device_layout_cache();
-        flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
+    // Multi-GPU support: get or create device-specific cache (following llama.cpp official pattern)
+    auto it = runtime->device_caches.find(id);
+    flash_attn_device_layout_cache * cache = nullptr;
+
+    if (it == runtime->device_caches.end() || it->second == nullptr) {
+        // Create new cache for this device
+        cache = new flash_attn_device_layout_cache();
         cache->device = id;
-    }
-    flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
-    if (cache->device != id) {
-        cache->device = id;
-        cache->combined_cap = 0;
-        cache->combined_ptr = cache->cu_seqlens_ptr = cache->seqused_ptr = cache->block_table_ptr = nullptr;
+        runtime->device_caches[id] = cache;
+    } else {
+        cache = static_cast<flash_attn_device_layout_cache *>(it->second);
+        if (cache->device != id) {
+            // Device mismatch, reset cache
+            cache->device = id;
+            cache->combined_cap = 0;
+            cache->combined_ptr = cache->cu_seqlens_ptr = cache->seqused_ptr = cache->block_table_ptr = nullptr;
+        }
     }
 
     const size_t total_elems = runtime->cu_seqlens_q.size() + runtime->seqused_k.size() + num_blocks_per_seq;
+
+    // Allocate or reallocate device memory if needed
     if (cache->combined_cap < total_elems) {
         if (cache->combined_ptr) {
             ggml_cuda_set_device(id);
@@ -880,6 +901,8 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
         CUDA_CHECK(cudaMalloc(&cache->combined_ptr, total_elems * sizeof(int)));
         cache->combined_cap = total_elems;
     }
+
+    // Allocate or reallocate pinned host memory if needed
     if (cache->host_combined_cap < total_elems) {
         if (cache->host_combined_ptr) {
             CUDA_CHECK(cudaFreeHost(cache->host_combined_ptr));
@@ -888,11 +911,12 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
         cache->host_combined_cap = total_elems;
     }
 
+    // Set up device pointers
     cache->cu_seqlens_ptr = cache->combined_ptr;
     cache->seqused_ptr = cache->cu_seqlens_ptr + runtime->cu_seqlens_q.size();
     cache->block_table_ptr = cache->seqused_ptr + runtime->seqused_k.size();
 
-    // Start async copies early for better overlap with subsequent operations
+    // Copy host data to pinned memory, then async copy to device for better overlap
     int * host_ptr = cache->host_combined_ptr;
     memcpy(host_ptr, runtime->cu_seqlens_q.data(), cu_bytes);
     host_ptr += runtime->cu_seqlens_q.size();

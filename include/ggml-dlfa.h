@@ -21,6 +21,7 @@ struct flash_attn_ext_decode_state {
 
 // Host-side precomputed metadata to avoid recomputing lengths during forward.
 // Filled in set_input and consumed by the CUDA forward path.
+// Only keeps essential varlen metadata: cu_seqlens_q, seqused_k, block_table
 struct flash_attn_dlfa_runtime {
     int batch = 0;
     int seqlen_q = 0;
@@ -29,26 +30,28 @@ struct flash_attn_dlfa_runtime {
     std::vector<int32_t> cu_seqlens_q; // size batch+1
     std::vector<int32_t> seqused_k;    // size batch
     std::vector<int32_t> block_table;  // size batch * block_table_stride
-    ggml_flash_attn_mask_params mask_params{};
-    bool has_mask_params = false;
-    // Device-side cached buffers for runtime layout (allocated lazily in CUDA path).
-    // Raw pointer on purpose: lifetime tied to process; avoid CUDA teardown ordering issues.
-    void * device_cache = nullptr;
+
+    // Per-device cached buffers for multi-GPU support
+    // Key: device_id, Value: device-specific cache
+    std::unordered_map<int, void*> device_caches;
 };
 
 inline void store_mask_metadata(ggml_tensor * attn, const ggml_flash_attn_mask_params & params) {
     GGML_ASSERT(attn != nullptr);
-    GGML_ASSERT(attn->src[3] != nullptr);
-    ggml_tensor * mask = attn->src[3];
+    // Store mask params directly in attn tensor's op_params following ggml.c pattern
+    // Reference: @ggml/src/ggml.c:4137-4143 for similar parameter storage approach
 
-    auto * runtime = static_cast<flash_attn_dlfa_runtime *>(mask->extra);
-    if (runtime == nullptr) {
-        runtime = new flash_attn_dlfa_runtime();
-        mask->extra = runtime;
-    }
-
-    runtime->mask_params = params;
-    runtime->has_mask_params = true;
+    // Directly access op_params array to store mask parameters
+    // The magic value indicates that mask params are present
+    int32_t * op_params = (int32_t *)(attn->op_params);
+    op_params[11] = 0x46414d31; // GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE
+    op_params[4] = params.present ? 1 : 0;
+    op_params[5] = params.is_causal ? 1 : 0;
+    op_params[6] = params.window_left;
+    op_params[7] = params.window_right;
+    op_params[8] = params.per_token_window ? 1 : 0;
+    op_params[9] = params.multi_sequence ? 1 : 0;
+    op_params[10] = params.has_alibi_bias ? 1 : 0;
 }
 
 // Reset per-thread decode bookkeeping so unit tests (or new inference sessions)
