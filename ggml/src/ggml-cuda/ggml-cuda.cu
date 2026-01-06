@@ -3056,7 +3056,7 @@ static bool check_node_graph_compatibility(ggml_cgraph * cgraph,
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to batch size > 1 [%s] [%ld %ld %ld %ld]\n", __func__, node->name, node->ne[0], node->ne[1], node->ne[2], node->ne[3]);
 #endif
         }
-#endif
+#endif // GGML_USE_DLFA
 
         if (!use_cuda_graph) {
             break;
