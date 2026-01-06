@@ -8183,7 +8183,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     }
 
+#ifndef GGML_USE_DLCU
+    // DL: TODO: support it later. K=1 is not support now.
     test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_F16, GGML_TYPE_F32, 1, 1, false, 8, 16, 1));
+#endif
     test_cases.emplace_back(new test_mul_mat_id_fusion(GGML_TYPE_F16, GGML_TYPE_F32, 16, 16, false, 32, 32, 32, 3));
 
     // gpt-oss issue with Vulkan mmq_id

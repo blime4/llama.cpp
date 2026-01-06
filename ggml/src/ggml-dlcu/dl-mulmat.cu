@@ -803,7 +803,7 @@ static void ggml_cuda_gptq_quantize_and_store(ggml_backend_cuda_context & ctx, c
     }{
         // Handle special cases for small K values
         if (bits == 4 && (K < 2 || K % 2 != 0)) {
-            GGML_DL_MULMAT_DEBUG_PRINT("WARNING: K=%d is not suitable for 4-bit quantization (requires K >= 2 and even), falling back to 8-bit\n", K);
+            GGML_LOG_DEBUG("WARNING: K=%d is not suitable for 4-bit quantization (requires K >= 2 and even), falling back to 8-bit\n", K);
             bits = 8;
         }
 
@@ -939,12 +939,23 @@ static void ggml_cuda_moe_gptq_quantize_and_store(ggml_backend_cuda_context & ct
     int K = src0->ne[0];
     int M = src0->ne[1];
     int E = src0->ne[2];
-    int group_size = 128;
+    // note: gpt-oss mk are 2880, try different group sizes if needed
+    int group_size = GGML_CUDA_GPTQ_GROUP_SIZE;
+    if (K % group_size != 0) {
+        if (K % 128 == 0) {
+            group_size = 128;
+        } else if (K % 64 == 0) {
+            group_size = 64;
+        } else if (K % 32 == 0) {
+            group_size = 32;
+        } else {
+            GGML_ASSERT(false && "K must be divisible by 32, 64, or 128");
+        }
+    }
+    GGML_ASSERT(group_size % 32 == 0);
 
     GGML_ASSERT(bits == 4);
-    GGML_ASSERT(K % group_size == 0);
     GGML_ASSERT(M % 2 == 0);
-    GGML_ASSERT(group_size % 32 == 0);
 
     int num_groups = K / group_size;
 
