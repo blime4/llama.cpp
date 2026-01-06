@@ -8874,7 +8874,11 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     GGML_ASSERT(neq1 == N);
 
     // dst cannot be transposed or permuted
+#ifdef GGML_USE_DLCU // DL-FP16
+    GGML_ASSERT(nb0 == sizeof(float) || nb0 == sizeof(ggml_fp16_t));
+#else
     GGML_ASSERT(nb0 == sizeof(float));
+#endif
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);

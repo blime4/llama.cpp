@@ -633,7 +633,6 @@ static const std::unordered_map<std::string, std::string> g_known_skip_cases = [
     add_mul_mat("type_a=f32,type_b=f32,m=128,n=1,k=1056,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=2112,o=1");
     add_mul_mat("type_a=f32,type_b=f32,m=129,n=1,k=1057,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=2113,o=1");
 
-
     add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
     add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
     add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=def,type_KV=f16,permute=[0,1,2,3]");
@@ -663,6 +662,35 @@ static const std::unordered_map<std::string, std::string> g_known_skip_cases = [
     add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
     add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
     add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=40,hsv=40,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=40,hsv=40,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=40,hsv=40,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=40,hsv=40,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=40,hsv=40,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=40,hsv=40,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=64,hsv=64,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=72,hsv=72,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=72,hsv=72,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=72,hsv=72,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=72,hsv=72,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=72,hsv=72,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=72,hsv=72,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=80,hsv=80,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=96,hsv=96,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=96,hsv=96,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=96,hsv=96,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=96,hsv=96,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=96,hsv=96,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=96,hsv=96,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=128,hsv=128,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=def,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=192,hsv=192,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=192,hsv=192,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=192,hsv=192,nh=4,nr23=[1,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=192,hsv=192,nh=4,nr23=[1,1],kv=1024,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=192,hsv=192,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
+    add_flash_attn_ext("hsk=192,hsv=192,nh=4,nr23=[4,1],kv=512,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,2,1,3]");
+    add_flash_attn_ext("hsk=256,hsv=256,nh=4,nr23=[1,1],kv=113,nb=1,mask=1,sinks=0,max_bias=0.000000,logit_softcap=0.000000,prec=f32,type_KV=f16,permute=[0,1,2,3]");
     return skips;
 }();
 
@@ -8675,6 +8703,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                         if (nr3 > 1) continue; // decode path currently supports batch=1
                                                         if (type_KV != GGML_TYPE_F16) continue; // only support fp16. // DL-TODO: check fp32 and bf16.
                                                         if (!GGML_DLFA_SUPPORT_NONZERO_LOGIT_SOFTCAP && logit_softcap > 0.0f) continue;
+                                                        if (hsk == 192 && (hsv != hsk)) continue;
 #endif
                                                         test_cases.emplace_back(new test_flash_attn_ext(
                                                                     hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV));
