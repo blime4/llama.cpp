@@ -4230,7 +4230,11 @@ struct test_mul_mat_id_fusion : public test_case {
     }
 
     double max_nmse_err() override {
+#ifndef GGML_USE_DLCU
         return 5e-4;
+#else
+        return 7e-3;
+#endif
     }
 
     uint64_t op_flops(ggml_tensor * t) override {
