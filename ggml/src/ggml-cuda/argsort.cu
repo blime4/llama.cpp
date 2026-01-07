@@ -22,19 +22,20 @@ static __global__ void init_offsets(int * offsets, const int ncols, const int nr
 }
 
 #ifdef GGML_CUDA_USE_CUB
+template <typename T>
 static void argsort_f32_i32_cuda_cub(ggml_cuda_pool & pool,
-                                     const float *    x,
+                                     const T *        x,
                                      int *            dst,
                                      const int        ncols,
                                      const int        nrows,
                                      ggml_sort_order  order,
                                      cudaStream_t     stream) {
     ggml_cuda_pool_alloc<int>   temp_indices_alloc(pool, ((size_t) ncols) * nrows);
-    ggml_cuda_pool_alloc<float> temp_keys_alloc(pool, ((size_t) ncols) * nrows);
+    ggml_cuda_pool_alloc<T>     temp_keys_alloc(pool, ((size_t) ncols) * nrows);
     ggml_cuda_pool_alloc<int>   offsets_alloc(pool, nrows + 1);
 
     int *   temp_indices = temp_indices_alloc.get();
-    float * temp_keys    = temp_keys_alloc.get();
+    T *     temp_keys    = temp_keys_alloc.get();
     int *   d_offsets    = offsets_alloc.get();
 
     static const int block_size = 256;
@@ -184,7 +185,41 @@ void ggml_cuda_op_argsort(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     enum ggml_sort_order order = (enum ggml_sort_order) dst->op_params[0];
 
-#if defined(GGML_CUDA_USE_CUB) && !defined(GGML_USE_DLCU) // DL-TODO: support argsort_f32_i32_cuda_cub fp16 impl.
+#ifdef GGML_USE_DLCU // DL-FP16
+#if defined(GGML_CUDA_USE_CUB)
+    const int    ncols_pad      = next_power_of_2(ncols);
+    const size_t shared_mem     = ncols_pad * sizeof(int);
+    const size_t max_shared_mem = ggml_cuda_info().devices[ggml_cuda_get_device()].smpb;
+
+    if (shared_mem > max_shared_mem || ncols > 1024) {
+        ggml_cuda_pool & pool = ctx.pool();
+        if (src0->type == GGML_TYPE_F32) {
+            argsort_f32_i32_cuda_cub(pool, src0_d, (int *) dst_d, ncols, nrows, order, stream);
+        } else if (src0->type == GGML_TYPE_F16) {
+            argsort_f32_i32_cuda_cub(pool, (const half*)src0_d, (int *) dst_d, ncols, nrows, order, stream);
+        } else {
+            GGML_ASSERT(false);
+        }
+    } else {
+        if (src0->type == GGML_TYPE_F32) {
+            argsort_f32_i32_cuda_bitonic(src0_d, (int *) dst_d, ncols, nrows, order, stream);
+        } else if (src0->type == GGML_TYPE_F16) {
+            argsort_f32_i32_cuda_bitonic((const half*)src0_d, (int *) dst_d, ncols, nrows, order, stream);
+        } else {
+            GGML_ASSERT(false);
+        }
+    }
+#else
+    if (src0->type == GGML_TYPE_F32) {
+        argsort_f32_i32_cuda_bitonic(src0_d, (int *)dst_d, ncols, nrows, order, stream);
+    } else if (src0->type == GGML_TYPE_F16) {
+        argsort_f32_i32_cuda_bitonic((const half*)src0_d, (int *)dst_d, ncols, nrows, order, stream);
+    } else {
+        GGML_ASSERT(false);
+    }
+#endif // GGML_CUDA_USE_CUB
+#else
+#if defined(GGML_CUDA_USE_CUB)
     const int    ncols_pad      = next_power_of_2(ncols);
     const size_t shared_mem     = ncols_pad * sizeof(int);
     const size_t max_shared_mem = ggml_cuda_info().devices[ggml_cuda_get_device()].smpb;
@@ -204,4 +239,5 @@ void ggml_cuda_op_argsort(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ASSERT(false);
     }
 #endif
+#endif // GGML_USE_DLCU
 }
