@@ -1028,6 +1028,10 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
 #else
 uint32_t llama_kv_cache::get_n_kv(const llama_context * lctx) const {
     // DL: decode use one cuda graph.
+    if (lctx == nullptr) {
+        // Fallback to kv cache size if lctx is not available
+        return get_size();
+    }
     const auto & cparams = lctx->get_cparams();
     return cparams.n_ctx;
 }
