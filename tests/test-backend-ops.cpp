@@ -166,7 +166,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
         if (!ggml_quantize_requires_imatrix(tensor->type)) {
             // when the imatrix is optional, we want to test both quantization with and without imatrix
             // use one of the random numbers to decide
-            if (data[0] > 0.5f*(min + max)) {
+            if (nels > 0 && data[0] > 0.5f*(min + max)) {
                 im = nullptr;
             }
         }
@@ -7450,9 +7450,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, 1, 8, 2, 1, 1, false));
     for (ggml_type type : all_types) {
-#ifdef GGML_USE_DLCU // DL-TODO: FIXME: remove this after all supported.
-        if (type == GGML_TYPE_BF16 || ggml_is_quantized(type)) continue;
-#endif
+// #ifdef GGML_USE_DLCU // DL-TODO: FIXME: remove this after all supported.
+//         if (type == GGML_TYPE_BF16 || ggml_is_quantized(type)) continue;
+// #endif
         for (int b : {1, 7}) {
             for (bool v : {false, true}) {
 #if defined(__riscv)
