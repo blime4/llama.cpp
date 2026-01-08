@@ -1227,6 +1227,11 @@ void llama_kv_cache_unified::set_input_k_idxs(ggml_tensor * dst, const llama_uba
             data[s*sinfo.size() + i] = offs + sinfo.idxs[s][i];
         }
     }
+    #ifdef GGML_USE_DLFA
+    for (uint32_t s = n_tokens; s < ubatch->n_tokens; ++s) {
+        data[s] = -1;
+    }
+    #endif
 }
 
 void llama_kv_cache_unified::set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch, const slot_info & sinfo) const {
@@ -1268,6 +1273,11 @@ void llama_kv_cache_unified::set_input_v_idxs(ggml_tensor * dst, const llama_uba
             }
         }
     }
+    #ifdef GGML_USE_DLFA
+    for (uint32_t s = n_tokens; s < ubatch->n_tokens; ++s) {
+        data[s] = -1;
+    }
+    #endif
 }
 
 void llama_kv_cache_unified::set_input_k_shift(ggml_tensor * dst) const {

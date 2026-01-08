@@ -37,6 +37,10 @@ static __global__ void k_set_rows_quant(
 
     const int64_t dst_row = *(src1 + i10*s10 + i11*s11 + i12*s12);
 
+    if (dst_row == -1) {
+        return;
+    }
+
     const float * src0_row = src0 + i01*s01 + i02*s02 + i03*s03;
     block_type * dst_row_ptr = dst + (dst_row*s1 + i02*s2 + i03*s3) / sizeof(block_type);
 
