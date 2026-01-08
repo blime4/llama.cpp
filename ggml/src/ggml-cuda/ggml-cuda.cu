@@ -3543,6 +3543,13 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
 
                 // start of fusion operations
                 static bool disable_fusion = (getenv("GGML_CUDA_DISABLE_FUSION") != nullptr);
+#ifdef GGML_USE_DLCU
+                // DL-TODO: support it later.
+                if (!disable_fusion){
+                    GGML_LOG_DEBUG("DLCU NOWADAYS DO NOT SUPPORT FUSION.");
+                    disable_fusion = true;
+                }
+#endif
                 if (!disable_fusion) {
 
 #ifndef GGML_USE_DLCU // DL-TODO: support ggml_cuda_op_topk_moe fp16 impl.
