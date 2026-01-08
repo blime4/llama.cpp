@@ -976,6 +976,7 @@ declare -a test_cases_part1=()
 declare -a test_cases_part2=()
 declare -a test_cases=()
 declare -a qwen_model_tests=()
+declare -a multi_turn_tests=()
 declare -a full_suite_fail_list=()
 declare -a test_results_names=()
 declare -a test_results_status=()
@@ -1247,6 +1248,27 @@ add_qwen_model_tests() {
         echo "[INFO] Added ${#qwen_model_tests[@]} Qwen model test cases" | tee -a "$summary_log"
         echo "[INFO] Testing: Qwen2 MoE (1.5B), Qwen2.5 (1.5B), Qwen3 (30B)" | tee -a "$summary_log"
     fi
+}
+
+add_multi_turn_tests() {
+    echo "[INFO] Adding multi-turn conversation test" | tee -a "$summary_log"
+
+    # Add the multi-turn conversation test script
+    local test_script="${REPO_PATH}/tests/test_multi_turn_chat.sh"
+
+    if [ ! -f "$test_script" ]; then
+        echo "[WARN] Multi-turn test script not found: $test_script" | tee -a "$summary_log"
+        return
+    fi
+
+    if [ ! -x "$test_script" ]; then
+        echo "[INFO] Making multi-turn test script executable" | tee -a "$summary_log"
+        chmod +x "$test_script"
+    fi
+
+    # Add the test to the array
+    multi_turn_tests+=("$test_script")
+    echo "[INFO] Added multi-turn conversation test" | tee -a "$summary_log"
 }
 
 validate_qwen_output() {
@@ -1693,12 +1715,14 @@ run_full_test_suite() {
     echo "[INFO] Preparing Qwen2 and Qwen3 model tests for correctness validation" | tee -a "$summary_log"
     local yaml_config="${REPO_PATH}/.dlci/qwen_references.yml"
     add_qwen_model_tests "$yaml_config"
+    add_multi_turn_tests
     full_suite_prepare_part2_cases
 
     test_cases=(
         "${test_cases_part1[@]}"
         "${test_cases_part2[@]}"
         "${qwen_model_tests[@]}"
+        "${multi_turn_tests[@]}"
     )
 
     full_suite_run_all_cases
