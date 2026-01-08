@@ -1934,12 +1934,12 @@ ggml_tensor * llm_graph_context::build_attn(
 
 // DL-TODO: if default LLAMA_SET_ROWS=1 is set, remove this block
 #ifdef GGML_USE_DLCU // DL-FP16
-        // // env: LLAMA_SET_ROWS (temporary)
-        // // ref: https://github.com/ggml-org/llama.cpp/pull/14285
-        // const char * LLAMA_SET_ROWS = getenv("LLAMA_SET_ROWS");
-        // const bool supports_set_rows = LLAMA_SET_ROWS ? (atoi(LLAMA_SET_ROWS) != 0) : false;
+        // env: LLAMA_SET_ROWS (temporary)
+        // ref: https://github.com/ggml-org/llama.cpp/pull/14285
+        const char * LLAMA_SET_ROWS = getenv("LLAMA_SET_ROWS");
+        const bool supports_set_rows = LLAMA_SET_ROWS ? (atoi(LLAMA_SET_ROWS) != 0) : true; // Default to true now
 
-        const bool supports_set_rows = false; // DL-TODO: ggml_set_rows need to support FP16
+        // const bool supports_set_rows = false; // DL-TODO: ggml_set_rows need to support FP16
         if(!supports_set_rows) {
             if (k_cur->type != GGML_TYPE_F32) {
                 k_cur = ggml_cast(ctx0, k_cur, GGML_TYPE_F32);

@@ -4,6 +4,15 @@
 
 
 void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
+#ifdef GGML_USE_DLCU
+    // DLCU backend does not support mul_mat_f, return early
+    GGML_UNUSED(ctx);
+    GGML_UNUSED(src0);
+    GGML_UNUSED(src1);
+    GGML_UNUSED(ids);
+    GGML_UNUSED(dst);
+    return;
+#else
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
     GGML_ASSERT(!ids ||  ids->type == GGML_TYPE_I32);
     GGML_ASSERT(         dst->type == GGML_TYPE_F32);
@@ -117,10 +126,20 @@ void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * sr
         default:
             GGML_ABORT("unsupported type: %s", ggml_type_name(src0->type));
     }
+#endif // GGML_USE_DLCU
 }
 
 bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const int64_t * src0_ne,
         const size_t * src0_nb, const int src1_ncols, bool mul_mat_id) {
+#ifdef GGML_USE_DLCU
+    // DLCU backend does not support mul_mat_f
+    GGML_UNUSED(type);
+    GGML_UNUSED(cc);
+    GGML_UNUSED(warp_size);
+    GGML_UNUSED(src0_ne);
+    GGML_UNUSED(src1_ncols);
+    return false;
+#else
     if (ggml_is_quantized(type)) {
         return false;
     }
@@ -168,4 +187,5 @@ bool ggml_cuda_should_use_mmf(enum ggml_type type, int cc, int warp_size, const 
         default:
             return false;
     }
+#endif // GGML_USE_DLCU
 }
