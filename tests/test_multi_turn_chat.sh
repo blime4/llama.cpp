@@ -58,9 +58,9 @@ LOG_FILE="multi_turn_test_$(date +%Y%m%d_%H%M%S).log"
 # 测试参数 - 设置为确定性输出
 TEMPERATURE=0.0
 TOP_K=1
-TOP_P=0.0  # 设置为0.0确保完全确定性
+TOP_P=1.0
 SEED=42
-MAX_TOKENS=20  # 增加token数以获得更完整的回复
+MAX_TOKENS=300
 
 # 测试结果统计
 TOTAL_TESTS=0
@@ -190,11 +190,18 @@ check_dependencies() {
 # 启动服务器
 start_server() {
     echo "启动 llama-server..." | tee -a "$LOG_FILE"
+    # Simplified configuration to avoid crashes:
+    # - No warmup/CUDA graphs (--no-warmup)
+    # - Single parallel slot (-np 1)
+    # - Larger context to handle multi-turn conversations (-c 4096)
     $LLAMA_SERVER \
         -m "$MODEL_PATH" \
         --port $SERVER_PORT \
         -ngl 999 \
-        -fa \
+        -fa on \
+        --no-warmup \
+        -np 1 \
+        -c 4096 \
         > "${LOG_FILE}.server" 2>&1 &
 
     SERVER_PID=$!
@@ -205,8 +212,8 @@ start_server() {
     for i in {1..60}; do
         if curl -s "${SERVER_URL}/health" > /dev/null 2>&1; then
             echo "服务器已就绪，等待模型加载完成..." | tee -a "$LOG_FILE"
-            # 额外等待确保模型完全加载
-            sleep 10
+            # 没有warmup，等待时间可以短一些
+            sleep 5
             echo "模型加载完成" | tee -a "$LOG_FILE"
             return 0
         fi
@@ -230,33 +237,56 @@ stop_server() {
 send_message() {
     local messages_json="$1"
     local response
-    local max_retries=3
+    local max_retries=5  # 增加重试次数
     local retry=0
 
-    while [ $retry -lt $max_retries ]; do
-        response=$(curl -s "${SERVER_URL}/v1/chat/completions" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"messages\": $messages_json,
-                \"max_tokens\": $MAX_TOKENS,
-                \"temperature\": $TEMPERATURE,
-                \"top_k\": $TOP_K,
-                \"top_p\": $TOP_P,
-                \"seed\": $SEED
-            }")
+    # 构建完整的请求JSON
+    local request_json=$(cat <<EOF
+{
+    "messages": $messages_json,
+    "max_tokens": $MAX_TOKENS,
+    "temperature": $TEMPERATURE,
+    "top_k": $TOP_K,
+    "top_p": $TOP_P,
+    "seed": $SEED
+}
+EOF
+)
 
-        # 检查是否是503错误（模型加载中）
+    # Debug: 记录请求JSON
+    echo "请求JSON: $request_json" >> "${LOG_FILE}.debug"
+
+    while [ $retry -lt $max_retries ]; do
+        response=$(curl -s -w "\nHTTP_CODE:%{http_code}" "${SERVER_URL}/v1/chat/completions" \
+            -H "Content-Type: application/json" \
+            -d "$request_json")
+
+        # 提取HTTP状态码
+        local http_code=$(echo "$response" | grep "HTTP_CODE:" | sed 's/HTTP_CODE://')
+        response=$(echo "$response" | sed '/HTTP_CODE:/d')
+
+        echo "HTTP状态码: $http_code, 响应长度: ${#response}" >> "${LOG_FILE}.debug"
+
+        # 检查是否是503错误（模型加载中）或空响应
         if echo "$response" | grep -q '"code":503'; then
             retry=$((retry + 1))
             if [ $retry -lt $max_retries ]; then
-                echo "模型加载中，等待重试 ($retry/$max_retries)..." >> "$LOG_FILE"
+                echo "模型加载中，等待重试 ($retry/$max_retries)..." | tee -a "$LOG_FILE"
+                sleep 5  # 增加等待时间
+                continue
+            fi
+        elif [ -z "$response" ]; then
+            retry=$((retry + 1))
+            if [ $retry -lt $max_retries ]; then
+                echo "收到空响应，等待重试 ($retry/$max_retries)..." | tee -a "$LOG_FILE"
                 sleep 3
                 continue
             fi
+        else
+            # 成功获得响应
+            echo "$response"
+            return 0
         fi
-
-        echo "$response"
-        return 0
     done
 
     echo "$response"
@@ -267,6 +297,13 @@ send_message() {
 extract_content() {
     local response="$1"
     local content=""
+
+    # 记录原始响应用于调试
+    if [ -z "$response" ]; then
+        echo "[错误: 收到空响应]"
+        echo "原始响应: (empty)" >> "${LOG_FILE}.debug"
+        return 1
+    fi
 
     # 优先使用 jq 解析
     if command -v jq >/dev/null 2>&1; then
