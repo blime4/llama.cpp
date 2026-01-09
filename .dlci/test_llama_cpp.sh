@@ -1108,146 +1108,25 @@ validate_content_only() {
 }
 
 add_qwen_model_tests() {
-    local model_base_path="${LOCAL_MODEL_PATH}"
-    local yaml_config="$1"
+    echo "[INFO] Adding Qwen model tests" | tee -a "$summary_log"
 
-    local qwen2_models=(
-        # DL-TODO : FIXME, M=1 fp32 can not use 4-bit quantization.
-        # "Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf"
-    )
+    # Add the Qwen model test script
+    local test_script="${REPO_PATH}/tests/test_qwen_models.sh"
 
-    local qwen25_models=(
-        # DL-TODO : the answer is wrong for unquantized model now, so we skip it.
-        # "Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
-        # "Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-    )
-
-    local qwen3_models=(
-        "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf"
-    )
-
-    qwen_model_tests=()
-
-    for model_path in "${qwen2_models[@]}"; do
-        local full_model_path="${model_base_path%/}/${model_path}"
-        local model_name
-        model_name=$(basename "$model_path" .gguf)
-        if check_model_file "$full_model_path" "Qwen2-$model_name"; then
-            if [ -f "$yaml_config" ]; then
-                echo "[INFO] Loading test cases from YAML for $model_name" | tee -a "$summary_log"
-                mapfile -t test_cases < <(parse_yaml_tests "$model_name" "$yaml_config")
-                for test_case in "${test_cases[@]}"; do
-                    IFS='|' read -r prompt expected_content test_name <<< "$test_case"
-                    qwen_model_tests+=("$model_name|$test_name|$prompt|$expected_content|$full_model_path")
-                done
-            else
-                echo "[WARN] YAML config not found, skipping tests for $model_name" | tee -a "$summary_log"
-            fi
-        fi
-    done
-
-    for model_path in "${qwen25_models[@]}"; do
-        local full_model_path="${model_base_path%/}/${model_path}"
-        local model_name
-        model_name=$(basename "$model_path" .gguf)
-        if check_model_file "$full_model_path" "Qwen2.5-$model_name"; then
-            if [ -f "$yaml_config" ]; then
-                echo "[INFO] Loading test cases from YAML for $model_name" | tee -a "$summary_log"
-                mapfile -t test_cases < <(parse_yaml_tests "$model_name" "$yaml_config")
-                for test_case in "${test_cases[@]}"; do
-                    IFS='|' read -r prompt expected_content test_name <<< "$test_case"
-                    qwen_model_tests+=("$model_name|$test_name|$prompt|$expected_content|$full_model_path")
-                done
-            else
-                echo "[WARN] YAML config not found, skipping tests for $model_name" | tee -a "$summary_log"
-            fi
-            break
-        fi
-    done
-
-    # Check GPU configuration for Qwen3 models
-    local gpu_info
-    gpu_info=$(detect_gpu_resources)
-    IFS='|' read -r gpu_count total_memory_gb gpu_memory_list <<< "$gpu_info"
-
-    # Check if Qwen3-30B test should be enabled
-    local enable_qwen3_test=false
-    local qwen3_test_mode=""
-
-    # Check for single GPU >=32GB
-    IFS=',' read -r -a gpu_memories <<< "$gpu_memory_list"
-    for mem in "${gpu_memories[@]}"; do
-        if [ "$mem" -ge 32 ]; then
-            enable_qwen3_test=true
-            qwen3_test_mode="single_gpu_${mem}GB"
-            break
-        fi
-    done
-
-    # If no single GPU >=32GB, check for two 16GB GPUs
-    if [ "$enable_qwen3_test" = false ]; then
-        local sixteen_gb_count=0
-        for mem in "${gpu_memories[@]}"; do
-            if [ "$mem" -eq 16 ]; then
-                sixteen_gb_count=$((sixteen_gb_count + 1))
-            fi
-        done
-        if [ "$sixteen_gb_count" -ge 2 ]; then
-            enable_qwen3_test=true
-            qwen3_test_mode="dual_gpu_16GB"
-        fi
+    if [ ! -f "$test_script" ]; then
+        echo "[WARN] Qwen model test script not found: $test_script" | tee -a "$summary_log"
+        qwen_model_tests=()
+        return
     fi
 
-    for model_path in "${qwen3_models[@]}"; do
-        local full_model_path="${model_base_path%/}/${model_path}"
-        local model_name
-        model_name=$(basename "$model_path" .gguf)
-        if check_model_file "$full_model_path" "Qwen3-$model_name"; then
-            if [ "$enable_qwen3_test" = true ]; then
-                echo "[INFO] Enabling Qwen3-$model_name test with mode: $qwen3_test_mode" | tee -a "$summary_log"
-                if [ -f "$yaml_config" ]; then
-                    echo "[INFO] Loading test cases from YAML for $model_name" | tee -a "$summary_log"
-                    mapfile -t test_cases < <(parse_yaml_tests "$model_name" "$yaml_config")
-                    for test_case in "${test_cases[@]}"; do
-                        IFS='|' read -r prompt expected_content test_name <<< "$test_case"
-                        qwen_model_tests+=("$model_name|$test_name|$prompt|$expected_content|$full_model_path|$qwen3_test_mode")
-                    done
-                else
-                    echo "[WARN] YAML config not found, skipping tests for $model_name" | tee -a "$summary_log"
-                fi
-            else
-                # Even if GPU memory is insufficient, still run CPU version of Qwen3 test
-                echo "[INFO] Enabling Qwen3-$model_name test with CPU mode (GPU memory insufficient: ${gpu_count} GPUs, total ${total_memory_gb}GB)" | tee -a "$summary_log"
-                if [ -f "$yaml_config" ]; then
-                    echo "[INFO] Loading test cases from YAML for $model_name" | tee -a "$summary_log"
-                    mapfile -t test_cases < <(parse_yaml_tests "$model_name" "$yaml_config")
-                    for test_case in "${test_cases[@]}"; do
-                        IFS='|' read -r prompt expected_content test_name <<< "$test_case"
-                        qwen_model_tests+=("$model_name|$test_name|$prompt|$expected_content|$full_model_path")
-                    done
-                else
-                    echo "[WARN] YAML config not found, skipping tests for $model_name" | tee -a "$summary_log"
-                fi
-            fi
-        fi
-    done
-
-    if [ ${#qwen_model_tests[@]} -eq 0 ]; then
-        echo "[WARN] No Qwen2, Qwen2.5 or Qwen3 models found for testing" | tee -a "$summary_log"
-        echo "[INFO] Expected model paths under ${model_base_path}:" | tee -a "$summary_log"
-        for model_path in "${qwen2_models[@]}"; do
-            echo "  - ${model_base_path%/}/${model_path}" | tee -a "$summary_log"
-        done
-        for model_path in "${qwen25_models[@]}"; do
-            echo "  - ${model_base_path%/}/${model_path}" | tee -a "$summary_log"
-        done
-        for model_path in "${qwen3_models[@]}"; do
-            echo "  - ${model_base_path%/}/${model_path}" | tee -a "$summary_log"
-        done
-    else
-        echo "[INFO] Added ${#qwen_model_tests[@]} Qwen model test cases" | tee -a "$summary_log"
-        echo "[INFO] Testing: Qwen2 MoE (1.5B), Qwen2.5 (1.5B), Qwen3 (30B)" | tee -a "$summary_log"
+    if [ ! -x "$test_script" ]; then
+        echo "[INFO] Making Qwen model test script executable" | tee -a "$summary_log"
+        chmod +x "$test_script"
     fi
+
+    # Add the test to the array
+    qwen_model_tests=("$test_script")
+    echo "[INFO] Added Qwen model test script" | tee -a "$summary_log"
 }
 
 add_multi_turn_tests() {
@@ -1502,18 +1381,25 @@ full_suite_print_case_summary() {
 }
 
 full_suite_run_qwen_case() {
-    local config="$1"
-    IFS='|' read -r model_name test_name prompt expected_content model_path test_mode <<< "$config"
-    local test_name_for_summary="qwen_test.${model_name}.${test_name}"
-    echo "Running Qwen test: $model_name - $test_name ($test_mode)" | tee -a "$summary_log"
-    echo "Running Qwen test: $model_name - $test_name ($test_mode)" >> "$test_log"
+    local test_script="$1"
+    local test_name_for_summary="qwen_model_tests"
+
+    echo "Running Qwen model tests from script: $test_script" | tee -a "$summary_log"
+    echo "Running Qwen model tests from script: $test_script" >> "$test_log"
+    echo "-----------------------------" | tee -a "$test_log"
+
     local start_time end_time duration
     start_time=$(date +%s)
-    validate_qwen_output "$model_name" "$test_name" "$prompt" "$expected_content" "$model_path" "$test_mode"
+
+    set +e
+    bash "$test_script" >> "$test_log" 2>&1
     local ret=$?
+    set -e
+
     end_time=$(date +%s)
     duration=$((end_time - start_time))
-    if [ $ret -ne 0 ]; then
+
+    if [ $re_rene 0 ]; then
         full_suite_fail_list+=("$test_name_for_summary (exit code $ret)")
         full_suite_fail_count=$((full_suite_fail_count + 1))
         test_results_names+=("$test_name_for_summary")
@@ -1522,6 +1408,8 @@ full_suite_run_qwen_case() {
         test_results_names+=("$test_name_for_summary")
         test_results_status+=("PASSED")
     fi
+
+    echo "-----------------------------" | tee -a "$test_log"
     full_suite_print_case_summary "$test_name_for_summary" "$ret" false
 }
 
@@ -1601,14 +1489,59 @@ full_suite_run_regular_case() {
     full_suite_print_case_summary "$test_name_for_summary" "$ret" "$had_sub_tests"
 }
 
+full_suite_run_multi_turn_case() {
+    local test_script="$1"
+    local test_name_for_summary="multi_turn_tests"
+
+    echo "Running multi-turn conversation tests from script: $test_script" | tee -a "$summary_log"
+    echo "Running multi-turn conversation tests from script: $test_script" >> "$test_log"
+    echo "-----------------------------" | tee -a "$test_log"
+
+    local start_time end_time duration
+    start_time=$(date +%s)
+
+    set +e
+    bash "$test_script" >> "$test_log" 2>&1
+    local ret=$?
+    set -e
+
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    if [ $ret -ne 0 ]; then
+        full_suite_fail_list+=("$test_name_for_summary (exit code $ret)")
+        full_suite_fail_count=$((full_suite_fail_count + 1))
+        test_results_names+=("$test_name_for_summary")
+        test_results_status+=("FAILED")
+    else
+        test_results_names+=("$test_name_for_summary")
+        test_results_status+=("PASSED")
+    fi
+
+    echo "-----------------------------" | tee -a "$test_log"
+    full_suite_print_case_summary "$test_name_for_summary" "$ret" false
+}
+
 full_suite_run_all_cases() {
     full_suite_fail_count=0
     full_suite_fail_list=()
     test_results_names=()
     test_results_status=()
     for test_case in "${test_cases[@]}"; do
-        if [[ "$test_case" == *"|"* ]]; then
-            full_suite_run_qwen_case "$test_case"
+        # Check if it's a test script (ends with .sh)
+        if [[ "$test_case" == *.sh ]]; then
+            # Determine which type of test script it is
+            if [[ "$test_case" == *"test_qwen_models.sh"* ]]; then
+                full_suite_run_qwen_case "$test_case"
+            elif [[ "$test_case" == *"test_multi_turn_chat.sh"* ]]; then
+                full_suite_run_multi_turn_case "$test_case"
+            else
+                # Generic script execution
+                full_suite_run_regular_case "$test_case"
+            fi
+        elif [[ "$test_case" == *"|"* ]]; then
+            # Legacy format - should not be used anymore
+            echo "[WARN] Legacy test format detected, skipping: $test_case" | tee -a "$summary_log"
         else
             full_suite_run_regular_case "$test_case"
         fi
@@ -1712,9 +1645,8 @@ run_full_test_suite() {
     echo "[INFO] Note: All platforms now use the complete test set for comprehensive coverage" | tee -a "$summary_log"
 
     full_suite_prepare_part1_cases
-    echo "[INFO] Preparing Qwen2 and Qwen3 model tests for correctness validation" | tee -a "$summary_log"
-    local yaml_config="${REPO_PATH}/.dlci/qwen_references.yml"
-    add_qwen_model_tests "$yaml_config"
+    echo "[INFO] Preparing Qwen model tests for correctness validation" | tee -a "$summary_log"
+    add_qwen_model_tests
     add_multi_turn_tests
     full_suite_prepare_part2_cases
 

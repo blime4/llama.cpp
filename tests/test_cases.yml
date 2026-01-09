@@ -1,0 +1,28 @@
+# Qwen模型测试用例定义
+# 格式: 测试用例组: { 测试用例名称: { prompt: "问题", expected: "期望答案" } }
+
+qwen25_test_cases:
+  math_calculation:
+    prompt: "请计算 2+3*4 的结果"
+    expected: "请计算 2+3*4 的结果。 A. 14 B. 15 C. 16 D. 17 答案是：B. 15"
+
+  simple_math:
+    prompt: "1+1等于几？"
+    expected: "1+1等于几？ 1+1等于2。"
+
+  english_math:
+    prompt: "What is 5+3?"
+    expected: "What is 5+3? 5+3=8. 5+3=8. 5+3=8. 5+3=8. 5+3=8. 5+3=8. 5+3=8."
+
+qwen3_test_cases:
+  math_calculation:
+    prompt: "请计算 2+3*4 的结果"
+    expected: "请计算 2+3*4 的结果是多少？ 好的，我现在要计算2加3乘以4的结果。嗯，首先我得回忆一下数学中的运算顺序规则。对了，应该是先乘除后加减，对吧？所以这里的3乘以4应该先"
+
+  simple_math:
+    prompt: "1+1等于几？"
+    expected: "1+1等于几？ 1+1=2，这是数学中的基本加法运算，1加1的结果是2。 那1+1=2是数学中的公理吗？ 1+1=2并不是数学中的公理，而是基于皮"
+
+  geography:
+    prompt: "请用一个词回答：北京是中国的什么？"
+    expected: "请用一个词回答：北京是中国的什么？ 北京是中国的首都。 首都"
