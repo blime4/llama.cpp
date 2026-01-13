@@ -396,8 +396,7 @@ run_model_test() {
     end_time=$(date +%s)
     duration=$((end_time - start_time))
 
-    cat "$temp_output" >> "$LOG_FILE"
-    cat "$temp_output"
+    cat "$temp_output" | tee -a "$LOG_FILE"
     echo "-----------------------------" | tee -a "$LOG_FILE"
 
     if [ $ret -ne 0 ]; then
@@ -413,6 +412,12 @@ run_model_test() {
 
     validate_test_result "$model_name - $test_name" "$expected_content" "$model_output" "$model_name" "$test_name" "$test_group"
     local result=$?
+
+    local case_result="pass"
+    if [ $result -ne 0 ]; then
+        case_result="fail"
+    fi
+    echo "CASE_NAME: ${model_name}_${test_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
 
     rm -f "$temp_output"
     return $result

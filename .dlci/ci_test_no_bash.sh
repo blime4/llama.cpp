@@ -69,11 +69,13 @@ run_test() {
     if eval "$TEST_CMD"; then
         echo "[PASS] $TEST_NAME"
         PASSED=$((PASSED + 1))
+        echo "CASE_NAME: ${TEST_NAME}, CASE_RESULT: pass"
     else
         echo "[FAIL] $TEST_NAME"
         FAILED=$((FAILED + 1))
         FAILED_TESTS="$FAILED_TESTS
   - $TEST_NAME"
+        echo "CASE_NAME: ${TEST_NAME}, CASE_RESULT: fail"
     fi
     echo ""
 }
@@ -151,11 +153,13 @@ if [ -f "/models/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf" ]
     if [ $? -eq 0 ]; then
         echo "[PASS] qwen_2.5_1.5b_q4_k_m"
         PASSED=$((PASSED + 1))
+        echo "CASE_NAME: qwen_2.5_1.5b_q4_k_m, CASE_RESULT: pass"
     else
         echo "[FAIL] qwen_2.5_1.5b_q4_k_m"
         FAILED=$((FAILED + 1))
         FAILED_TESTS="$FAILED_TESTS
   - qwen_2.5_1.5b_q4_k_m"
+        echo "CASE_NAME: qwen_2.5_1.5b_q4_k_m, CASE_RESULT: fail"
     fi
     echo ""
 else
@@ -188,11 +192,13 @@ if [ -f "/models/Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q4_K_M.gguf" ]; then
     if [ $? -eq 0 ]; then
         echo "[PASS] qwen_3_30b_q4_k_m"
         PASSED=$((PASSED + 1))
+        echo "CASE_NAME: qwen_3_30b_q4_k_m, CASE_RESULT: pass"
     else
         echo "[FAIL] qwen_3_30b_q4_k_m"
         FAILED=$((FAILED + 1))
         FAILED_TESTS="$FAILED_TESTS
   - qwen_3_30b_q4_k_m"
+        echo "CASE_NAME: qwen_3_30b_q4_k_m, CASE_RESULT: fail"
     fi
     echo ""
 else

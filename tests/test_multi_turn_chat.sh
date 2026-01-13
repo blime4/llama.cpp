@@ -54,6 +54,7 @@ LLAMA_SERVER="${POSITIONAL_ARGS[1]:-${LLAMA_SERVER:-$DEFAULT_LLAMA_SERVER}}"
 SERVER_PORT="${POSITIONAL_ARGS[2]:-${SERVER_PORT:-$DEFAULT_SERVER_PORT}}"
 SERVER_URL="http://localhost:${SERVER_PORT}"
 LOG_FILE="multi_turn_test_$(date +%Y%m%d_%H%M%S).log"
+SCRIPT_NAME="test_multi_turn_chat"
 
 # 测试参数 - 设置为确定性输出
 TEMPERATURE=0.0
@@ -359,14 +360,16 @@ validate_test_result() {
     local test_name="$1"
     local expected_content="$2"
     local actual_response="$3"
-    local exact_match="${4:-false}"  # 新参数：是否精确匹配，默认false
-    local test_case="${5:-}"         # 测试用例名称，用于更新YAML
-    local round="${6:-}"             # 轮次，用于更新YAML
+    local exact_match="${4:-false}"
+    local test_case="${5:-}"
+    local round="${6:-}"
 
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
 
+    local case_result="pass"
+    local case_name="${SCRIPT_NAME}_${test_case:-${test_name}}"
+
     if [ "$UPDATE_MODE" = "true" ]; then
-        # 更新模式：收集实际答案并更新YAML文件
         if [ -n "$actual_response" ] && [ "$actual_response" != "[错误: 无法解析响应]" ]; then
             if [ -n "$test_case" ] && [ -n "$round" ]; then
                 update_expected_answer "$test_case" "$round" "$actual_response"
@@ -375,45 +378,50 @@ validate_test_result() {
                 echo "[UPDATE] $test_name: 获得有效回复 '$actual_response'（未指定test_case/round，跳过更新）" | tee -a "$LOG_FILE"
             fi
             PASSED_TESTS=$((PASSED_TESTS + 1))
+            echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
             return 0
         else
             echo "[UPDATE_FAIL] $test_name: 未获得有效回复" | tee -a "$LOG_FILE"
             FAILED_TESTS=$((FAILED_TESTS + 1))
+            case_result="fail"
+            echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
             return 1
         fi
     else
-        # 正常验证模式：从YAML文件读取期望答案进行验证
         if [ -n "$test_case" ] && [ -n "$round" ]; then
             expected_content=$(get_expected_answer "$test_case" "$round")
         fi
 
         if [ -z "$expected_content" ]; then
-            # 如果没有指定期望内容，只要有回复就算通过
             if [ -n "$actual_response" ] && [ "$actual_response" != "[错误: 无法解析响应]" ]; then
                 echo "[PASS] $test_name: 获得有效回复" | tee -a "$LOG_FILE"
                 PASSED_TESTS=$((PASSED_TESTS + 1))
+                echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
                 return 0
             else
                 echo "[FAIL] $test_name: 未获得有效回复" | tee -a "$LOG_FILE"
                 FAILED_TESTS=$((FAILED_TESTS + 1))
+                case_result="fail"
+                echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
                 return 1
             fi
         else
             if [ "$exact_match" = "true" ]; then
-                # 精确匹配模式
                 if [ "$actual_response" = "$expected_content" ]; then
                     echo "[PASS] $test_name: 回复完全匹配期望内容" | tee -a "$LOG_FILE"
                     PASSED_TESTS=$((PASSED_TESTS + 1))
+                    echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
                     return 0
                 else
                     echo "[FAIL] $test_name: 回复不完全匹配期望内容" | tee -a "$LOG_FILE"
                     echo "[FAIL] 期望: '$expected_content'" | tee -a "$LOG_FILE"
                     echo "[FAIL] 实际: '$actual_response'" | tee -a "$LOG_FILE"
                     FAILED_TESTS=$((FAILED_TESTS + 1))
+                    case_result="fail"
+                    echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
                     return 1
                 fi
             else
-                # 关键词匹配模式（兼容旧版本）
                 local found=false
                 IFS='|' read -ra KEYWORDS <<< "$expected_content"
                 for keyword in "${KEYWORDS[@]}"; do
@@ -426,11 +434,14 @@ validate_test_result() {
                 if [ "$found" = true ]; then
                     echo "[PASS] $test_name: 回复包含期望内容" | tee -a "$LOG_FILE"
                     PASSED_TESTS=$((PASSED_TESTS + 1))
+                    echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
                     return 0
                 else
                     echo "[FAIL] $test_name: 回复不包含期望内容 (期望: $expected_content)" | tee -a "$LOG_FILE"
                     echo "[FAIL] 实际回复: $actual_response" | tee -a "$LOG_FILE"
                     FAILED_TESTS=$((FAILED_TESTS + 1))
+                    case_result="fail"
+                    echo "CASE_NAME: ${case_name}, CASE_RESULT: ${case_result}" | tee -a "$LOG_FILE"
                     return 1
                 fi
             fi
@@ -462,7 +473,7 @@ test_case_1() {
         validate_test_result "基础对话-第1轮" "" "$assistant_reply" "true" "test_case_1" "round_1"
     else
         echo "[轮次 1] 错误: 获取回复失败" | tee -a "$LOG_FILE"
-        validate_test_result "基础对话-第1轮" "" "" "true"
+        validate_test_result "基础对话-第1轮" "" "" "true" "test_case_1" "round_1"
         return 1
     fi
 
@@ -479,7 +490,7 @@ test_case_1() {
         validate_test_result "基础对话-第2轮(上下文)" "" "$assistant_reply" "true" "test_case_1" "round_2"
     else
         echo "[轮次 2] 错误: 获取回复失败" | tee -a "$LOG_FILE"
-        validate_test_result "基础对话-第2轮(上下文)" "" "" "true"
+        validate_test_result "基础对话-第2轮(上下文)" "" "" "true" "test_case_1" "round_2"
         return 1
     fi
 
