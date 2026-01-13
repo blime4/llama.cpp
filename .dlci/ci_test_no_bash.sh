@@ -9,9 +9,6 @@
 #   BINARY_PATH - Path to binaries directory (e.g., /data/local/tmp/bin)
 #   REPO_PATH   - Path to repository root (e.g., /data/local/tmp/llama.cpp)
 #
-# Optional environment variables:
-#   MODEL_PATH  - Path to model files (default: /data/local/tmp/models)
-#
 
 set -e
 
@@ -47,12 +44,6 @@ fi
 
 echo "[INFO] REPO_PATH: $REPO_PATH"
 
-# Set MODEL_PATH default
-if [ -z "$MODEL_PATH" ]; then
-    MODEL_PATH="/data/local/tmp/models"
-fi
-
-echo "[INFO] MODEL_PATH: $MODEL_PATH"
 echo ""
 
 # Change to repo directory

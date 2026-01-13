@@ -126,15 +126,15 @@ update_expected_answer() {
     local new_answer="$3"
 
     new_answer=$(echo "$new_answer" | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
-    
+
     awk -v group="$test_group" -v test="$test_name" -v val="$new_answer" '
         $0 == group ":" { in_group=1; print; next }
         in_group && /^[a-z0-9_]+_test_cases:$/ && $0 != group ":" { in_group=0; in_test=0 }
         in_group && $0 == "  " test ":" { in_test=1; print; next }
         in_test && /^[a-z_]+:$/ { in_test=0 }
-        in_test && /^    expected:/ { 
+        in_test && /^    expected:/ {
             print "    expected: \"" val "\""
-            next 
+            next
         }
         { print }
     ' "$TEST_CASES_FILE" > "${TEST_CASES_FILE}.tmp" && mv "${TEST_CASES_FILE}.tmp" "$TEST_CASES_FILE"
@@ -228,7 +228,7 @@ extract_model_output() {
 
     local result=""
     local found_generate=false
-    
+
     while IFS= read -r line; do
         [[ "$line" == \[* ]] && continue
         [[ "$line" == load_tensors:* ]] && continue
@@ -257,23 +257,23 @@ extract_model_output() {
         [[ "$line" == typical* ]] && continue
         [[ "$line" == *temp* ]] && continue
         [[ "$line" =~ ^\.\.*$ ]] && continue
-        
+
         if [[ "$line" == generate:* ]]; then
             found_generate=true
             continue
         fi
-        
+
         if [[ "$line" == common_perf_print:* ]] || [[ "$line" == "-----------------------------" ]]; then
             break
         fi
-        
+
         if [[ "$line" == 计算过程如下* ]] || [[ "$line" == 首先* ]] || [[ "$line" == 好的，用户* ]]; then
             break
         fi
-        
+
         if [[ "$found_generate" == true ]]; then
             [[ -z "${line// }" ]] && continue
-            
+
             if [[ -z "$result" ]]; then
                 result="$line"
             else
@@ -281,7 +281,7 @@ extract_model_output() {
             fi
         fi
     done <<< "$full_output"
-    
+
     if [[ -n "$result" ]]; then
         # 去除 \n \r 等转义字符，压缩成一行
         echo "$result" | sed 's/\\n/ /g' | sed 's/\\r/ /g' | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
@@ -356,8 +356,7 @@ run_model_test() {
     local prompt="$3"
     local expected_content="$4"
     local model_path="$5"
-    local use_fa="${6:-false}"
-    local test_group="${7:-}"
+    local test_group="${6:-}"
 
     echo "" | tee -a "$LOG_FILE"
     echo "[INFO] ========================================" | tee -a "$LOG_FILE"
@@ -376,42 +375,23 @@ run_model_test() {
 
     # 输出执行命令
     local cmd
-    if [ "$use_fa" = "true" ]; then
-        cmd="CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 \"$LLAMA_COMPLETION\" -m \"$model_path\" -no-cnv -n 50 --temp $TEMPERATURE --top-k $TOP_K --top_p $TOP_P --repeat-penalty 1.0 -s $SEED -fa on -ngl $GPU_LAYERS -p \"$prompt\" -no-cnv"
-        echo "[CMD] $cmd" | tee -a "$LOG_FILE"
-        echo "[DEBUG] 使用 Flash Attention (-fa)" | tee -a "$LOG_FILE"
-        CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 "$LLAMA_COMPLETION" \
-            -m "$model_path" \
-            -no-cnv \
-            -n 50 \
-            --temp $TEMPERATURE \
-            --top-k $TOP_K \
-            --top_p $TOP_P \
-            --repeat-penalty 1.0 \
-            -s $SEED \
-            -fa on \
-            -ngl $GPU_LAYERS \
-            -p "$prompt" \
-            -no-cnv > "$temp_output" 2>&1
-        ret=$?
-    else
-        cmd="CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 \"$LLAMA_COMPLETION\" -m \"$model_path\" -no-cnv -n 50 --temp $TEMPERATURE --top-k $TOP_K --top_p $TOP_P --repeat-penalty 1.0 -s $SEED -ngl $GPU_LAYERS -p \"$prompt\" -no-cnv"
-        echo "[CMD] $cmd" | tee -a "$LOG_FILE"
-        echo "[DEBUG] 标准推理模式" >> "$LOG_FILE"
-        CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 "$LLAMA_COMPLETION" \
-            -m "$model_path" \
-            -no-cnv \
-            -n 50 \
-            --temp $TEMPERATURE \
-            --top-k $TOP_K \
-            --top_p $TOP_P \
-            --repeat-penalty 1.0 \
-            -s $SEED \
-            -ngl $GPU_LAYERS \
-            -p "$prompt" \
-            -no-cnv > "$temp_output" 2>&1
-        ret=$?
-    fi
+    cmd="CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 \"$LLAMA_COMPLETION\" -m \"$model_path\" -n 50 --temp $TEMPERATURE --top-k $TOP_K --top_p $TOP_P --repeat-penalty 1.0 -s $SEED -fa on -ngl $GPU_LAYERS -p \"$prompt\" -no-cnv"
+    echo "[CMD] $cmd" | tee -a "$LOG_FILE"
+    echo "[DEBUG] 使用 Flash Attention (-fa)" | tee -a "$LOG_FILE"
+    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 "$LLAMA_COMPLETION" \
+        -m "$model_path" \
+        -n 50 \
+        --temp $TEMPERATURE \
+        --top-k $TOP_K \
+        --top_p $TOP_P \
+        --repeat-penalty 1.0 \
+        -s $SEED \
+        -fa on \
+        -ngl $GPU_LAYERS \
+        -p "$prompt" \
+        -no-cnv > "$temp_output" 2>&1
+    ret=$?
+
     # 不恢复 set -e，因为脚本最初就没有设置它
     end_time=$(date +%s)
     duration=$((end_time - start_time))
@@ -440,19 +420,19 @@ run_model_test() {
 
 # 检测GPU资源
 detect_gpu_resources() {
-    if ! command -v nvidia-smi >/dev/null 2>&1; then
+    if ! command -v dlsmi >/dev/null 2>&1; then
         echo "0|0|"
         return
     fi
 
     local gpu_count
-    gpu_count=$(nvidia-smi --query-gpu=count --format=csv,noheader | head -1)
+    gpu_count=$(dlsmi --query-gpu=count --format=csv,noheader | head -1)
     local total_memory_gb=0
     local gpu_memory_list=""
 
     for ((i=0; i<gpu_count; i++)); do
         local mem_mb
-        mem_mb=$(nvidia-smi -i $i --query-gpu=memory.total --format=csv,noheader,nounits)
+        mem_mb=$(dlsmi -i $i --query-gpu=memory.total --format=csv,noheader,nounits)
         local mem_gb=$((mem_mb / 1024))
         total_memory_gb=$((total_memory_gb + mem_gb))
         if [ -z "$gpu_memory_list" ]; then
@@ -520,6 +500,25 @@ main() {
     IFS='|' read -r gpu_count total_memory_gb gpu_memory_list <<< "$gpu_info"
     echo "[INFO] GPU资源: ${gpu_count} GPUs, 总内存 ${total_memory_gb}GB" | tee -a "$LOG_FILE"
 
+    # 检查Qwen3是否需要跳过（单卡显存需要>=32GB）
+    local skip_qwen3=false
+    if [ -n "$gpu_memory_list" ]; then
+        local max_mem=0
+        for mem in $(echo "$gpu_memory_list" | tr ',' ' '); do
+            if [ "$mem" -gt "$max_mem" ]; then
+                max_mem=$mem
+            fi
+        done
+        echo "[INFO] 单卡最大显存: ${max_mem}GB" | tee -a "$LOG_FILE"
+        if [ "$max_mem" -lt 32 ]; then
+            echo "[WARN] 单卡显存不足32GB，跳过Qwen3测试" | tee -a "$LOG_FILE"
+            skip_qwen3=true
+        fi
+    else
+        echo "[WARN] 无法检测GPU显存，跳过Qwen3测试" | tee -a "$LOG_FILE"
+        skip_qwen3=true
+    fi
+
     # 定义测试模型和用例
     declare -A qwen2_models=(
         # ["Qwen2-1.5Moe.Q4_K_M"]="Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf"
@@ -541,7 +540,7 @@ main() {
             echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
             while IFS='|' read -r test_name prompt expected; do
                 if [ -n "$test_name" ] && [ -n "$prompt" ]; then
-                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "false" "test_cases"
+                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "true" "test_cases"
                 fi
             done < <(load_test_cases "test_cases")
         else
@@ -554,14 +553,9 @@ main() {
         local model_path="${MODEL_BASE_PATH}/${qwen25_models[$model_name]}"
         if [ -f "$model_path" ]; then
             echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
-            # qwen2.5-1.5b-instruct-q4_k_m 使用Flash Attention
-            local use_fa="false"
-            if [[ "$model_name" == *"q4_k_m"* ]]; then
-                use_fa="true"
-            fi
             while IFS='|' read -r test_name prompt expected; do
                 if [ -n "$test_name" ] && [ -n "$prompt" ]; then
-                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "$use_fa" "qwen25_test_cases"
+                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "true" "qwen25_test_cases"
                 fi
             done < <(load_test_cases "qwen25_test_cases")
         else
@@ -569,20 +563,24 @@ main() {
         fi
     done
 
-    # 运行Qwen3测试（使用qwen3_test_cases）
-    for model_name in "${!qwen3_models[@]}"; do
-        local model_path="${MODEL_BASE_PATH}/${qwen3_models[$model_name]}"
-        if [ -f "$model_path" ]; then
-            echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
-            while IFS='|' read -r test_name prompt expected; do
-                if [ -n "$test_name" ] && [ -n "$prompt" ]; then
-                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "false" "qwen3_test_cases"
-                fi
-            done < <(load_test_cases "qwen3_test_cases")
-        else
-            echo "[WARN] 模型文件不存在: $model_path" | tee -a "$LOG_FILE"
-        fi
-    done
+    # 运行Qwen3测试（使用qwen3_test_cases，需要单卡>=32GB显存）
+    if [ "$skip_qwen3" = "true" ]; then
+        echo "[INFO] 跳过Qwen3测试（显存不足）" | tee -a "$LOG_FILE"
+    else
+        for model_name in "${!qwen3_models[@]}"; do
+            local model_path="${MODEL_BASE_PATH}/${qwen3_models[$model_name]}"
+            if [ -f "$model_path" ]; then
+                echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
+                while IFS='|' read -r test_name prompt expected; do
+                    if [ -n "$test_name" ] && [ -n "$prompt" ]; then
+                        run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "true" "qwen3_test_cases"
+                    fi
+                done < <(load_test_cases "qwen3_test_cases")
+            else
+                echo "[WARN] 模型文件不存在: $model_path" | tee -a "$LOG_FILE"
+            fi
+        done
+    fi
 
     # 打印总结并返回结果
     if print_test_summary; then
