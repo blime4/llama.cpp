@@ -352,7 +352,10 @@ print_ci_build_usage() {
     echo ""
     echo "Required Environment Variables:"
     echo "  SDK_DIR         - Path to SDK directory"
-    echo "  DOCKER_PLATFORM  - Target platform (x86_64, aarch64, riscv64, loongarch64, android)"
+    echo "  DOCKER_PLATFORM - Target platform (x86_64, aarch64, riscv64, loongarch64, android)"
+    echo ""
+    echo "Optional Environment Variables (Android):"
+    echo "  ANDROID_SDK_DIR - Path to Android SDK for linking (required for android platform)"
     echo ""
     echo "Optional Environment Variables:"
     echo "  REPO_PATH        - Repository path (default: current directory)"
@@ -361,7 +364,8 @@ print_ci_build_usage() {
     echo ""
     echo "Example:"
     echo "  export SDK_DIR=/path/to/sdk"
-    echo "  export DOCKER_PLATFORM=x86_64"
+    echo "  export DOCKER_PLATFORM=android"
+    echo "  export ANDROID_SDK_DIR=/path/to/android_sdk"
     echo "  export REPO_PATH=/path/to/repository"
     echo "  ci_build"
 }
@@ -376,6 +380,11 @@ validate_ci_build_env_vars() {
 
     if [ -z "$DOCKER_PLATFORM" ]; then
         missing_vars+=("DOCKER_PLATFORM")
+    fi
+
+    # Android platform requires ANDROID_SDK_DIR for linking
+    if [ "$DOCKER_PLATFORM" = "android" ] && [ -z "$ANDROID_SDK_DIR" ]; then
+        missing_vars+=("ANDROID_SDK_DIR")
     fi
 
     if [ ${#missing_vars[@]} -gt 0 ]; then
@@ -426,6 +435,13 @@ set_ci_build_defaults() {
             echo "[INFO] Using generated SDK_TAG: $SDK_TAG"
         fi
     fi
+
+    # Print Android SDK information if building for android
+    if [ "$DOCKER_PLATFORM" = "android" ]; then
+        if [ -n "$ANDROID_SDK_DIR" ]; then
+            echo "[INFO] Android SDK Path: $ANDROID_SDK_DIR"
+        fi
+    fi
 }
 
 # Validate paths for CI build
@@ -458,6 +474,14 @@ validate_ci_build_paths() {
         error_count=$((error_count + 1))
     fi
 
+    # For Android platform, validate ANDROID_SDK_DIR
+    if [ "$DOCKER_PLATFORM" = "android" ]; then
+        if [ ! -d "$ANDROID_SDK_DIR" ]; then
+            echo "[ERROR] ANDROID_SDK_DIR does not exist: $ANDROID_SDK_DIR"
+            error_count=$((error_count + 1))
+        fi
+    fi
+
     if [ $error_count -gt 0 ]; then
         echo "[ERROR] $error_count validation error(s) found. Aborting."
         exit 1
@@ -475,11 +499,16 @@ prepare_ci_build_docker_envs() {
     export SDK_TAG
     export SDK_DIR="$SDK_DIR"
 
+    # Export ANDROID_SDK_DIR for Android builds
+    if [ "$DOCKER_PLATFORM" = "android" ]; then
+        export ANDROID_SDK_DIR
+    fi
+
     # Collect environment variables matching the pattern
     DOCKER_ENVS=()
     while IFS='=' read -r key value; do
         DOCKER_ENVS+=(--env "${key}=${value}")
-    done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|DOCKER_PLATFORM)')
+    done < <(env | grep -E '^(SDK_|CI_|sdk_|REPO_PATH|DOCKER_PLATFORM|ANDROID_)')
 
     echo "[INFO] Docker environment variables prepared: ${#DOCKER_ENVS[@]} variables"
 }
