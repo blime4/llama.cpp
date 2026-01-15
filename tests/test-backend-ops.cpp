@@ -6547,6 +6547,7 @@ struct test_flash_attn_ext : public test_case {
   private:
     // Helper function to call set_flash_attn_runtime via backend API
     void call_set_flash_attn_runtime(ggml_context * ctx, ggml_tensor * attn) {
+        (void)ctx;
         // Get the backend for the flash attention operation
         // Note: At this point, tensors are allocated but backend assignment happens later
         // We need to find a CUDA backend to call the function
@@ -6611,6 +6612,7 @@ struct test_flash_attn_ext : public test_case {
 
     // Helper function to call prepare_flash_attn_varlen_buffers via backend API
     void call_prepare_flash_attn_varlen_buffers(ggml_context * ctx, ggml_tensor * attn) {
+        (void)ctx;
         // Find a CUDA backend from available backends
         ggml_backend_t cuda_backend = nullptr;
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
