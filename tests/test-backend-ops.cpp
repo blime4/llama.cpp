@@ -8943,14 +8943,6 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_falcon(2));
 #endif
 
-    // DL-TODO: [FIXME] Temporarily skip FLASH_ATTN_EXT tests until they are fixed
-    test_cases.erase(
-        std::remove_if(test_cases.begin(), test_cases.end(), [](const std::unique_ptr<test_case> & tc) {
-            return dynamic_cast<const test_flash_attn_ext *>(tc.get()) != nullptr;
-        }),
-        test_cases.end()
-    );
-
     return test_cases;
 }
 #ifdef _MSC_VER
