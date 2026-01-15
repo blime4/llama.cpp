@@ -2319,6 +2319,21 @@ extern "C" {
     //   ne3    % ne33      == 0
     //
 #if defined(GGML_USE_DLFA)
+    // Flash attention varlen parameter indices for op_params array
+    // NOTE: ggml_flash_attn_ext_op_params struct occupies indices 0-11 (48 bytes)
+    // GGML_MAX_OP_PARAMS is 64 bytes = 16 int32 values (indices 0-15)
+    // Our varlen params must fit in indices 12-15 (only 4 slots available)
+    #define GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_Q_I32        12
+    #define GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_K_REAL_I32   13
+    #define GGML_FLASH_ATTN_PARAM_VARLEN_BT_STRIDE_I32       14
+    #define GGML_FLASH_ATTN_PARAM_VARLEN_HAS_PARAMS_I32      15
+
+    // Mask parameters (must match ggml.c definitions)
+    #define GGML_FLASH_ATTN_PARAM_MASK_PRESENT_I32            4
+    #define GGML_FLASH_ATTN_PARAM_MASK_CAUSAL_I32             5
+    #define GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32            11
+    #define GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE          0x46414d31 // 'FAM1'
+
     struct ggml_flash_attn_mask_params {
         bool     present;
         bool     is_causal;
@@ -2327,6 +2342,17 @@ extern "C" {
         bool     per_token_window;
         bool     multi_sequence;
         bool     has_alibi_bias;
+
+        // Varlen-specific parameters (scalars only)
+        int32_t  batch;                  // batch size
+        int32_t  seqlen_q;               // query sequence length
+        int32_t  seqlen_k_real;          // real (unpadded) key sequence length
+        int32_t  block_table_stride;     // stride for block table (num_blocks_per_seq)
+        bool     has_varlen_params;      // whether varlen params are set
+
+        // Pointer to additional varlen data (C++ structure with vectors and device cache map)
+        // This is a void* to keep the struct C-compatible
+        void *   extra;                  // points to flash_attn_varlen_data structure
     };
 #endif
 

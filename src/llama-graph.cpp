@@ -1,6 +1,7 @@
 #include "llama-graph.h"
 
 #include "ggml.h"
+#include "../ggml/src/ggml-impl.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
@@ -291,131 +292,6 @@ void llm_graph_input_cross_embd::set_input(const llama_ubatch * ubatch) {
     }
 }
 
-#ifdef GGML_USE_DLFA
-namespace {
-// Persist runtime across steps even if mask tensor is recreated each step.
-// Keyed by mask name; fallback to pointer if name is empty.
-static std::unordered_map<std::string, std::unique_ptr<ggml_dl::flash_attn_dlfa_runtime>> & dlfa_runtime_map() {
-    static auto * map_ptr = new std::unordered_map<std::string, std::unique_ptr<ggml_dl::flash_attn_dlfa_runtime>>();
-    return *map_ptr;
-}
-
-static void set_flash_attn_runtime(
-        ggml_tensor * mask,
-        int batch,
-        int seqlen_q,
-        const ggml_flash_attn_mask_params * mask_params = nullptr) {
-    GGML_ASSERT(batch == 1 && "DL TODO: nowadays batch is always 1, figure out how to handle multiple sequences.");
-    GGML_ASSERT(mask);
-
-    // Keep a running seqlen_k_real on CPU during decode:
-    // - decode (seqlen_q == 1): accumulate previous seqlen_k_real + seqlen_q
-    // - prefill (seqlen_q > 1): still infer from mask's last row if present
-    auto make_key = [](const ggml_tensor * t) -> std::string {
-        if (t->name && t->name[0] != '\0') return std::string(t->name);
-        return std::string("ptr:") + std::to_string(reinterpret_cast<uintptr_t>(t));
-    };
-    const std::string key = make_key(mask);
-    ggml_dl::flash_attn_dlfa_runtime * runtime = nullptr;
-    auto & runtime_map = dlfa_runtime_map();
-    auto it_runtime = runtime_map.find(key);
-    if (it_runtime != runtime_map.end()) {
-        runtime = it_runtime->second.get();
-    }
-
-    // Debug: print key and runtime lookup status
-    // printf("for debug : mask key = '%s', mask name = '%s', mask ptr = %p, runtime found = %d, prev_seqlen_k_real = %d\n",
-    //        key.c_str(),
-    //        mask->name ? mask->name : "<null>",
-    //        (void*)mask,
-    //        runtime != nullptr ? 1 : 0,
-    //        prev_seqlen_k_real);
-
-    // Helper to infer from mask if available
-    const int64_t mask_sk = mask->ne[0];  // key sequence length (padded)
-    const int64_t mask_sq = mask->ne[1];  // query sequence length
-    auto infer_from_mask_last_row = [&]() -> int {
-        GGML_ASSERT(mask->data);
-
-        const size_t elem_size = ggml_type_size(mask->type);
-        const size_t row_bytes = (size_t) mask_sq*mask_sk * elem_size;
-        std::vector<uint8_t> row_buf(row_bytes);
-        ggml_backend_tensor_get(mask, row_buf.data(), 0, row_bytes);
-
-        auto read_val = [&](int64_t col) -> float {
-            switch (mask->type) {
-                case GGML_TYPE_F32:
-                    return reinterpret_cast<float *>(row_buf.data())[col];
-                case GGML_TYPE_F16:
-                    return ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[col]);
-                case GGML_TYPE_BF16:
-                    return ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[col]);
-                default:
-                    return -INFINITY;
-            }
-        };
-
-        int64_t last_valid = -1;
-        for (int32_t i = mask_sq - 1; i >=0; --i) {
-            for (int64_t c = mask_sk - 1; c >= 0; --c) {
-                const float val = read_val(i*mask_sk + c);
-                if (!(std::isinf(val))) {
-                    last_valid = c;
-                    return c + 1;
-                }
-            }
-        }
-        return last_valid >= 0 ? (int) (last_valid + 1) : -1;
-    };
-
-    int seqlen_k_real = infer_from_mask_last_row();
-    GGML_ASSERT(seqlen_k_real > 0);
-
-    // Clamp to padded length
-    // const char * stage = seqlen_q == 1 ? "decode" : "prefill";
-    // printf("for debug : stage : %s, seqlen_q : %d, seqlen_k_real_no_clamp : %d, mask_sk : %d\n", stage, seqlen_q, seqlen_k_real_no_clamp, mask_sk);
-    // printf("for debug : seqlen_k_real : %d (prev=%d)\n", seqlen_k_real, prev_seqlen_k_real);
-
-    // block table is built from padded kv size (n_kv = mask_sk) with 256 page blocks
-    const int page_block = 256;
-    const int bt_stride = (seqlen_k_real + page_block - 1) / page_block;
-
-    if (!runtime) {
-        auto ptr = std::make_unique<ggml_dl::flash_attn_dlfa_runtime>();
-        runtime = ptr.get();
-        runtime_map[key] = std::move(ptr);
-    }
-    runtime->batch = batch;
-    runtime->seqlen_q = seqlen_q;
-    runtime->seqlen_k_real = seqlen_k_real;
-    runtime->block_table_stride = (mask_sk + page_block - 1) / page_block;
-    if (mask_params != nullptr) {
-        runtime->mask_params = *mask_params;
-        runtime->has_mask_params = true;
-    }
-    runtime->cu_seqlens_q.resize(batch + 1);
-    runtime->seqused_k.resize(batch);
-    runtime->block_table.resize((size_t) batch * bt_stride);
-    for (int b = 0; b <= batch; ++b) {
-        runtime->cu_seqlens_q[b] = b * seqlen_q;
-        // printf("for debug : cu_seqlens_q[%d] = %d\n", b, runtime->cu_seqlens_q[b]);
-        if (b < batch) {
-            runtime->seqused_k[b] = seqlen_k_real;
-            // printf("for debug : seqused_k[%d] = %d\n", b, runtime->seqused_k[b]);
-        }
-    }
-    for (int b = 0; b < batch; ++b) {
-        for (int bi = 0; bi < bt_stride; ++bi) {
-            const int idx = b * bt_stride + bi;
-            runtime->block_table[(size_t)b * bt_stride + bi] = idx;
-            // printf("for debug : block_table[%d][%d] = %d\n", b, bi, runtime->block_table[(size_t)b * bt_stride + bi]);
-        }
-    }
-    mask->extra = runtime;
-}
-} // namespace
-#endif
-
 static void print_mask(const float * data, int64_t n_tokens, int64_t n_kv, int64_t n_swa, llama_swa_type swa_type) {
     LLAMA_LOG_DEBUG("%s: === Attention mask ===\n", __func__);
     const char * swa_type_str = "unknown";
@@ -530,20 +406,8 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
         info_ptr = &info;
     }
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn, info_ptr);
-
-    if (info_ptr) {
-        const int64_t n_tokens = ubatch->real_n_tokens;
-        set_flash_attn_runtime(self_kq_mask, 1, (int) n_tokens, &info);
-        if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
-            self_kq_mask_cnv->extra = self_kq_mask->extra;
-        }
-    }
 #else
     mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
-
-    if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
-        self_kq_mask_cnv->extra = self_kq_mask->extra;
-    }
 #endif
 }
 
@@ -574,19 +438,8 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
         info_base_ptr = &info_base;
     }
     mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn, info_base_ptr);
-
-    if (info_base_ptr) {
-        const int64_t n_tokens = ubatch->n_tokens;
-        set_flash_attn_runtime(self_kq_mask, 1, (int) n_tokens, &info_base);
-        if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
-            self_kq_mask_cnv->extra = self_kq_mask->extra;
-        }
-    }
 #else
     mctx->get_base()->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
-    if (self_kq_mask_cnv && self_kq_mask_cnv != self_kq_mask) {
-        self_kq_mask_cnv->extra = self_kq_mask->extra;
-    }
 #endif
 
     mctx->get_swa()->set_input_k_idxs(self_k_idxs_swa, ubatch);
@@ -599,19 +452,8 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
         info_swa_ptr = &info_swa;
     }
     mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn, info_swa_ptr);
-
-    if (info_swa_ptr) {
-        const int64_t n_tokens = ubatch->n_tokens;
-        set_flash_attn_runtime(self_kq_mask_swa, 1, (int) n_tokens, &info_swa);
-        if (self_kq_mask_swa_cnv && self_kq_mask_swa_cnv != self_kq_mask_swa) {
-            self_kq_mask_swa_cnv->extra = self_kq_mask_swa->extra;
-        }
-    }
 #else
     mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
-    if (self_kq_mask_swa_cnv && self_kq_mask_swa_cnv != self_kq_mask_swa) {
-        self_kq_mask_swa_cnv->extra = self_kq_mask_swa->extra;
-    }
 #endif
 }
 
@@ -690,11 +532,6 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
 
         info.multi_sequence = multi_seq;
         info.has_alibi_bias = hparams.use_alibi;
-
-        set_flash_attn_runtime(cross_kq_mask, 1, (int) n_tokens, &info);
-        if (cross_kq_mask_cnv && cross_kq_mask_cnv != cross_kq_mask) {
-            cross_kq_mask_cnv->extra = cross_kq_mask->extra;
-        }
     }
 #endif
 }
@@ -1689,9 +1526,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         if (kq_mask && kq_mask->type != GGML_TYPE_F16) {
             ggml_tensor * kq_mask_orig = kq_mask;
             kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
-            if (kq_mask != kq_mask_orig && kq_mask_orig->extra) {
-                kq_mask->extra = kq_mask_orig->extra;
-            }
         }
 #else
         // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
@@ -1707,6 +1541,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
+
+        // Note: varlen runtime parameters are now set during graph execution
+        // (in flash_attn_ext_dldnn_prepare_varlen_buffers) instead of here
+        // This allows access to mask data for accurate seqlen_k_real calculation
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);

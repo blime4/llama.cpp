@@ -32,226 +32,226 @@ stages:
   - compile_and_test_llama_cpp
   - release_llama_cpp
 
-compile_and_test_llama_cpp_x86_64:
-  stage: compile_and_test_llama_cpp
-  variables:
-    DOCKER_PLATFORM: x86_64
-  tags:
-    - build-x86_64
-  rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
-      when: on_success
-    - when: on_success
-  script:
-    - *load_unified_config
-    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
-    - *docker_envs
-    - bash ${REPO_PATH}/.dlci/check_device_status.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/bench_llama_cpp.sh --ci-test --binary-path build_x86_64/bin
-  artifacts:
-    paths:
-      - build_x86_64/bin
-      - logs/compile/
-    expire_in: 1 day
-    when: always
+# compile_and_test_llama_cpp_x86_64:
+#   stage: compile_and_test_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: x86_64
+#   tags:
+#     - build-x86_64
+#   rules:
+#     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+#       when: on_success
+#     - when: on_success
+#   script:
+#     - *load_unified_config
+#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+#     - export SDK_DIR="${SDK_WORKSPACE}/sdk"
+#     - *docker_envs
+#     - bash ${REPO_PATH}/.dlci/check_device_status.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/compile_llama_cpp.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/test_llama_cpp.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/bench_llama_cpp.sh --ci-test --binary-path build_x86_64/bin
+#   artifacts:
+#     paths:
+#       - build_x86_64/bin
+#       - logs/compile/
+#     expire_in: 1 day
+#     when: always
 
-compile_and_test_llama_cpp_aarch64:
-  stage: compile_and_test_llama_cpp
-  variables:
-    DOCKER_PLATFORM: aarch64
-  tags:
-    - build-arm64
-  rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
-      when: on_success
-    - when: on_success
-  script:
-    - *load_unified_config
-    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
-    - *docker_envs
-    - bash ${REPO_PATH}/.dlci/check_device_status.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/bench_llama_cpp.sh --ci-test --binary-path build_aarch64/bin
-  artifacts:
-    paths:
-      - build_aarch64/bin
-      - logs/compile/
-    expire_in: 1 day
-    when: always
+# compile_and_test_llama_cpp_aarch64:
+#   stage: compile_and_test_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: aarch64
+#   tags:
+#     - build-arm64
+#   rules:
+#     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+#       when: on_success
+#     - when: on_success
+#   script:
+#     - *load_unified_config
+#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+#     - export SDK_DIR="${SDK_WORKSPACE}/sdk"
+#     - *docker_envs
+#     - bash ${REPO_PATH}/.dlci/check_device_status.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/compile_llama_cpp.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/test_llama_cpp.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/bench_llama_cpp.sh --ci-test --binary-path build_aarch64/bin
+#   artifacts:
+#     paths:
+#       - build_aarch64/bin
+#       - logs/compile/
+#     expire_in: 1 day
+#     when: always
 
-compile_and_test_llama_cpp_riscv64:
-  stage: compile_and_test_llama_cpp
-  variables:
-    DOCKER_PLATFORM: riscv64
-  tags:
-    - build-x86_64
-  rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
-      when: on_success
-    - when: on_success
-  script:
-    - *load_unified_config
-    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
-    - *docker_envs
-    - echo "[INFO] Skipping device check for RISC-V platform (no hardware acceleration expected)"
-    - echo "${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} \"\${DOCKER_ENVS[@]}\" \"${DOCKER_IMAGE_RISCV64}\" ${REPO_PATH}/.dlci/compile_llama_cpp.sh"
-    - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
-    # TODO : need hardware support.
-    #- ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/test_llama_cpp.sh
-  artifacts:
-    paths:
-      - build_riscv64/bin
-      - logs/compile/
-    expire_in: 1 day
-    when: always
+# compile_and_test_llama_cpp_riscv64:
+#   stage: compile_and_test_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: riscv64
+#   tags:
+#     - build-x86_64
+#   rules:
+#     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+#       when: on_success
+#     - when: on_success
+#   script:
+#     - *load_unified_config
+#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+#     - export SDK_DIR="${SDK_WORKSPACE}/sdk"
+#     - *docker_envs
+#     - echo "[INFO] Skipping device check for RISC-V platform (no hardware acceleration expected)"
+#     - echo "${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} \"\${DOCKER_ENVS[@]}\" \"${DOCKER_IMAGE_RISCV64}\" ${REPO_PATH}/.dlci/compile_llama_cpp.sh"
+#     - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
+#     # TODO : need hardware support.
+#     #- ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/test_llama_cpp.sh
+#   artifacts:
+#     paths:
+#       - build_riscv64/bin
+#       - logs/compile/
+#     expire_in: 1 day
+#     when: always
 
-compile_and_test_llama_cpp_loongarch64:
-  stage: compile_and_test_llama_cpp
-  variables:
-    DOCKER_PLATFORM: loongarch64
-  tags:
-    - build-loongarch64
-  rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
-      when: on_success
-    - when: on_success
-  script:
-    - *load_unified_config
-    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
-    - *docker_envs
-    - bash ${REPO_PATH}/.dlci/check_device_status.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/test_llama_cpp.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/bench_llama_cpp.sh --ci-test --binary-path build_loongarch64/bin
-  artifacts:
-    paths:
-      - build_loongarch64/bin
-      - logs/compile/
-    expire_in: 1 day
-    when: always
+# compile_and_test_llama_cpp_loongarch64:
+#   stage: compile_and_test_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: loongarch64
+#   tags:
+#     - build-loongarch64
+#   rules:
+#     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+#       when: on_success
+#     - when: on_success
+#   script:
+#     - *load_unified_config
+#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+#     - export SDK_DIR="${SDK_WORKSPACE}/sdk"
+#     - *docker_envs
+#     - bash ${REPO_PATH}/.dlci/check_device_status.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/test_llama_cpp.sh
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/bench_llama_cpp.sh --ci-test --binary-path build_loongarch64/bin
+#   artifacts:
+#     paths:
+#       - build_loongarch64/bin
+#       - logs/compile/
+#     expire_in: 1 day
+#     when: always
 
-compile_and_test_llama_cpp_android:
-  stage: compile_and_test_llama_cpp
-  variables:
-    DOCKER_PLATFORM: android
-  tags:
-    - build-x86_64  # Android cross-compilation uses x86_64 builder
-  rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
-      when: on_success
-    - when: on_success
-  script:
-    - *load_unified_config
-    - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
-    - export SDK_DIR="${SDK_WORKSPACE}/sdk"
-    - *docker_envs
-    - echo "[INFO] Skipping device check for Android platform (cross-compilation target)"
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/compile_llama_cpp.sh
-    # Android cross-compiled binaries cannot run on host, so skip runtime tests
-    - echo "[INFO] Skipping runtime tests for Android (cross-compilation target)"
-    # Instead, run basic binary validation
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" bash -c "ls -lh build_android/bin/ && echo '[INFO] Android binaries validated successfully'"
-  after_script:
-    - |
-      if [ $? -ne 0 ]; then
-        echo "[INFO] Compilation failed, clearing ccache..."
-        ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" bash -c "ccache --clear && echo '[INFO] ccache cleared successfully'"
-      fi
-  artifacts:
-    paths:
-      - build_android/bin
-      - logs/compile/
-    expire_in: 1 day
-    when: always
+# compile_and_test_llama_cpp_android:
+#   stage: compile_and_test_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: android
+#   tags:
+#     - build-x86_64  # Android cross-compilation uses x86_64 builder
+#   rules:
+#     - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+#       when: on_success
+#     - when: on_success
+#   script:
+#     - *load_unified_config
+#     - bash .dlci/download_and_unpack_sdk.sh "${SDK_TAG}" "${SDK_WORKSPACE}"
+#     - export SDK_DIR="${SDK_WORKSPACE}/sdk"
+#     - *docker_envs
+#     - echo "[INFO] Skipping device check for Android platform (cross-compilation target)"
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/compile_llama_cpp.sh
+#     # Android cross-compiled binaries cannot run on host, so skip runtime tests
+#     - echo "[INFO] Skipping runtime tests for Android (cross-compilation target)"
+#     # Instead, run basic binary validation
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" bash -c "ls -lh build_android/bin/ && echo '[INFO] Android binaries validated successfully'"
+#   after_script:
+#     - |
+#       if [ $? -ne 0 ]; then
+#         echo "[INFO] Compilation failed, clearing ccache..."
+#         ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" bash -c "ccache --clear && echo '[INFO] ccache cleared successfully'"
+#       fi
+#   artifacts:
+#     paths:
+#       - build_android/bin
+#       - logs/compile/
+#     expire_in: 1 day
+#     when: always
 
-release_llama_cpp_x86_64:
-  stage: release_llama_cpp
-  variables:
-    DOCKER_PLATFORM: x86_64
-  tags:
-    - build-x86_64
-  dependencies:
-    - compile_and_test_llama_cpp_x86_64
-  needs:
-    - job: compile_and_test_llama_cpp_x86_64
-  only:
-    - /^dl-release-.*$/
-  script:
-    - *load_unified_config
-    - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
+# release_llama_cpp_x86_64:
+#   stage: release_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: x86_64
+#   tags:
+#     - build-x86_64
+#   dependencies:
+#     - compile_and_test_llama_cpp_x86_64
+#   needs:
+#     - job: compile_and_test_llama_cpp_x86_64
+#   only:
+#     - /^dl-release-.*$/
+#   script:
+#     - *load_unified_config
+#     - *docker_envs
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_X86}" ./.dlci/release_llama_cpp.sh
 
-release_llama_cpp_aarch64:
-  stage: release_llama_cpp
-  variables:
-    DOCKER_PLATFORM: aarch64
-  tags:
-    - build-arm64
-  dependencies:
-    - compile_and_test_llama_cpp_aarch64
-  needs:
-    - job: compile_and_test_llama_cpp_aarch64
-  only:
-    - /^dl-release-.*$/
-  script:
-    - *load_unified_config
-    - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
+# release_llama_cpp_aarch64:
+#   stage: release_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: aarch64
+#   tags:
+#     - build-arm64
+#   dependencies:
+#     - compile_and_test_llama_cpp_aarch64
+#   needs:
+#     - job: compile_and_test_llama_cpp_aarch64
+#   only:
+#     - /^dl-release-.*$/
+#   script:
+#     - *load_unified_config
+#     - *docker_envs
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_AARCH64}" ./.dlci/release_llama_cpp.sh
 
-release_llama_cpp_riscv64:
-  stage: release_llama_cpp
-  variables:
-    DOCKER_PLATFORM: riscv64
-  tags:
-    - build-x86_64
-  dependencies:
-    - compile_and_test_llama_cpp_riscv64
-  needs:
-    - job: compile_and_test_llama_cpp_riscv64
-  only:
-    - /^dl-release-.*$/
-  script:
-    - *load_unified_config
-    - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/release_llama_cpp.sh
+# release_llama_cpp_riscv64:
+#   stage: release_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: riscv64
+#   tags:
+#     - build-x86_64
+#   dependencies:
+#     - compile_and_test_llama_cpp_riscv64
+#   needs:
+#     - job: compile_and_test_llama_cpp_riscv64
+#   only:
+#     - /^dl-release-.*$/
+#   script:
+#     - *load_unified_config
+#     - *docker_envs
+#     - ${DOCKER_REPO_PATH}/bash.sh --platform linux/riscv64 --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_RISCV64}" ./.dlci/release_llama_cpp.sh
 
-release_llama_cpp_loongarch64:
-  stage: release_llama_cpp
-  variables:
-    DOCKER_PLATFORM: loongarch64
-  tags:
-    - build-loongarch64
-  dependencies:
-    - compile_and_test_llama_cpp_loongarch64
-  needs:
-    - job: compile_and_test_llama_cpp_loongarch64
-  only:
-    - /^dl-release-.*$/
-  script:
-    - *load_unified_config
-    - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ./.dlci/release_llama_cpp.sh
+# release_llama_cpp_loongarch64:
+#   stage: release_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: loongarch64
+#   tags:
+#     - build-loongarch64
+#   dependencies:
+#     - compile_and_test_llama_cpp_loongarch64
+#   needs:
+#     - job: compile_and_test_llama_cpp_loongarch64
+#   only:
+#     - /^dl-release-.*$/
+#   script:
+#     - *load_unified_config
+#     - *docker_envs
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ./.dlci/release_llama_cpp.sh
 
-release_llama_cpp_android:
-  stage: release_llama_cpp
-  variables:
-    DOCKER_PLATFORM: android
-  tags:
-    - build-x86_64  # Android cross-compilation uses x86_64 builder
-  dependencies:
-    - compile_and_test_llama_cpp_android
-  needs:
-    - job: compile_and_test_llama_cpp_android
-  only:
-    - /^dl-release-.*$/
-  script:
-    - *load_unified_config
-    - *docker_envs
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/release_llama_cpp.sh
+# release_llama_cpp_android:
+#   stage: release_llama_cpp
+#   variables:
+#     DOCKER_PLATFORM: android
+#   tags:
+#     - build-x86_64  # Android cross-compilation uses x86_64 builder
+#   dependencies:
+#     - compile_and_test_llama_cpp_android
+#   needs:
+#     - job: compile_and_test_llama_cpp_android
+#   only:
+#     - /^dl-release-.*$/
+#   script:
+#     - *load_unified_config
+#     - *docker_envs
+#     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_ANDROID}" ./.dlci/release_llama_cpp.sh

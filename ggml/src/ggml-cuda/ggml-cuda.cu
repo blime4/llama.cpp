@@ -14,6 +14,10 @@
 #include "../ggml-dlcu/dl-fattn.cuh"
 // Forward declaration for C linkage wrapper function in ggml-dlcu
 extern "C" void ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+// NEW: Forward declaration for set_flash_attn_runtime wrapper
+extern "C" void ggml_dl_flash_attn_ext_dldnn_set_runtime(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int seqlen_q_hint);
+// NEW: Forward declaration for copy_host_data wrapper
+extern "C" void ggml_dl_flash_attn_ext_dldnn_copy_host_data(ggml_backend_cuda_context & ctx, void * src_mask, void * dst_mask);
 #endif
 #include <cstdlib>
 #include <cstring>
@@ -3123,9 +3127,13 @@ static bool is_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, 
         cuda_graph_update_required = true;
     }
     #ifdef GGML_USE_DLFA
-    // do not check properties, as chunked prefill graph output is different with full prefill even prompt lenght is the same
+    // Force recapture when flash_attn is enabled because CUDA Graph captures device buffer
+    // contents at capture time. In multi-turn conversations, varlen buffers (cu_seqlens_q,
+    // seqused_k, etc.) are updated by prepare_varlen_buffers, but CUDA Graph replay uses
+    // the captured data, not the updated data. This causes garbled output in multi-GPU
+    // multi-turn scenarios.
     if (cgraph->flash_attn) {
-        return cuda_graph_update_required;
+        return true;  // Always recapture to use updated varlen buffers
     }
     #endif
 
@@ -5115,6 +5123,28 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
             ggml_backend_cuda_context * ctx = ggml_backend_cuda_get_context(backend);
             if (ctx != nullptr) {
                 ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(*ctx, dst);
+            }
+        };
+        return reinterpret_cast<void *>(+wrapper);
+    }
+    // NEW: Wrapper for set_flash_attn_runtime (called once after set_inputs)
+    if (strcmp(name, "flash_attn_ext_dldnn_set_runtime_backend") == 0) {
+        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int);
+        static auto wrapper = [](ggml_backend_t backend, ggml_tensor * dst, int seqlen_q_hint) {
+            ggml_backend_cuda_context * ctx = ggml_backend_cuda_get_context(backend);
+            if (ctx != nullptr) {
+                ggml_dl_flash_attn_ext_dldnn_set_runtime(*ctx, dst, seqlen_q_hint);
+            }
+        };
+        return reinterpret_cast<void *>(+wrapper);
+    }
+    // NEW: Wrapper for copy_host_data (used in multi-GPU mode)
+    if (strcmp(name, "flash_attn_ext_dldnn_copy_host_data_backend") == 0) {
+        using copy_backend_fn_t = void (*)(ggml_backend_t, void *, void *);
+        static auto wrapper = [](ggml_backend_t backend, void * src_mask, void * dst_mask) {
+            ggml_backend_cuda_context * ctx = ggml_backend_cuda_get_context(backend);
+            if (ctx != nullptr) {
+                ggml_dl_flash_attn_ext_dldnn_copy_host_data(*ctx, src_mask, dst_mask);
             }
         };
         return reinterpret_cast<void *>(+wrapper);

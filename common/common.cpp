@@ -1307,43 +1307,51 @@ common_init_result_ptr common_init_from_params(common_params & params) {
         llama_set_warmup(lctx, false);
     }
     #ifdef GGML_USE_DLFA
-    if (getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_ENABLED) {
-        if (getenv("GGML_CUDA_GRAPHS_DISABLE_WARMUP") == nullptr) {
-            if (params.cuda_graph_capture_sizes.empty()) {
-                params.cuda_graph_capture_sizes = {1,64,128,192,256,320,384,448,512};
-            }
-            uint32_t n_ubatch = *std::max_element(params.cuda_graph_capture_sizes.begin(), params.cuda_graph_capture_sizes.end());
-            llama_set_u_nbatch(lctx, n_ubatch);
-            LOG_WRN("Reset n_ubatch to %d\n", n_ubatch);
-            llama_set_cuda_graph_capture_sizes(lctx, params.cuda_graph_capture_sizes.data(), params.cuda_graph_capture_sizes.size());
+    // GGML_CUDA_GRAPHS_DISABLE_WARMUP=1 disables the "Capturing cuda graphs" warmup logic
+    // This is useful for multi-GPU scenarios where the warmup can cause Device Page Fault errors
+    // Note: This only disables the warmup, not CUDA graphs themselves
+    const char * disable_warmup_env = getenv("GGML_CUDA_GRAPHS_DISABLE_WARMUP");
+    bool disable_cuda_graph_warmup = (disable_warmup_env != nullptr && strcmp(disable_warmup_env, "1") == 0);
+    // nowadays only support single GPU, force to not support CUDA graphs with warning when multi GPU
+    if (!disable_cuda_graph_warmup && params.split_mode != LLAMA_SPLIT_MODE_NONE) {
+        disable_cuda_graph_warmup = true;
+        LOG_WRN("common_init_from_params: CUDA graph warmup is not supported with multi-GPU split mode (split_mode = %d). "
+                "CUDA graphs will be disabled.\n", params.split_mode);
+    } else if (disable_cuda_graph_warmup) {
+        LOG_WRN("common_init_from_params: CUDA graph warmup disabled by GGML_CUDA_GRAPHS_DISABLE_WARMUP=1\n");
+    }
 
-            LOG_WRN("Capturing cuda graphs");
-            for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
-                int32_t size = params.cuda_graph_capture_sizes[i];
-                std::vector<llama_token> tmp(size, 0);
-                llama_token bos = llama_vocab_bos(vocab);
-
-                if (llama_model_has_encoder(model)) {
-                    llama_encode(lctx, llama_batch_get_one(tmp.data(), tmp.size()));
-                    llama_token decoder_start_token_id = llama_model_decoder_start_token(model);
-                    if (decoder_start_token_id == LLAMA_TOKEN_NULL) {
-                        decoder_start_token_id = bos;
-                    }
-                    tmp.clear();
-                    tmp.push_back(decoder_start_token_id);
-                }
-                if (llama_model_has_decoder(model)) {
-                    llama_decode(lctx, llama_batch_get_one(tmp.data(), std::min(tmp.size(), (size_t) params.n_batch)));
-                }
-                llama_memory_clear(llama_get_memory(lctx), true);
-                llama_synchronize(lctx);
-                llama_perf_context_reset(lctx);
-                LOG_WRN(".");
-            }
-            LOG_WRN("\n");
-        } else {
-            LOG_WRN("CUDA graphs configured but cuda graphs warmup is disabled\n");
+    if (getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && !disable_cuda_graph_warmup) {
+        if (params.cuda_graph_capture_sizes.empty()) {
+            params.cuda_graph_capture_sizes = {1,64,128,192,256,320,384,448,512};
         }
+        uint32_t n_ubatch = *std::max_element(params.cuda_graph_capture_sizes.begin(), params.cuda_graph_capture_sizes.end());
+        llama_set_u_nbatch(lctx, n_ubatch);
+        LOG_WRN("common_init_from_params: Reset n_ubatch to %d\n", n_ubatch);
+        llama_set_cuda_graph_capture_sizes(lctx, params.cuda_graph_capture_sizes.data(), params.cuda_graph_capture_sizes.size());
+        LOG_WRN("common_init_from_params: Capturing cuda graphs");
+        for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
+            int32_t size = params.cuda_graph_capture_sizes[i];
+            std::vector<llama_token> tmp(size, 0);
+            llama_token bos = llama_vocab_bos(vocab);
+            if (llama_model_has_encoder(model)) {
+                llama_encode(lctx, llama_batch_get_one(tmp.data(), tmp.size()));
+                llama_token decoder_start_token_id = llama_model_decoder_start_token(model);
+                if (decoder_start_token_id == LLAMA_TOKEN_NULL) {
+                    decoder_start_token_id = bos;
+                }
+                tmp.clear();
+                tmp.push_back(decoder_start_token_id);
+            }
+            if (llama_model_has_decoder(model)) {
+                llama_decode(lctx, llama_batch_get_one(tmp.data(), std::min(tmp.size(), (size_t) params.n_batch)));
+            }
+            llama_memory_clear(llama_get_memory(lctx), true);
+            llama_synchronize(lctx);
+            llama_perf_context_reset(lctx);
+            LOG_WRN(".");
+            }
+        LOG_WRN("\n");
     }
     #endif
 

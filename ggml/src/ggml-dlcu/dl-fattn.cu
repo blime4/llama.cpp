@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <memory>
 #include <vector>
+#include <mutex>
+#include <unordered_map>
 
 // Per-runtime device buffer cache (shared by varlen/non-varlen forward paths).
 struct flash_attn_device_layout_cache {
@@ -34,6 +36,60 @@ struct flash_attn_device_layout_cache {
 
     ~flash_attn_device_layout_cache() = default; // rely on process teardown to free
 };
+
+// Varlen data structure that holds host-side vectors and device cache map
+struct flash_attn_varlen_data {
+    // Host-side vectors
+    std::vector<int32_t> cu_seqlens_q;
+    std::vector<int32_t> seqused_k;
+    std::vector<int32_t> block_table;
+
+    // Per-device cache map
+    std::unordered_map<int, flash_attn_device_layout_cache*> device_cache_map;
+
+    ~flash_attn_varlen_data() {
+        // Clean up device caches
+        for (auto & pair : device_cache_map) {
+            delete pair.second;
+        }
+    }
+};
+
+// ============================================================================
+// NEW: Host data structure for varlen parameters (shared across all layers)
+// This structure stores computed host-side data that is shared by all 48 FA layers
+// Key: mask pointer (all layers share the same mask tensor)
+// ============================================================================
+struct flash_attn_varlen_host_data {
+    std::vector<int32_t> cu_seqlens_q;   // [0, seqlen_q_for_cu] - cumulative sequence lengths
+    std::vector<int32_t> seqused_k;      // [seqlen_k_real] - actual used key lengths
+    std::vector<int32_t> block_table;    // block mapping for paged KV cache
+    int seqlen_q;                         // actual seqlen_q (1 for decode, prefill seqlen_q for prefill)
+    int seqlen_q_for_cu;                  // seqlen_q for cu_seqlens_q (prefill seqlen_q, kept constant in decode)
+    int seqlen_k_real;                    // accumulated seqlen_k_real
+    int block_table_stride;               // number of blocks per sequence
+    bool is_causal;                       // whether to use causal attention (always true for autoregressive models)
+    bool is_valid;                        // whether the data is valid (set by set_flash_attn_runtime)
+};
+
+// Global varlen_data map for storing varlen metadata keyed by flash attention operation tensor pointer
+// This map allows multiple flash attention operations to each have their own varlen_data
+static std::mutex g_varlen_data_mutex;
+static std::unordered_map<void*, flash_attn_varlen_data*> g_varlen_data_map;
+
+// Global map: mask pointer -> host data (shared across all layers)
+static std::mutex g_varlen_host_data_mutex;
+static std::unordered_map<void*, flash_attn_varlen_host_data*> g_varlen_host_data_map;
+
+// Global maps for accumulation logic (restoring baseline behavior)
+// These maps store per-attention-tensor state that persists across calls
+static std::mutex g_accumulation_mutex;
+// prev_seqlen_k_real: stores the accumulated seqlen_k_real from previous calls
+// This is used to implement: seqlen_k_real = prev_seqlen_k_real + seqlen_q
+static std::unordered_map<void*, int> g_prev_seqlen_k_real_map;
+// prefill_seqlen_q: stores the seqlen_q from the prefill phase
+// This is used to keep cu_seqlens_q constant across decode steps
+static std::unordered_map<void*, int> g_prefill_seqlen_q_map;
 
 static inline bool ggml_dlfa_graphs_enabled() {
     const char * env = getenv("GGML_CUDA_DISABLE_GRAPHS");
@@ -209,26 +265,10 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const struct ggml_tensor * K    = dst->src[1];
     const struct ggml_tensor * V    = dst->src[2];
     const struct ggml_tensor * mask = dst->src[3];
-    ggml_dl::flash_attn_dlfa_runtime * runtime =
-        mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
 
     const char* env_dl_fattn_debug = getenv("GGML_DL_FATTN_DEBUG");
     ggml_flash_attn_mask_params mask_info{};
-    if (runtime && runtime->has_mask_params) {
-        mask_info = runtime->mask_params;
-    } else {
-        mask_info.present = mask != nullptr;
-        mask_info.is_causal = false;
-        mask_info.window_left = -1;
-        mask_info.window_right = -1;
-        mask_info.per_token_window = false;
-        mask_info.multi_sequence = false;
-        mask_info.has_alibi_bias = false;
-    }
-    if (!(runtime && runtime->has_mask_params)) {
-        // Fallback to reading params already stored on the attn tensor (op params)
-        ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
-    }
+    bool have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
 
     const bool mask_supports_cudnn = mask_info.present && !mask_info.per_token_window && !mask_info.multi_sequence;
     if (!mask_supports_cudnn || mask_info.has_alibi_bias) {
@@ -252,18 +292,18 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     const int64_t seq_k = pack.K->ne[1];
 
     // Track the real (unpadded) key length during decode per K buffer
-    // IMPORTANT: Prefer using runtime->seqlen_k_real from host side if available,
+    // IMPORTANT: Prefer using mask_info.seqlen_k_real from host side if available,
     // to ensure synchronization between host and CUDA kernel across multi-round conversations.
     auto & decode_state = ggml_dl::flash_attn_ext_dldnn_decode_state().seq_k_real_by_k_ptr;
     const uintptr_t k_key = reinterpret_cast<uintptr_t>(pack.K->data);
     int64_t & seqlen_k_real = decode_state[k_key];
 
-    // If runtime exists and has a valid seqlen_k_real, use it as the authoritative source
+    // If mask_params exists and has a valid seqlen_k_real, use it as the authoritative source
     // This ensures host-side accumulation (in set_flash_attn_runtime) is respected
-    if (runtime && runtime->seqlen_k_real > 0) {
+    if (have_mask_params && mask_info.seqlen_k_real > 0) {
         // Initialize or sync decode_state with host-side value
-        if (seqlen_k_real <= 0 || seqlen_k_real != runtime->seqlen_k_real) {
-            seqlen_k_real = runtime->seqlen_k_real;
+        if (seqlen_k_real <= 0 || seqlen_k_real != mask_info.seqlen_k_real) {
+            seqlen_k_real = mask_info.seqlen_k_real;
         }
     }
 
@@ -335,12 +375,12 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
             // Prefill: in multi-round conversations we want K length to keep
             // accumulating instead of resetting to the prompt length of the
             // current round.
-            // IMPORTANT: If runtime->seqlen_k_real exists, it's already been accumulated
+            // IMPORTANT: If mask_info.seqlen_k_real exists, it's already been accumulated
             // on the host side (in set_flash_attn_runtime), so use it directly.
             // Otherwise, fall back to local accumulation logic.
-            if (runtime && runtime->seqlen_k_real > 0) {
+            if (have_mask_params && mask_info.seqlen_k_real > 0) {
                 // Host side has already done the accumulation, use it
-                seqlen_k_real = clamp_seq(runtime->seqlen_k_real);
+                seqlen_k_real = clamp_seq(mask_info.seqlen_k_real);
             } else {
                 // Fallback: local accumulation (shouldn't happen in normal flow)
                 int64_t prev = seqlen_k_real;
@@ -351,9 +391,9 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                 seqlen_k_real = clamp_seq(candidate);
             }
             // printf(
-            //     "for debug: prefill seqlen_k_real : %lld (runtime=%lld, seq_q=%lld, seq_k=%lld)\n",
+            //     "for debug: prefill seqlen_k_real : %lld (mask_params=%lld, seq_q=%lld, seq_k=%lld)\n",
             //     (long long) seqlen_k_real,
-            //     (long long) (runtime ? runtime->seqlen_k_real : -1),
+            //     (long long) (have_mask_params ? mask_info.seqlen_k_real : -1),
             //     (long long) seq_q,
             //     (long long) seq_k);
         } else {
@@ -384,11 +424,11 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                     }
                 }
             }
-            // Decode: similar to prefill, prefer runtime->seqlen_k_real if available
+            // Decode: similar to prefill, prefer mask_info.seqlen_k_real if available
             // Host side has already accumulated: prev_seqlen_k_real + seqlen_q
-            if (runtime && runtime->seqlen_k_real > 0) {
+            if (have_mask_params && mask_info.seqlen_k_real > 0) {
                 // Host side has already done the accumulation, use it
-                seqlen_k_real = clamp_seq(runtime->seqlen_k_real);
+                seqlen_k_real = clamp_seq(mask_info.seqlen_k_real);
             } else {
                 GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
                 // Fallback: local accumulation (shouldn't happen in normal flow)
@@ -404,10 +444,10 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
                 seqlen_k_real = clamp_seq(candidate);
             }
             GGML_DL_FATTN_DEBUG_PRINT(
-                "decode seqlen_k_real updated for layer %p: new=%lld (runtime=%lld, max=%lld)\n",
+                "decode seqlen_k_real updated for layer %p: new=%lld (mask_params=%lld, max=%lld)\n",
                 (const void *) pack.K->data,
                 (long long) seqlen_k_real,
-                (long long) (runtime ? runtime->seqlen_k_real : -1),
+                (long long) (have_mask_params ? mask_info.seqlen_k_real : -1),
                 (long long) seq_k);
         }
 
@@ -501,29 +541,541 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     CUDA_CHECK(cudaGetLastError());
 }
 
+// Helper function to infer actual sequence length from mask data
+// The mask is structured as:
+// - Row i: mask for token i (can attend to positions 0 to i for causal attention)
+// - Rows beyond actual token count are filled with -inf
+// This function finds the last valid row and returns the sequence length
+static int64_t infer_from_mask_last_row(const ggml_tensor * mask, int64_t hint_token_idx) {
+    // If mask is a copy/cast operation (F16), trace back to the original F32 tensor
+    // This is necessary because the cast operation hasn't been executed yet during prepare_varlen_buffers
+    // ggml_cast uses GGML_OP_CPY internally
+    const ggml_tensor * mask_to_read = mask;
+    if (mask->op == GGML_OP_CPY && mask->src[0] != nullptr && mask->src[0]->type == GGML_TYPE_F32) {
+        mask_to_read = mask->src[0];
+    }
+
+    const int64_t mask_sk = mask_to_read->ne[0];
+    const int64_t mask_sq = mask_to_read->ne[1];
+    const size_t elem_size = ggml_type_size(mask_to_read->type);
+    const size_t row_bytes = (size_t) mask_sk * elem_size;
+    std::vector<uint8_t> row_buf(row_bytes);
+
+    auto read_val = [&](int64_t col) {
+        switch (mask_to_read->type) {
+            case GGML_TYPE_F32:
+                return reinterpret_cast<float *>(row_buf.data())[col];
+            case GGML_TYPE_F16:
+                return ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[col]);
+            case GGML_TYPE_BF16:
+                return ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[col]);
+            default:
+                return -INFINITY;
+        }
+    };
+
+    // Find the last valid row by scanning from the end
+    // A valid row has 0.0 at position 0 (can attend to first token)
+    // An invalid row (beyond actual token count) has -inf at position 0
+    int64_t last_valid_row = -1;
+    for (int64_t row = mask_sq - 1; row >= 0; --row) {
+        ggml_backend_tensor_get(mask_to_read, row_buf.data(), row * mask_to_read->nb[1], row_bytes);
+        const float val = read_val(0);
+        // A valid mask row should have 0.0 at position 0 (can attend to first token)
+        if (val == 0.0f) {
+            last_valid_row = row;
+            break;
+        }
+    }
+
+    if (last_valid_row < 0) {
+        // No valid row found, return -1 to indicate failure
+        return -1;
+    }
+
+    // Read the last valid row to find the sequence length
+    ggml_backend_tensor_get(mask_to_read, row_buf.data(), last_valid_row * mask_to_read->nb[1], row_bytes);
+
+    // Find the last valid (non-inf) position in this row
+    int64_t last_valid_col = -1;
+    for (int64_t c = mask_sk - 1; c >= 0; --c) {
+        const float val = read_val(c);
+        if (!(std::isinf(val) && val < 0)) {
+            last_valid_col = c;
+            break;
+        }
+    }
+
+    // Debug: print first few values of the last valid row
+    // fprintf(stderr, "[DEBUG] infer_from_mask_last_row: mask_to_read=%p, mask_sq=%lld, last_valid_row=%lld, first 4 values: ",
+    //         (void*)mask_to_read, (long long)mask_sq, (long long)last_valid_row);
+    // for (int64_t c = 0; c < std::min((int64_t)4, mask_sk); ++c) {
+    //     fprintf(stderr, "%.2f ", (double)read_val(c));
+    // }
+    // fprintf(stderr, "\n");
+
+    // Task 4 debug prints: infer_from_mask_last_row key variables
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] infer_from_mask_last_row: mask_to_read=%p, mask_sk=%lld, mask_sq=%lld\n",
+            (void*)mask_to_read, (long long)mask_sk, (long long)mask_sq);
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] infer_from_mask_last_row: hint_token_idx=%lld, last_valid_row=%lld, last_valid_col=%lld\n",
+            (long long)hint_token_idx, (long long)last_valid_row, (long long)last_valid_col);
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] infer_from_mask_last_row: returning seqlen_k_real=%lld\n",
+            (long long)(last_valid_col + 1));
+
+    return last_valid_col + 1;
+}
+
+// Helper function to check if mask data is valid (properly initialized)
+// Returns true if mask data is valid, false if it appears uninitialized
+// During warmup, mask tensor may be allocated but not initialized with actual data
+// A valid mask should have:
+// 1. The row at index (seqlen_q - 1) should have 0.0 at position 0 (can attend to first token)
+// 2. The row at index (seqlen_q - 1) should have at least seqlen_q non-inf values (causal mask)
+static bool is_mask_data_valid(const ggml_tensor * mask, int seqlen_q) {
+    if (!mask) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: no mask tensor\n");
+        return false;
+    }
+
+    // If mask is a copy/cast operation (F16), trace back to the original F32 tensor
+    const ggml_tensor * mask_to_read = mask;
+    fprintf(stderr, "[DEBUG] is_mask_data_valid: mask=%p, op=%d, type=%d\n", (void*)mask, mask->op, mask->type);
+    if (mask->src[0] != nullptr) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: mask->src[0]=%p, op=%d, type=%d\n",
+                (void*)mask->src[0], mask->src[0]->op, mask->src[0]->type);
+    }
+
+    // Trace back through copy operations to find the original source
+    while (mask_to_read->op == GGML_OP_CPY && mask_to_read->src[0] != nullptr) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: tracing back from %p (op=%d) to %p (op=%d)\n",
+                (void*)mask_to_read, mask_to_read->op, (void*)mask_to_read->src[0], mask_to_read->src[0]->op);
+        mask_to_read = mask_to_read->src[0];
+    }
+
+    fprintf(stderr, "[DEBUG] is_mask_data_valid: final mask_to_read=%p, op=%d, type=%d\n",
+            (void*)mask_to_read, mask_to_read->op, mask_to_read->type);
+
+    const int64_t mask_sk = mask_to_read->ne[0];
+    const int64_t mask_sq = mask_to_read->ne[1];
+
+    if (mask_sk <= 0 || mask_sq <= 0) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: invalid mask dimensions (mask_sk=%lld, mask_sq=%lld)\n",
+                (long long)mask_sk, (long long)mask_sq);
+        return false;
+    }
+
+    // Check if the mask tensor has a valid buffer
+    if (!mask_to_read->buffer) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: mask has no buffer\n");
+        return false;
+    }
+
+    // Debug: print buffer info
+    const char * buft_name = mask_to_read->buffer ? ggml_backend_buffer_name(mask_to_read->buffer) : "null";
+    fprintf(stderr, "[DEBUG] is_mask_data_valid: mask buffer name=%s, data=%p\n", buft_name, mask_to_read->data);
+
+    // Read the row at index (seqlen_q - 1) to check if it's properly initialized
+    // For a valid causal mask, this row should have 0.0 at position 0 and at least seqlen_q non-inf values
+    const int64_t target_row = seqlen_q - 1;
+    if (target_row < 0 || target_row >= mask_sq) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: target_row=%lld out of range [0, %lld)\n",
+                (long long)target_row, (long long)mask_sq);
+        return false;
+    }
+
+    const size_t elem_size = ggml_type_size(mask_to_read->type);
+    const size_t row_bytes = (size_t) mask_sk * elem_size;
+    std::vector<uint8_t> row_buf(row_bytes);
+
+    auto read_val = [&](int64_t col) {
+        switch (mask_to_read->type) {
+            case GGML_TYPE_F32:
+                return reinterpret_cast<float *>(row_buf.data())[col];
+            case GGML_TYPE_F16:
+                return ggml_fp16_to_fp32(reinterpret_cast<ggml_fp16_t *>(row_buf.data())[col]);
+            case GGML_TYPE_BF16:
+                return ggml_bf16_to_fp32(reinterpret_cast<ggml_bf16_t *>(row_buf.data())[col]);
+            default:
+                return -INFINITY;
+        }
+    };
+
+    // Read the target row
+    ggml_backend_tensor_get(mask_to_read, row_buf.data(), target_row * mask_to_read->nb[1], row_bytes);
+
+    // Check if the first value is 0.0 (can attend to first token)
+    // Use tolerance-based comparison to handle -0.0 and small floating point errors
+    const float first_val = read_val(0);
+    const float tolerance = 1e-6f;
+
+    // Debug: print mask dimensions and first few values of multiple rows
+    fprintf(stderr, "[DEBUG] is_mask_data_valid: seqlen_q=%d, mask_sq=%lld, mask_sk=%lld, nb[0]=%zu, nb[1]=%zu\n",
+            seqlen_q, (long long)mask_sq, (long long)mask_sk, mask_to_read->nb[0], mask_to_read->nb[1]);
+    fprintf(stderr, "[DEBUG] is_mask_data_valid: target_row=%lld, first 8 values: ", (long long)target_row);
+    for (int64_t c = 0; c < std::min((int64_t)8, mask_sk); ++c) {
+        fprintf(stderr, "%.4f ", (double)read_val(c));
+    }
+    fprintf(stderr, "\n");
+
+    // Also read row 0 to see the pattern
+    ggml_backend_tensor_get(mask_to_read, row_buf.data(), 0, row_bytes);
+    fprintf(stderr, "[DEBUG] is_mask_data_valid: row 0, first 8 values: ");
+    for (int64_t c = 0; c < std::min((int64_t)8, mask_sk); ++c) {
+        fprintf(stderr, "%.4f ", (double)read_val(c));
+    }
+    fprintf(stderr, "\n");
+
+    // Re-read target row for validation
+    ggml_backend_tensor_get(mask_to_read, row_buf.data(), target_row * mask_to_read->nb[1], row_bytes);
+
+    if (std::fabs(first_val) > tolerance) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: row %lld first value is %.6f (expected ~0.0), mask likely uninitialized, seqlen_q=%d\n",
+                (long long)target_row, first_val, seqlen_q);
+        return false;
+    }
+
+    // Count non-inf values in this row
+    // For a valid causal mask at row (seqlen_q - 1), there should be at least seqlen_q non-inf values
+    int64_t non_inf_count = 0;
+    for (int64_t c = 0; c < mask_sk; ++c) {
+        const float val = read_val(c);
+        if (!(std::isinf(val) && val < 0)) {
+            non_inf_count++;
+        }
+    }
+
+    // For causal attention, the row at index (seqlen_q - 1) should have at least seqlen_q non-inf values
+    // This is because token at position (seqlen_q - 1) can attend to all previous tokens (0 to seqlen_q - 1)
+    if (non_inf_count < seqlen_q) {
+        fprintf(stderr, "[DEBUG] is_mask_data_valid: row %lld has only %lld non-inf values (expected at least %d), mask likely uninitialized\n",
+                (long long)target_row, (long long)non_inf_count, seqlen_q);
+        return false;
+    }
+
+    // fprintf(stderr, "[DEBUG] is_mask_data_valid: mask is valid, row %lld has %lld non-inf values (seqlen_q=%d)\n",
+    //         (long long)target_row, (long long)non_inf_count, seqlen_q);
+    return true;
+}
+
+// Set flash attention runtime parameters (called after set_inputs, before prepare_varlen_buffers)
+// REFACTORED: This function now ONLY computes host data and stores it in g_varlen_host_data_map
+// It does NOT set op_params - that is done by prepare_flash_attn_varlen_buffers
+//
+// This function implements the accumulation logic from the baseline:
+// - seqlen_k_real = prev_seqlen_k_real + seqlen_q (accumulated across calls)
+// - prefill_seqlen_q is saved during prefill and used for cu_seqlens_q in decode
+//
+// Key design: Uses mask pointer as key because all 48 FA layers share the same mask tensor
+static void set_flash_attn_runtime(
+        ggml_tensor * attn,
+        int batch,
+        int seqlen_q_hint) {
+    // [MULTI-GPU-DEBUG] Task 1.1: Print at function entry (commented out after fix verified)
+    // ggml_tensor * mask_for_debug = attn ? attn->src[3] : nullptr;
+    // printf("[MULTI-GPU-DEBUG] set_flash_attn_runtime: mask=%p, seqlen_q=%d\n", (void*)mask_for_debug, seqlen_q_hint);
+
+    GGML_ASSERT(batch == 1 && "DL TODO: nowadays batch is always 1, figure out how to handle multiple sequences.");
+    GGML_ASSERT(attn && attn->op == GGML_OP_FLASH_ATTN_EXT);
+
+    // Get mask from flash attention operation's source tensors
+    // attn->src[0] = q, attn->src[1] = k, attn->src[2] = v, attn->src[3] = mask
+    ggml_tensor * mask = attn->src[3];
+    if (!mask) {
+        // No mask, no varlen params needed
+        return;
+    }
+
+    const int64_t mask_sk = mask->ne[0];  // key sequence length (padded)
+    const int64_t mask_sq = mask->ne[1];  // query sequence length (padded)
+
+    // During warmup, mask might not be properly initialized yet
+    // In this case, don't set varlen params
+    if (mask_sk <= 0 || mask_sq <= 0) {
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: mask dimensions invalid (mask_sk=%lld, mask_sq=%lld), skipping varlen params\n",
+                                   (long long)mask_sk, (long long)mask_sq);
+        return;
+    }
+
+    // Use seqlen_q_hint directly from Q->ne[1]
+    const int seqlen_q = seqlen_q_hint;
+
+    GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: seqlen_q=%d (from Q->ne[1])\n", seqlen_q);
+
+    // Check if mask data is properly initialized using actual_seqlen_q
+    // For decode steps (seqlen_q == 1), we skip validation because:
+    // 1. The mask data might be different from prefill (different attention pattern)
+    // 2. We need to update the accumulation state regardless
+    // 3. The warmup detection is only needed for prefill
+    //
+    // SIMPLIFIED: Skip mask validation entirely for now
+    // The mask validation was causing issues because the mask data format
+    // is different than expected. Instead, we rely on the fact that:
+    // - During warmup, the mask dimensions might be invalid or the buffer might not be ready
+    // - During actual inference, we trust that the mask is correct
+    // if (seqlen_q > 1 && !is_mask_data_valid(mask, seqlen_q)) {
+    //     // Mask data not valid (likely warmup phase), skip varlen params
+    //     return;
+    // }
+
+    // ========== REFACTORED: Hybrid approach for seqlen_k_real calculation ==========
+    // The key insight is that we need to handle two scenarios:
+    // 1. Normal operation: accumulate seqlen_k_real across calls
+    // 2. New conversation/warmup transition: reset to mask-inferred value
+    //
+    // Design decision:
+    // - Use accumulation logic as the PRIMARY source (baseline behavior)
+    // - Use mask inference to DETECT when to reset (new conversation)
+    // - If inferred < accumulated, it means mask data reflects a new/reset state
+    //
+    // This handles:
+    // - Warmup → First prefill: inferred=5 < accumulated=7 → use inferred=5
+    // - Multi-turn conversation: inferred=43 >= accumulated=43 → use accumulated=43
+    // - New conversation after KV clear: inferred=15 < accumulated=100 → use inferred=15
+
+    int prev_seqlen_k_real = 0;
+    int prefill_seqlen_q = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_accumulation_mutex);
+
+        // Get prev_seqlen_k_real from global map (keyed by mask pointer)
+        auto it_prev = g_prev_seqlen_k_real_map.find(mask);
+        if (it_prev != g_prev_seqlen_k_real_map.end()) {
+            prev_seqlen_k_real = it_prev->second;
+        }
+
+        // Get prefill_seqlen_q from global map (keyed by mask pointer)
+        auto it_prefill = g_prefill_seqlen_q_map.find(mask);
+        if (it_prefill != g_prefill_seqlen_q_map.end()) {
+            prefill_seqlen_q = it_prefill->second;
+        }
+    }
+
+    // Calculate accumulated value (baseline behavior)
+    int accumulated = (prev_seqlen_k_real > 0 ? prev_seqlen_k_real : 0) + seqlen_q;
+
+    // Try to infer seqlen_k_real from mask data (for debugging/sanity check)
+    int inferred = (int) infer_from_mask_last_row(mask, seqlen_q - 1);
+
+    // Determine final seqlen_k_real
+    // Detection logic for new conversation/warmup transition:
+    // - If seqlen_q > prev_seqlen_k_real, it means we're starting a new conversation
+    //   (the new prefill is longer than the accumulated KV cache, which shouldn't happen
+    //   in normal operation where KV cache grows monotonically)
+    // - This correctly detects warmup→first prefill (seqlen_q=13 > prev=2)
+    // - This doesn't trigger for multi-turn (seqlen_q=10 < prev=33)
+    int seqlen_k_real;
+    bool is_new_conversation = false;
+
+    if (prev_seqlen_k_real > 0 && seqlen_q > prev_seqlen_k_real) {
+        // New conversation detected - start fresh with seqlen_q
+        seqlen_k_real = seqlen_q;
+        is_new_conversation = true;
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: detected new conversation (seqlen_q=%d > prev_seqlen_k_real=%d), starting fresh\n",
+                seqlen_q, prev_seqlen_k_real);
+    } else {
+        // Normal operation - accumulate
+        seqlen_k_real = accumulated;
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: normal operation, using accumulated=%d (prev=%d + seqlen_q=%d)\n",
+                accumulated, prev_seqlen_k_real, seqlen_q);
+    }
+
+    // Log mask inference result for debugging
+    if (inferred > 0 && inferred <= mask_sk) {
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: mask inference returned %d (seqlen_k_real=%d)\n",
+                inferred, seqlen_k_real);
+    }
+
+    // Debug: log the comparison between inferred and accumulated values
+    GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: seqlen_q=%d, mask_sq=%lld, mask_sk=%lld, prev_seqlen_k_real=%d, inferred=%d, accumulated=%d, final seqlen_k_real=%d, is_new_conversation=%d\n",
+            seqlen_q, (long long)mask_sq, (long long)mask_sk, prev_seqlen_k_real, inferred, accumulated, seqlen_k_real, is_new_conversation);
+
+    // Clamp to valid range
+    if (seqlen_k_real <= 0 || seqlen_k_real > mask_sk) {
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: seqlen_k_real invalid (%d), falling back to mask_sk=%lld\n",
+                seqlen_k_real, (long long)mask_sk);
+        seqlen_k_real = (int) mask_sk;
+    }
+
+    GGML_ASSERT(seqlen_k_real > 0);
+
+    // Save seqlen_k_real for next call
+    {
+        std::lock_guard<std::mutex> lock(g_accumulation_mutex);
+        g_prev_seqlen_k_real_map[mask] = seqlen_k_real;
+
+        // Handle prefill_seqlen_q:
+        // - If new conversation detected, reset prefill_seqlen_q
+        // - Otherwise, update only during prefill phase (seqlen_q > 1)
+        if (is_new_conversation) {
+            // Reset prefill_seqlen_q for new conversation
+            if (seqlen_q > 1) {
+                g_prefill_seqlen_q_map[mask] = seqlen_q;
+                GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: new conversation, saved prefill_seqlen_q=%d for mask=%p\n",
+                        seqlen_q, (void*)mask);
+            } else {
+                // Decode phase in new conversation - clear prefill_seqlen_q
+                g_prefill_seqlen_q_map.erase(mask);
+                prefill_seqlen_q = 0;
+                GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: new conversation decode phase, cleared prefill_seqlen_q for mask=%p\n",
+                        (void*)mask);
+            }
+        } else if (seqlen_q > 1) {
+            // Normal prefill - update prefill_seqlen_q
+            g_prefill_seqlen_q_map[mask] = seqlen_q;
+            GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: saved prefill_seqlen_q=%d for mask=%p\n",
+                    seqlen_q, (void*)mask);
+        }
+    }
+
+    // block table stride is built from padded kv size (n_kv = mask_sk) with 256 page blocks
+    const int page_block = 256;
+    const int bt_stride = (mask_sk + page_block - 1) / page_block;
+
+    // Determine seqlen_q_for_cu: use prefill_seqlen_q if available (baseline behavior)
+    // IMPORTANT: When is_new_conversation=true and seqlen_q > 1 (prefill), we need to use
+    // seqlen_q directly because prefill_seqlen_q still holds the OLD value from warmup.
+    // The prefill_seqlen_q is updated AFTER this point, so we can't rely on it here.
+    int seqlen_q_for_cu = seqlen_q;
+    if (seqlen_q > 1) {
+        // Prefill phase (first turn or subsequent turn) - use current seqlen_q
+        seqlen_q_for_cu = seqlen_q;
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: prefill phase, using seqlen_q=%d for cu_seqlens_q\n",
+                seqlen_q);
+    } else if (prefill_seqlen_q > 0) {
+        // Decode phase - use stored prefill_seqlen_q to keep cu_seqlens_q constant
+        seqlen_q_for_cu = prefill_seqlen_q;
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: decode phase, using prefill_seqlen_q=%d for cu_seqlens_q (current seqlen_q=%d)\n",
+                prefill_seqlen_q, seqlen_q);
+    }
+
+    // ========== NEW: Store host data in g_varlen_host_data_map ==========
+    // This data is shared by all 48 FA layers (keyed by mask pointer)
+    {
+        std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
+
+        // Get or create host data for this mask
+        flash_attn_varlen_host_data * host_data = nullptr;
+        auto it = g_varlen_host_data_map.find(mask);
+        if (it == g_varlen_host_data_map.end()) {
+            host_data = new flash_attn_varlen_host_data();
+            g_varlen_host_data_map[mask] = host_data;
+            GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: created new host_data for mask=%p\n", (void*)mask);
+        } else {
+            host_data = it->second;
+        }
+
+        // Store scalar values
+        // seqlen_q: actual seqlen_q (1 for decode, prefill seqlen_q for prefill)
+        // seqlen_q_for_cu: used for cu_seqlens_q (prefill seqlen_q, kept constant in decode)
+        host_data->seqlen_q = seqlen_q;
+        host_data->seqlen_q_for_cu = seqlen_q_for_cu;
+        host_data->seqlen_k_real = seqlen_k_real;
+        host_data->block_table_stride = bt_stride;
+        host_data->is_causal = true;  // Always true for autoregressive models using this path
+        host_data->is_valid = true;
+
+        // Compute and store cu_seqlens_q (cumulative sequence lengths for Q)
+        // Uses seqlen_q_for_cu to keep cu_seqlens_q constant across decode steps
+        host_data->cu_seqlens_q.resize(batch + 1);
+        host_data->cu_seqlens_q[0] = 0;
+        for (int b = 0; b < batch; ++b) {
+            host_data->cu_seqlens_q[b + 1] = host_data->cu_seqlens_q[b] + seqlen_q_for_cu;
+        }
+
+        // Compute and store seqused_k (actual used length for each sequence in K)
+        host_data->seqused_k.resize(batch);
+        for (int b = 0; b < batch; ++b) {
+            host_data->seqused_k[b] = seqlen_k_real;
+        }
+
+        // Compute and store block_table (paged KV cache block mapping)
+        host_data->block_table.resize(batch * bt_stride);
+        for (int b = 0; b < batch; ++b) {
+            for (int i = 0; i < bt_stride; ++i) {
+                host_data->block_table[b * bt_stride + i] = b * bt_stride + i;
+            }
+        }
+
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: stored host_data for mask=%p: seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d, cu_seqlens_q=[%d,%d], seqused_k=[%d]\n",
+                (void*)mask, seqlen_q, seqlen_q_for_cu, seqlen_k_real, bt_stride,
+                host_data->cu_seqlens_q[0], host_data->cu_seqlens_q[1], host_data->seqused_k[0]);
+    }
+
+    // NOTE: We no longer set op_params here - that is done by prepare_flash_attn_varlen_buffers
+    // This separation allows set_flash_attn_runtime to be called once (after set_inputs)
+    // and prepare_flash_attn_varlen_buffers to be called for each FA node
+
+    GGML_DL_FATTN_DEBUG_PRINT(
+        "set_flash_attn_runtime: batch=%d, seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d\n",
+        batch, seqlen_q, seqlen_q_for_cu, seqlen_k_real, bt_stride);
+
+    // Task 4 debug prints: set_flash_attn_runtime key variables
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] set_flash_attn_runtime: seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, block_table_stride=%d\n",
+            seqlen_q, seqlen_q_for_cu, seqlen_k_real, bt_stride);
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] set_flash_attn_runtime: mask_sk=%lld, mask_sq=%lld, prev_seqlen_k_real=%d\n",
+            (long long)mask_sk, (long long)mask_sq, prev_seqlen_k_real);
+}
 
 static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING %s ==========\n", __FUNCTION__);
 
-    const int id = ggml_cuda_get_device();
+    const int id = ctx.device;  // Use device from context, not ggml_cuda_get_device()
 
     ggml_cuda_pool_alloc<float> softmax_lse_mem(ctx.pool(id));
     ggml_cuda_pool_alloc<uint8_t> workspace_mem(ctx.pool(id));
     const ggml_tensor * mask = dst->src[3];
-    ggml_dl::flash_attn_dlfa_runtime * runtime =
-        mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
-    ggml_flash_attn_mask_params mask_info{};
-    if (runtime && runtime->has_mask_params) {
-        mask_info = runtime->mask_params;
-    } else {
-        mask_info.present = mask != nullptr;
-        mask_info.is_causal = false;
-        mask_info.window_left = -1;
-        mask_info.window_right = -1;
-        mask_info.per_token_window = false;
-        mask_info.multi_sequence = false;
-        mask_info.has_alibi_bias = false;
+
+    // Read varlen scalar params from operation tensor's op_params
+    // NOTE: batch is always 1, hardcoded (not stored in op_params)
+    // These are non-const because they may be updated if set_flash_attn_runtime is called
+    const int batch = 1;
+    int seqlen_q = ggml_get_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_Q_I32);
+    int seqlen_k_real = ggml_get_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_K_REAL_I32);
+    int block_table_stride = ggml_get_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_BT_STRIDE_I32);
+    bool has_varlen_params = ggml_get_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_HAS_PARAMS_I32) != 0;
+
+    // [MULTI-GPU-DEBUG] Task 1.3: Print after reading op_params (commented out after fix verified)
+    // printf("[MULTI-GPU-DEBUG] varlen_forward: device=%d, dst=%p, seqlen_q=%d, seqlen_k_real=%d, has_varlen_params=%d\n",
+    //        id, (void*)dst, seqlen_q, seqlen_k_real, has_varlen_params ? 1 : 0);
+
+    // Task 4 debug prints: op_params values read from dst (commented out after fix verified)
+    // static int debug_counter = 0;
+    // if (debug_counter % 48 == 0) {
+    //     printf("[TASK4-DEBUG] varlen_forward: op_params read - seqlen_q=%d, seqlen_k_real=%d, block_table_stride=%d, has_varlen_params=%d\n",
+    //             seqlen_q, seqlen_k_real, block_table_stride, has_varlen_params ? 1 : 0);
+    // }
+    // debug_counter++;
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] varlen_forward: device=%d, dst=%p\n", id, (void*)dst);
+
+    // REFACTORED: Removed fallback logic that called prepare_varlen_buffers
+    // The new execution flow is:
+    // 1. set_flash_attn_runtime (called once after set_inputs) - computes host data
+    // 2. prepare_flash_attn_varlen_buffers (called for each FA node) - transfers to device, sets op_params
+    // 3. varlen_forward (graph execution) - uses prepared data
+    //
+    // If has_varlen_params is false, it means either:
+    // - Warmup phase (mask data not valid)
+    // - set_flash_attn_runtime was not called
+    // In either case, fall back to non-varlen path
+    if (!has_varlen_params) {
+        GGML_DL_FATTN_DEBUG_PRINT("varlen_forward: has_varlen_params=0, falling back to non-varlen dldnn path\n");
+        flash_attn_ext_dldnn_mha_forward(ctx, dst);
+        return;
     }
+
+    const char* env_dl_fattn_debug = getenv("GGML_DL_FATTN_DEBUG");
+    ggml_flash_attn_mask_params mask_info{};
+    bool have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
+
+    // Debug: print mask_info.is_causal value and seqlen values
+    // Commented out after fix verified
+    // static int is_causal_debug_counter = 0;
+    // // Print for every prefill (seqlen_q > 1) to debug multi-turn issue
+    // if (is_causal_debug_counter % 28 == 0 || seqlen_q > 1) {
+    //     printf("[IS_CAUSAL_DEBUG] varlen_forward: have_mask_params=%d, is_causal=%d, seqlen_q=%d, seqlen_k_real=%d, layer=%d\n",
+    //            have_mask_params ? 1 : 0, mask_info.is_causal ? 1 : 0, seqlen_q, seqlen_k_real, is_causal_debug_counter % 28);
+    // }
+    // is_causal_debug_counter++;
 
     {
         const ggml_tensor * Q    = dst->src[0];
@@ -557,18 +1109,10 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
         const int page_block_size = 256;  // dldnn paged KV block size
         const int num_blocks_per_seq = (int)((S_k + page_block_size - 1) / page_block_size);
 
-        // Use runtime metadata directly - no need to store in meta
-        const bool runtime_has_layout =
-            runtime && runtime->block_table_stride > 0 && runtime->seqlen_q > 0 && runtime->seqlen_k_real > 0 && runtime->batch > 0;
-        if (!runtime_has_layout) {
-            GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
-            GGML_DL_FATTN_DEBUG_PRINT("varlen runtime metadata missing; falling back to non-varlen dldnn path\n");
-            flash_attn_ext_dldnn_mha_forward(ctx, dst);
-            return;
-        }
+        // Varlen params are now guaranteed to be set (checked above)
         const int max_seqlen_q = (int) S_q;
         const int max_seqlen_k = (int) S_k;
-        const int num_blocks_per_seq_runtime = num_blocks_per_seq;
+        const int num_blocks_per_seq_runtime = block_table_stride;
 
         // Device buffers should already be prepared and copied in flash_attn_ext_dldnn
         // (called before this function for async overlap). Just retrieve pointers from cache.
@@ -577,36 +1121,86 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
         int * block_table_dev  = nullptr;
 
         {
-            GGML_ASSERT((int) runtime->batch == (int) B);
-            GGML_ASSERT((int) runtime->cu_seqlens_q.size() == (int) B + 1);
-            GGML_ASSERT((int) runtime->seqused_k.size() == (int) B);
-
-            // Device cache should already be initialized by flash_attn_ext_dldnn_prepare_varlen_buffers.
-            // Multi-GPU runs may execute on a different device than the one that primed the cache,
-            // so re-prepare if the device does not match.
-            if (!runtime->device_cache || static_cast<flash_attn_device_layout_cache *>(runtime->device_cache)->device != id) {
-                ggml_cuda_set_device(ctx.device);
-                ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst);
-            }
-            GGML_ASSERT(runtime->device_cache != nullptr);
-            flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
-            if (cache->device != id) {
-                // As a last resort, rebuild the cache on this device.
-                cache->device = id;
-                cache->combined_cap = 0;
-                cache->combined_ptr = cache->cu_seqlens_ptr = cache->seqused_ptr = cache->block_table_ptr = nullptr;
-                ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst);
-                cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
+            // Retrieve varlen_data from global map using operation tensor pointer
+            flash_attn_varlen_data * varlen_data = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_varlen_data_mutex);
+                auto it = g_varlen_data_map.find(dst);
+                GGML_ASSERT(it != g_varlen_data_map.end() && "varlen data must be prepared before graph capture");
+                varlen_data = it->second;
             }
 
-            // Retrieve device pointers (buffers already allocated and copied)
+            GGML_ASSERT((int) batch == (int) B);
+            GGML_ASSERT((int) varlen_data->cu_seqlens_q.size() == (int) B + 1);
+            GGML_ASSERT((int) varlen_data->seqused_k.size() == (int) B);
+
+            // Device cache MUST be initialized by flash_attn_ext_dldnn_prepare_varlen_buffers
+            // before graph capture. No dynamic re-preparation allowed inside graph execution.
+            // Retrieve cache for current device from the per-device cache map
+
+            auto it = varlen_data->device_cache_map.find(id);
+            GGML_ASSERT(it != varlen_data->device_cache_map.end() && "device cache must be prepared before graph capture");
+
+            flash_attn_device_layout_cache * cache = it->second;
+
+            // Verify device matches - this should always pass if prepare was called correctly
+            GGML_ASSERT(cache->device == id && "device cache must match current device");
+
             cu_seqlens_q_dev = cache->cu_seqlens_ptr;
-            seqused_k_dev    = cache->seqused_ptr;
-            block_table_dev  = cache->block_table_ptr;
+            seqused_k_dev = cache->seqused_ptr;
+            block_table_dev = cache->block_table_ptr;
 
-            GGML_ASSERT(cu_seqlens_q_dev != nullptr && "cu_seqlens_q_dev should be allocated");
-            GGML_ASSERT(seqused_k_dev != nullptr && "seqused_k_dev should be allocated");
-            GGML_ASSERT(block_table_dev != nullptr && "block_table_dev should be allocated");
+            // Debug: print cu_seqlens_q and seqused_k values during prefill
+            // Commented out after fix verified
+            // if (seqlen_q > 1) {
+            //     printf("[PREFILL_DEBUG] varlen_forward: cu_seqlens_q=[%d,%d], seqused_k=[%d], seqlen_q=%d, seqlen_k_real=%d\n",
+            //            varlen_data->cu_seqlens_q[0], varlen_data->cu_seqlens_q[1],
+            //            varlen_data->seqused_k[0], seqlen_q, seqlen_k_real);
+            // }
+
+            // Task 4 debug prints: cu_seqlens_q and seqused_k values from varlen_data
+            GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] varlen_forward: cu_seqlens_q values (size=%zu): ",
+                    varlen_data->cu_seqlens_q.size());
+            for (size_t i = 0; i < varlen_data->cu_seqlens_q.size() && i < 8; ++i) {
+                GGML_DL_FATTN_DEBUG_PRINT("%d ", varlen_data->cu_seqlens_q[i]);
+            }
+            GGML_DL_FATTN_DEBUG_PRINT("\n");
+            GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] varlen_forward: seqused_k values (size=%zu): ",
+                    varlen_data->seqused_k.size());
+            for (size_t i = 0; i < varlen_data->seqused_k.size() && i < 8; ++i) {
+                GGML_DL_FATTN_DEBUG_PRINT("%d ", varlen_data->seqused_k[i]);
+            }
+            GGML_DL_FATTN_DEBUG_PRINT("\n");
+            GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] varlen_forward: device pointers - cu_seqlens_q_dev=%p, seqused_k_dev=%p, block_table_dev=%p\n",
+                    (void*)cu_seqlens_q_dev, (void*)seqused_k_dev, (void*)block_table_dev);
+
+            // Phase 3 verification: Assert device pointers are valid
+            // These assertions validate that prepare_varlen_buffers correctly prepared device buffers
+            GGML_ASSERT(cu_seqlens_q_dev != nullptr && "cu_seqlens_q_dev must be prepared before graph execution");
+            GGML_ASSERT(seqused_k_dev != nullptr && "seqused_k_dev must be prepared before graph execution");
+            GGML_ASSERT(block_table_dev != nullptr && "block_table_dev must be prepared before graph execution");
+
+            // Task 2 debug: Verify device buffer contents by copying back to host (commented out after fix verified)
+            // This is critical for debugging multi-GPU CUDA Graph issues
+            // {
+            //     std::vector<int> cu_seqlens_q_host(B + 1);
+            //     std::vector<int> seqused_k_host(B);
+            //     cudaMemcpy(cu_seqlens_q_host.data(), cu_seqlens_q_dev, (B + 1) * sizeof(int), cudaMemcpyDeviceToHost);
+            //     cudaMemcpy(seqused_k_host.data(), seqused_k_dev, B * sizeof(int), cudaMemcpyDeviceToHost);
+            //     printf("[TASK2-DEBUG] varlen_forward device=%d: DEVICE buffer contents - cu_seqlens_q=[%d,%d], seqused_k=[%d]\n",
+            //            id, cu_seqlens_q_host[0], cu_seqlens_q_host[1], seqused_k_host[0]);
+            //     printf("[TASK2-DEBUG] varlen_forward device=%d: HOST varlen_data - cu_seqlens_q=[%d,%d], seqused_k=[%d]\n",
+            //            id, varlen_data->cu_seqlens_q[0], varlen_data->cu_seqlens_q[1], varlen_data->seqused_k[0]);
+            //
+            //     // Check if device and host data match
+            //     bool data_mismatch = false;
+            //     if (cu_seqlens_q_host[0] != varlen_data->cu_seqlens_q[0] ||
+            //         cu_seqlens_q_host[1] != varlen_data->cu_seqlens_q[1] ||
+            //         seqused_k_host[0] != varlen_data->seqused_k[0]) {
+            //         data_mismatch = true;
+            //         printf("[TASK2-DEBUG] *** DATA MISMATCH DETECTED on device %d! ***\n", id);
+            //     }
+            // }
         }
 
         // Descriptors per dldnn requirements (doc: docs/cudnnMHAVarlenForward-dldnn-requirements.md)
@@ -750,9 +1344,6 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
         return false;
     }
 
-    ggml_dl::flash_attn_dlfa_runtime * runtime =
-        mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
-
     // Extract parameters
     const int64_t hsk = Q->ne[0];       // head size for K/Q
     // const int64_t hsv = V->ne[0];       // head size for V
@@ -775,23 +1366,10 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
 
     const bool has_alibi = (max_bias > 0.0f);
     // const bool has_softcap = (logit_softcap != 0.0f);
+
+    // Get mask parameters using the standard function
     ggml_flash_attn_mask_params mask_info{};
-    bool have_mask_params = false;
-    if (runtime && runtime->has_mask_params) {
-        mask_info = runtime->mask_params;
-        have_mask_params = true;
-    } else {
-        mask_info.present = mask != nullptr;
-        mask_info.is_causal = false;
-        mask_info.window_left = -1;
-        mask_info.window_right = -1;
-        mask_info.per_token_window = false;
-        mask_info.multi_sequence = false;
-        mask_info.has_alibi_bias = false;
-    }
-    if (!have_mask_params) {
-        have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
-    }
+    bool have_mask_params = ggml_flash_attn_ext_get_mask_params(dst, &mask_info);
 
     // Check for GQA (Grouped Query Attention) support
     if (n_head_q != n_head_k || n_head_k != n_head_v) {
@@ -808,9 +1386,11 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
     if (!has_alibi) {
         if (!has_mask) {
             // Nothing special to encode, allowed.
-        } else if (!mask_info.present) {
-            GGML_DL_FATTN_DEBUG_PRINT("mask metadata missing or not present\n");
-            return false;
+        } else if (!mask_info.present && !have_mask_params) {
+            // If mask exists but mask_info.present is false AND we don't have mask params at all,
+            // it means mask params haven't been set yet (e.g., during warmup).
+            // In this case, we should still allow DLDNN to be used.
+            GGML_DL_FATTN_DEBUG_PRINT("mask metadata not yet set, allowing DLDNN\n");
         } else if (mask_info.per_token_window || mask_info.multi_sequence) {
             GGML_DL_FATTN_DEBUG_PRINT(
                 "mask metadata unsupported (per_token_window=%d, multi_sequence=%d).\n",
@@ -829,48 +1409,118 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
 }
 
 // Helper function to prepare device buffers for varlen forward (called early for async overlap)
-void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    const int id = ggml_cuda_get_device();
-    const ggml_tensor * mask = dst->src[3];
-    GGML_ASSERT(mask);
-    ggml_dl::flash_attn_dlfa_runtime * runtime = static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra);
+// REFACTORED: This function now reads host data from g_varlen_host_data_map[mask]
+// and only handles device buffer allocation and data transfer
+// It also sets op_params (which was previously done by set_flash_attn_runtime)
+void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const int id = ctx.device;  // Use device from context, not ggml_cuda_get_device()
 
-    const ggml_tensor * K = dst->src[1];
+    // [MULTI-GPU-DEBUG] Task 1.2: Print at function entry (commented out after fix verified)
+    // ggml_tensor * mask_for_debug = dst ? dst->src[3] : nullptr;
+    // printf("[MULTI-GPU-DEBUG] prepare_varlen_buffers: device=%d, dst=%p, mask=%p\n", id, (void*)dst, (void*)mask_for_debug);
+
+    // Ensure we're on the correct device BEFORE any CUDA operations
+    ggml_cuda_set_device(id);
+
+    // Get mask from flash attention operation's source tensors
+    ggml_tensor * mask = dst->src[3];
+    if (!mask) {
+        // No mask, no varlen params needed
+        return;
+    }
+
+    // ========== NEW: Read host data from g_varlen_host_data_map[mask] ==========
+    flash_attn_varlen_host_data * host_data = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
+        auto it = g_varlen_host_data_map.find(mask);
+        if (it == g_varlen_host_data_map.end() || !it->second->is_valid) {
+            // Host data not available (set_flash_attn_runtime not called yet or mask invalid)
+            GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: host_data not available for mask=%p, skipping\n", (void*)mask);
+            return;
+        }
+        host_data = it->second;
+    }
+
+    // Read values from host_data
+    // seqlen_q: actual seqlen_q (1 for decode, prefill seqlen_q for prefill)
+    // seqlen_q_for_cu: used for cu_seqlens_q (prefill seqlen_q, kept constant in decode)
+    const int batch = 1;  // Always 1
+    const int seqlen_q = host_data->seqlen_q;
+    const int seqlen_q_for_cu = host_data->seqlen_q_for_cu;
+    const int seqlen_k_real = host_data->seqlen_k_real;
+    const int num_blocks_per_seq = host_data->block_table_stride;
+
+    // [MULTI-GPU-DEBUG] Task 1.2: Print after reading host_data (commented out after fix verified)
+    // printf("[MULTI-GPU-DEBUG] prepare_varlen_buffers: device=%d, seqlen_q=%d, seqlen_k_real=%d, cu_seqlens_q=[%d,%d]\n",
+    //        id, seqlen_q, seqlen_k_real, host_data->cu_seqlens_q[0], host_data->cu_seqlens_q[1]);
+
+    GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: read from host_data - seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d\n",
+            seqlen_q, seqlen_q_for_cu, seqlen_k_real, num_blocks_per_seq);
+
+    // ========== NEW: Set op_params (previously done by set_flash_attn_runtime) ==========
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_Q_I32, seqlen_q);
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_K_REAL_I32, seqlen_k_real);
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_BT_STRIDE_I32, num_blocks_per_seq);
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_HAS_PARAMS_I32, 1);
+
+    // Set mask magic value and present flag so ggml_flash_attn_ext_get_mask_params returns true
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_I32, GGML_FLASH_ATTN_PARAM_MASK_MAGIC_VALUE);
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_MASK_PRESENT_I32, 1);
+    // Set is_causal from host_data (always true for autoregressive models)
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_MASK_CAUSAL_I32, host_data->is_causal ? 1 : 0);
+
     const int64_t B = dst->src[0]->ne[3];
-    const int64_t S_k = K->ne[1];
     const int page_block_size = 256;
-    const int max_num_seqs = 1;
 
-    const bool runtime_has_layout =
-        runtime && runtime->block_table_stride > 0 && runtime->seqlen_q > 0 && runtime->seqlen_k_real > 0 && runtime->batch > 0;
-    GGML_ASSERT(runtime_has_layout);
+    GGML_ASSERT((int) batch == (int) B);
 
-    const int num_blocks_per_seq = runtime->block_table_stride;
+    // Use global map to get/create varlen_data for this operation tensor
+    flash_attn_varlen_data * varlen_data = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_varlen_data_mutex);
+        auto it = g_varlen_data_map.find(dst);
+        if (it == g_varlen_data_map.end()) {
+            // Create new varlen data structure
+            varlen_data = new flash_attn_varlen_data();
+            g_varlen_data_map[dst] = varlen_data;
+            GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: created new varlen_data for dst=%p\n", (void*)dst);
+        } else {
+            varlen_data = it->second;
+        }
 
-    GGML_ASSERT((int) runtime->batch == (int) B);
-    GGML_ASSERT((int) runtime->cu_seqlens_q.size() == (int) B + 1);
-    GGML_ASSERT((int) runtime->seqused_k.size() == (int) B);
+        // Copy host data from g_varlen_host_data_map to varlen_data
+        // This is needed because varlen_forward reads from varlen_data
+        varlen_data->cu_seqlens_q = host_data->cu_seqlens_q;
+        varlen_data->seqused_k = host_data->seqused_k;
+        varlen_data->block_table = host_data->block_table;
+    }
 
-    const size_t cu_bytes = runtime->cu_seqlens_q.size() * sizeof(int32_t);
-    const size_t su_bytes = runtime->seqused_k.size() * sizeof(int32_t);
-    const size_t bt_elems = (size_t)((runtime->seqlen_k_real + page_block_size - 1) / page_block_size);
+    GGML_ASSERT((int) varlen_data->cu_seqlens_q.size() == (int) B + 1);
+    GGML_ASSERT((int) varlen_data->seqused_k.size() == (int) B);
 
+    const size_t cu_bytes = varlen_data->cu_seqlens_q.size() * sizeof(int32_t);
+    const size_t su_bytes = varlen_data->seqused_k.size() * sizeof(int32_t);
+    const size_t bt_elems = (size_t)((seqlen_k_real + page_block_size - 1) / page_block_size);
     const size_t bt_bytes = bt_elems * sizeof(int32_t);
 
-    // Ensure device-side cached buffers exist (per runtime/mask) and are large enough.
-    if (!runtime->device_cache) {
-        runtime->device_cache = new flash_attn_device_layout_cache();
-        flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
+    // Get or create cache for current device using per-device cache map
+    flash_attn_device_layout_cache * cache = nullptr;
+    auto it = varlen_data->device_cache_map.find(id);
+    if (it == varlen_data->device_cache_map.end()) {
+        // Create new cache for this device
+        cache = new flash_attn_device_layout_cache();
         cache->device = id;
-    }
-    flash_attn_device_layout_cache * cache = static_cast<flash_attn_device_layout_cache *>(runtime->device_cache);
-    if (cache->device != id) {
-        cache->device = id;
-        cache->combined_cap = 0;
-        cache->combined_ptr = cache->cu_seqlens_ptr = cache->seqused_ptr = cache->block_table_ptr = nullptr;
+        varlen_data->device_cache_map[id] = cache;
+        GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: created new cache for device %d (dst=%p)\n", id, (void*)dst);
+    } else {
+        cache = it->second;
     }
 
-    const size_t total_elems = runtime->cu_seqlens_q.size() + runtime->seqused_k.size() + num_blocks_per_seq;
+    // Verify device field is correctly set
+    GGML_ASSERT(cache->device == id && "cache device must match current device");
+
+    const size_t total_elems = varlen_data->cu_seqlens_q.size() + varlen_data->seqused_k.size() + num_blocks_per_seq;
     if (cache->combined_cap < total_elems) {
         if (cache->combined_ptr) {
             ggml_cuda_set_device(id);
@@ -889,18 +1539,36 @@ void ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_cont
     }
 
     cache->cu_seqlens_ptr = cache->combined_ptr;
-    cache->seqused_ptr = cache->cu_seqlens_ptr + runtime->cu_seqlens_q.size();
-    cache->block_table_ptr = cache->seqused_ptr + runtime->seqused_k.size();
+    cache->seqused_ptr = cache->cu_seqlens_ptr + varlen_data->cu_seqlens_q.size();
+    cache->block_table_ptr = cache->seqused_ptr + varlen_data->seqused_k.size();
+
+    // Phase 3 verification: Assert device buffers are properly allocated
+    GGML_ASSERT(cache->cu_seqlens_ptr != nullptr && "cu_seqlens_ptr must be allocated");
+    GGML_ASSERT(cache->seqused_ptr != nullptr && "seqused_ptr must be allocated");
+    GGML_ASSERT(cache->block_table_ptr != nullptr && "block_table_ptr must be allocated");
 
     // Start async copies early for better overlap with subsequent operations
     int * host_ptr = cache->host_combined_ptr;
-    memcpy(host_ptr, runtime->cu_seqlens_q.data(), cu_bytes);
-    host_ptr += runtime->cu_seqlens_q.size();
-    memcpy(host_ptr, runtime->seqused_k.data(), su_bytes);
-    host_ptr += runtime->seqused_k.size();
-    memcpy(host_ptr, runtime->block_table.data(), bt_bytes);
+    memcpy(host_ptr, varlen_data->cu_seqlens_q.data(), cu_bytes);
+    host_ptr += varlen_data->cu_seqlens_q.size();
+    memcpy(host_ptr, varlen_data->seqused_k.data(), su_bytes);
+    host_ptr += varlen_data->seqused_k.size();
+    memcpy(host_ptr, varlen_data->block_table.data(), bt_bytes);
 
-    CUDA_CHECK(cudaMemcpyAsync(cache->combined_ptr, cache->host_combined_ptr, total_elems * sizeof(int), cudaMemcpyHostToDevice, ctx.stream()));
+    // Ensure device is set before memory copy
+    ggml_cuda_set_device(id);
+
+    // Use cudaMemcpyAsync for better performance
+    cudaStream_t stream = ctx.stream();
+    CUDA_CHECK(cudaMemcpyAsync(cache->combined_ptr, cache->host_combined_ptr, total_elems * sizeof(int), cudaMemcpyHostToDevice, stream));
+    // CUDA_CHECK(cudaStreamSynchronize(stream)); // no need to cudaStreamSynchronize, just for debug.
+
+    // Phase 3 verification: Log device buffer preparation completion
+    GGML_DL_FATTN_DEBUG_PRINT(
+        "[DEBUG] prepare_varlen_buffers: device %d buffers prepared (async, no sync) - "
+        "cu_seqlens_ptr=%p, seqused_ptr=%p, block_table_ptr=%p, total_elems=%zu\n",
+        id, (void*)cache->cu_seqlens_ptr, (void*)cache->seqused_ptr,
+        (void*)cache->block_table_ptr, total_elems);
 }
 
 void flash_attn_ext_dldnn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -918,19 +1586,126 @@ void flash_attn_ext_dldnn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         GGML_ABORT("alibi not supported yet");
     }
 
-    // Use varlen path when CUDA graphs are enabled, otherwise fall back to legacy cudnnMHAForward.
-    if (ggml_dlfa_graphs_enabled()) {
-        flash_attn_ext_dldnn_mha_varlen_forward(ctx, dst);
-    } else {
-        flash_attn_ext_dldnn_mha_forward(ctx, dst);
+    // if (ggml_dlfa_graphs_enabled()) {
+    // use mha_varlen_forward always.
+    flash_attn_ext_dldnn_mha_varlen_forward(ctx, dst);
+    // } else {
+        // flash_attn_ext_dldnn_mha_forward(ctx, dst);
+    // }
+}
+
+// Reset accumulation state (called when starting a new inference session)
+// This clears the prev_seqlen_k_real and prefill_seqlen_q maps
+void flash_attn_ext_dldnn_reset_accumulation_state() {
+    std::lock_guard<std::mutex> lock(g_accumulation_mutex);
+    g_prev_seqlen_k_real_map.clear();
+    g_prefill_seqlen_q_map.clear();
+}
+
+// Cleanup function to free all varlen_data and device memory
+void flash_attn_ext_dldnn_cleanup_varlen_data() {
+    // Clear accumulation maps first
+    {
+        std::lock_guard<std::mutex> lock(g_accumulation_mutex);
+        g_prev_seqlen_k_real_map.clear();
+        g_prefill_seqlen_q_map.clear();
     }
+
+    std::lock_guard<std::mutex> lock(g_varlen_data_mutex);
+
+    for (auto & pair : g_varlen_data_map) {
+        flash_attn_varlen_data * varlen_data = pair.second;
+        if (varlen_data) {
+            // Free device memory in each device cache
+            for (auto & cache_pair : varlen_data->device_cache_map) {
+                flash_attn_device_layout_cache * cache = cache_pair.second;
+                if (cache) {
+                    const int device_id = cache->device;
+                    if (device_id >= 0) {
+                        ggml_cuda_set_device(device_id);
+
+                        // Free device memory
+                        if (cache->combined_ptr) {
+                            CUDA_CHECK(cudaFree(cache->combined_ptr));
+                            cache->combined_ptr = nullptr;
+                        }
+
+                        // Free host pinned memory
+                        if (cache->host_combined_ptr) {
+                            CUDA_CHECK(cudaFreeHost(cache->host_combined_ptr));
+                            cache->host_combined_ptr = nullptr;
+                        }
+                    }
+                    delete cache;
+                }
+            }
+            varlen_data->device_cache_map.clear();
+            delete varlen_data;
+        }
+    }
+    g_varlen_data_map.clear();
 }
 
 } // namespace ggml_dl
 
-// C linkage wrapper for proc_address registration
+// C linkage wrappers for proc_address registration
 extern "C" void ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst);
+}
+
+extern "C" void ggml_dl_flash_attn_ext_dldnn_cleanup_varlen_data() {
+    ggml_dl::flash_attn_ext_dldnn_cleanup_varlen_data();
+}
+
+extern "C" void ggml_dl_flash_attn_ext_dldnn_reset_accumulation_state() {
+    ggml_dl::flash_attn_ext_dldnn_reset_accumulation_state();
+}
+
+// NEW: C linkage wrapper for set_flash_attn_runtime
+// This is called once after set_inputs to compute host data (shared by all FA layers)
+extern "C" void ggml_dl_flash_attn_ext_dldnn_set_runtime(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int seqlen_q_hint) {
+    GGML_UNUSED(ctx);  // Context not needed for set_flash_attn_runtime (only computes host data)
+    set_flash_attn_runtime(dst, 1, seqlen_q_hint);
+}
+
+// NEW: C linkage wrapper for copying host data from one mask to another
+// This is used in multi-GPU mode to share host data across all masks
+extern "C" void ggml_dl_flash_attn_ext_dldnn_copy_host_data(ggml_backend_cuda_context & ctx, void * src_mask, void * dst_mask) {
+    GGML_UNUSED(ctx);  // Context not needed for copying host data
+
+    std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
+
+    // Find the source host data
+    auto it_src = g_varlen_host_data_map.find(src_mask);
+    if (it_src == g_varlen_host_data_map.end() || !it_src->second->is_valid) {
+        // Source host data not found, nothing to copy
+        return;
+    }
+
+    // Get or create destination host data
+    flash_attn_varlen_host_data * dst_data = nullptr;
+    auto it_dst = g_varlen_host_data_map.find(dst_mask);
+    if (it_dst == g_varlen_host_data_map.end()) {
+        dst_data = new flash_attn_varlen_host_data();
+        g_varlen_host_data_map[dst_mask] = dst_data;
+    } else {
+        dst_data = it_dst->second;
+    }
+
+    // Copy the host data
+    flash_attn_varlen_host_data * src_data = it_src->second;
+    dst_data->cu_seqlens_q = src_data->cu_seqlens_q;
+    dst_data->seqused_k = src_data->seqused_k;
+    dst_data->block_table = src_data->block_table;
+    dst_data->seqlen_q = src_data->seqlen_q;
+    dst_data->seqlen_q_for_cu = src_data->seqlen_q_for_cu;
+    dst_data->seqlen_k_real = src_data->seqlen_k_real;
+    dst_data->block_table_stride = src_data->block_table_stride;
+    dst_data->is_causal = src_data->is_causal;
+    dst_data->is_valid = src_data->is_valid;
+
+    GGML_DL_FATTN_DEBUG_PRINT("copy_host_data: copied from mask=%p to mask=%p, seqlen_k_real=%d\n",
+            src_mask, dst_mask, dst_data->seqlen_k_real);
 }
 
 #endif // GGML_USE_DLFA

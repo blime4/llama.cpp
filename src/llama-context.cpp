@@ -12,6 +12,7 @@
 #include "ggml-dlfa.h"
 #include "ggml-cuda.h"
 #include "ggml-backend.h"
+#include "../ggml/src/ggml-impl.h"  // For ggml_get_op_params_i32
 #endif
 
 #include <cinttypes>
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <set>
 
 #ifdef GGML_USE_DLCU
 //
@@ -859,17 +861,34 @@ bool llama_context::apply_adapter_cvec(
 }
 
 #ifdef GGML_USE_DLFA
-// Prepare varlen buffers for flash attention tensors in the graph.
-// Must run after set_inputs so that mask->extra (runtime metadata) is ready,
-// but before graph_compute to keep CUDA graph capture stable.
-static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+// Propagate runtime metadata from original mask to all copied masks.
+// NEW: Call set_flash_attn_runtime for each unique mask pointer
+// This must be called after set_inputs (when mask data is available) and before prepare_flash_attn_varlen_buffers
+static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph * gf, int n_tokens) {
     const int n_nodes = ggml_graph_n_nodes(gf);
 
-    // We only ever need to prepare once per graph. As soon as we successfully
-    // call into the backend helper, we can return.
+    // Track which mask pointers we've already processed
+    std::set<void*> processed_masks;
+
+    // Store the first mask pointer to copy host data from
+    void * first_mask = nullptr;
+
+    // Find all FLASH_ATTN_EXT nodes and call set_flash_attn_runtime for each unique mask
+    // In multi-GPU mode, each GPU may have its own copy of the mask tensor
     for (int i = 0; i < n_nodes; ++i) {
         ggml_tensor * node = ggml_graph_node(gf, i);
         if (node == nullptr || node->op != GGML_OP_FLASH_ATTN_EXT) {
+            continue;
+        }
+
+        // Get the mask pointer
+        ggml_tensor * mask = node->src[3];
+        if (mask == nullptr) {
+            continue;
+        }
+
+        // Skip if we've already processed this mask
+        if (processed_masks.find(mask) != processed_masks.end()) {
             continue;
         }
 
@@ -894,15 +913,114 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
             continue;
         }
 
-        // Varlen metadata lives in mask->extra
-        ggml_tensor * mask = node->src[3];
-        auto * runtime = mask ? static_cast<ggml_dl::flash_attn_dlfa_runtime *>(mask->extra) : nullptr;
-        if (runtime == nullptr || runtime->block_table_stride == 0 || runtime->batch == 0) {
+        ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+        if (dev == nullptr) {
             continue;
         }
 
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg == nullptr) {
+            continue;
+        }
+
+        // Call set_flash_attn_runtime_backend to compute host data
+        auto * set_runtime_fn = ggml_backend_reg_get_proc_address(
+            reg, "flash_attn_ext_dldnn_set_runtime_backend");
+        if (set_runtime_fn == nullptr) {
+            continue;
+        }
+
+        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int);
+        auto fn = reinterpret_cast<set_runtime_backend_fn_t>(set_runtime_fn);
+
+        // For the first mask, call set_flash_attn_runtime normally
+        // For subsequent masks, we need to copy the host data from the first mask
+        if (first_mask == nullptr) {
+            // First mask - call set_flash_attn_runtime to compute host data
+            fn(backend, node, n_tokens);
+            first_mask = mask;
+        } else {
+            // Subsequent masks - call set_flash_attn_runtime, but it will use the
+            // accumulation state from the first mask (since we're using the same seqlen_q_hint)
+            // However, the accumulation state is keyed by mask pointer, so we need to
+            // copy the host data from the first mask to this mask
+
+            // First, call set_flash_attn_runtime to create the host data entry
+            fn(backend, node, n_tokens);
+
+            // Then, copy the host data from the first mask to this mask
+            // This is done by the copy_varlen_host_data function in dl-fattn.cu
+            auto * copy_fn = ggml_backend_reg_get_proc_address(
+                reg, "flash_attn_ext_dldnn_copy_host_data_backend");
+            if (copy_fn != nullptr) {
+                using copy_backend_fn_t = void (*)(ggml_backend_t, void *, void *);
+                auto copy = reinterpret_cast<copy_backend_fn_t>(copy_fn);
+                copy(backend, first_mask, mask);
+            }
+        }
+
+        // Mark this mask as processed
+        processed_masks.insert(mask);
+    }
+}
+
+// Prepare varlen buffers for flash attention tensors in the graph.
+// Must run after set_flash_attn_runtime_once (which computes host data)
+// and before graph_compute to keep CUDA graph capture stable.
+static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+    const int n_nodes = ggml_graph_n_nodes(gf);
+
+    // Track which (node, backend) pairs we've already prepared to avoid redundant calls
+    std::set<std::pair<void*, ggml_backend_t>> prepared_pairs;
+
+    // In multi-GPU scenarios, different layers may execute on different GPUs.
+    // All layers share the same varlen params in op_params, but we need to prepare cache
+    // for each GPU that will execute flash attention.
+    int flash_attn_node_count = 0;
+    // fprintf(stderr, "[DEBUG] prepare_flash_attn_varlen_buffers: scanning %d nodes\n", n_nodes);
+
+    for (int i = 0; i < n_nodes; ++i) {
+        ggml_tensor * node = ggml_graph_node(gf, i);
+        if (node == nullptr || node->op != GGML_OP_FLASH_ATTN_EXT) {
+            continue;
+        }
+
+        flash_attn_node_count++;
+
+        // Backend and buffer must be CUDA
+        ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched, node);
+        if (backend == nullptr) {
+            continue;
+        }
+
+        ggml_backend_buffer_t buf = node->buffer;
+        if (buf == nullptr) {
+            continue;
+        }
+
+        ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(buf);
+        if (buft == nullptr) {
+            continue;
+        }
+
+        const char * buft_name = ggml_backend_buft_name(buft);
+        if (buft_name == nullptr || strstr(buft_name, "CUDA") == nullptr) {
+            continue;
+        }
+
+        // REFACTORED: Removed has_varlen_params check
+        // prepare_flash_attn_varlen_buffers now reads from g_varlen_host_data_map
+        // and sets op_params itself. If host_data is not available (e.g., warmup),
+        // it will skip the node.
+
         ggml_backend_dev_t dev = ggml_backend_get_device(backend);
         if (dev == nullptr) {
+            continue;
+        }
+
+        // Skip if we've already prepared this (node, backend) pair
+        auto pair = std::make_pair((void*)node, backend);
+        if (prepared_pairs.find(pair) != prepared_pairs.end()) {
             continue;
         }
 
@@ -919,10 +1037,11 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
 
         using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *);
         auto fn = reinterpret_cast<prepare_backend_fn_t>(prepare_fn);
+
         fn(backend, node);
 
-        // All layers share the same varlen layout; prepare once per graph.
-        return;
+        // Mark this (node, backend) pair as prepared
+        prepared_pairs.insert(pair);
     }
 }
 #endif
@@ -998,7 +1117,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
 #ifdef GGML_USE_DLFA
-    // Prepare varlen buffers for flash attention after set_inputs and before graph_compute
+    // REFACTORED: New execution flow for flash attention varlen parameters
+    // 1. set_flash_attn_runtime_once: Compute host data (called once, shared by all FA layers)
+    // 2. prepare_flash_attn_varlen_buffers: Transfer to device, set op_params (called for each FA node)
+    // 3. graph_compute: Execute (varlen_forward uses prepared data)
+
+    // Step 1: Compute host data (only needs to be called once since all FA layers share the same mask)
+    set_flash_attn_runtime_once(sched.get(), gf, ubatch.n_tokens);
+
+    // Step 2: Prepare varlen buffers for flash attention
     // This enables async overlap of cudaMemcpyAsync with subsequent graph_compute operations
     prepare_flash_attn_varlen_buffers(sched.get(), gf);
 #endif

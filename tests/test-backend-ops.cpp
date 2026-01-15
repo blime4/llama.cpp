@@ -6451,7 +6451,13 @@ struct test_flash_attn_ext : public test_case {
         ggml_flash_attn_ext_set_prec (out, prec);
         ggml_set_name(out, "out");
         if (mask) {
-            ggml_dl::store_mask_metadata(out, info);
+            // Store mask_params in mask->extra
+            ggml_tensor * mask_tensor = out->src[3];
+            if (mask_tensor && mask_tensor->extra == nullptr) {
+                auto * stored_params = new ggml_flash_attn_mask_params();
+                *stored_params = info;
+                mask_tensor->extra = stored_params;
+            }
         }
 
         return out;
