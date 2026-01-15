@@ -6359,6 +6359,9 @@ struct test_flash_attn_ext : public test_case {
     const ggml_type type_KV;
     std::array<int32_t, 4> permute;
 
+    // Store the flash attention operation tensor for runtime setup
+    ggml_tensor * flash_attn_op = nullptr;
+
     std::string vars() override {
         return VARS_TO_STR13(hsk, hsv, nh, nr23, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV, permute);
     }
@@ -6435,7 +6438,14 @@ struct test_flash_attn_ext : public test_case {
                 info.multi_sequence = false;
                 info.has_alibi_bias = false;
             } else {
-                info.present = false;
+                // Fix: Properly initialize mask params for non-causal tests
+                info.present = true;
+                info.is_causal = false;  // Non-causal attention
+                info.window_left = -1;
+                info.window_right = 0;
+                info.per_token_window = false;
+                info.multi_sequence = false;
+                info.has_alibi_bias = false;
             }
 #endif
         }
@@ -6450,6 +6460,10 @@ struct test_flash_attn_ext : public test_case {
         ggml_flash_attn_ext_add_sinks(out, s);
         ggml_flash_attn_ext_set_prec (out, prec);
         ggml_set_name(out, "out");
+
+        // Store the flash attention operation tensor for runtime setup
+        flash_attn_op = out;
+
         if (mask) {
             // Store mask_params in mask->extra
             ggml_tensor * mask_tensor = out->src[3];
@@ -6517,6 +6531,11 @@ struct test_flash_attn_ext : public test_case {
                 }
             }
         }
+
+        // NOTE: We intentionally do NOT call set_flash_attn_runtime and prepare_varlen_buffers here.
+        // The varlen path uses paged KV cache layout which is incompatible with test tensors.
+        // Tests should use the non-varlen path (cudnnMHAForward) which uses standard GGML tensor layout.
+        // The non-varlen path will infer is_causal from mask data when mask_params are not set.
 #endif
     }
 
@@ -6526,6 +6545,127 @@ struct test_flash_attn_ext : public test_case {
     }
 
   private:
+    // Helper function to call set_flash_attn_runtime via backend API
+    void call_set_flash_attn_runtime(ggml_context * ctx, ggml_tensor * attn) {
+        // Get the backend for the flash attention operation
+        // Note: At this point, tensors are allocated but backend assignment happens later
+        // We need to find a CUDA backend to call the function
+
+        // Find a CUDA backend from available backends
+        ggml_backend_t cuda_backend = nullptr;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (dev == nullptr) continue;
+
+            const char * dev_name = ggml_backend_dev_name(dev);
+            if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                // Found a CUDA device, initialize backend
+                cuda_backend = ggml_backend_dev_init(dev, nullptr);
+                if (cuda_backend) {
+                    break;
+                }
+            }
+        }
+
+        if (cuda_backend == nullptr) {
+            // No CUDA backend available, skip runtime setup
+            return;
+        }
+
+        // Get the backend registry
+        ggml_backend_dev_t dev = ggml_backend_get_device(cuda_backend);
+        if (dev == nullptr) {
+            ggml_backend_free(cuda_backend);
+            return;
+        }
+
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg == nullptr) {
+            ggml_backend_free(cuda_backend);
+            return;
+        }
+
+        // Get the set_runtime function
+        auto * set_runtime_fn = ggml_backend_reg_get_proc_address(
+            reg, "flash_attn_ext_dldnn_set_runtime_backend");
+        if (set_runtime_fn == nullptr) {
+            ggml_backend_free(cuda_backend);
+            return;
+        }
+
+        // Call set_flash_attn_runtime
+        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int);
+        auto fn = reinterpret_cast<set_runtime_backend_fn_t>(set_runtime_fn);
+
+        // Parameters:
+        // - backend: CUDA backend
+        // - attn: Flash attention operation tensor
+        // - seqlen_q_hint: nb (query sequence length)
+        fn(cuda_backend, attn, (int)nb);
+
+        // Clean up: Don't free the backend yet, it might be needed later
+        // Actually, we should keep it alive for the test execution
+        // For now, we'll leak it (tests are short-lived anyway)
+        // TODO: Proper cleanup
+    }
+
+    // Helper function to call prepare_flash_attn_varlen_buffers via backend API
+    void call_prepare_flash_attn_varlen_buffers(ggml_context * ctx, ggml_tensor * attn) {
+        // Find a CUDA backend from available backends
+        ggml_backend_t cuda_backend = nullptr;
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (dev == nullptr) continue;
+
+            const char * dev_name = ggml_backend_dev_name(dev);
+            if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+                // Found a CUDA device, initialize backend
+                cuda_backend = ggml_backend_dev_init(dev, nullptr);
+                if (cuda_backend) {
+                    break;
+                }
+            }
+        }
+
+        if (cuda_backend == nullptr) {
+            // No CUDA backend available, skip
+            return;
+        }
+
+        // Get the backend registry
+        ggml_backend_dev_t dev = ggml_backend_get_device(cuda_backend);
+        if (dev == nullptr) {
+            ggml_backend_free(cuda_backend);
+            return;
+        }
+
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+        if (reg == nullptr) {
+            ggml_backend_free(cuda_backend);
+            return;
+        }
+
+        // Get the prepare function
+        auto * prepare_fn = ggml_backend_reg_get_proc_address(
+            reg, "flash_attn_ext_dldnn_prepare_varlen_buffers_backend");
+        if (prepare_fn == nullptr) {
+            ggml_backend_free(cuda_backend);
+            return;
+        }
+
+        // Call prepare_flash_attn_varlen_buffers
+        using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *);
+        auto fn = reinterpret_cast<prepare_backend_fn_t>(prepare_fn);
+
+        // Parameters:
+        // - backend: CUDA backend
+        // - attn: Flash attention operation tensor
+        fn(cuda_backend, attn);
+
+        // Clean up: Don't free the backend yet
+        // TODO: Proper cleanup
+    }
+
     static void write_causal_mask_tensor(ggml_tensor * t) {
         if (t == nullptr) {
             return;

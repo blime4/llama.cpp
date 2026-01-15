@@ -249,6 +249,9 @@ struct dldnn_mha_qkvo_pack {
 };
 
 
+// Forward declaration
+static bool infer_is_causal_from_mask_data(ggml_tensor * mask);
+
 // MHA Forward implementation using cudnnMHAForward (non-varlen)
 static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_DL_FATTN_DEBUG_PRINT("\n========== ENTERING %s ==========\n", __FUNCTION__);
@@ -274,6 +277,26 @@ static void flash_attn_ext_dldnn_mha_forward(ggml_backend_cuda_context & ctx, gg
     if (!mask_supports_cudnn || mask_info.has_alibi_bias) {
         if (!mask_info.present) {
             GGML_DL_FATTN_DEBUG_PRINT("INFO: mask metadata not present\n");
+            // When mask metadata is not present, infer is_causal from mask data
+            if (mask != nullptr) {
+                mask_info.is_causal = infer_is_causal_from_mask_data(const_cast<ggml_tensor*>(mask));
+                GGML_DL_FATTN_DEBUG_PRINT("INFO: inferred is_causal=%d from mask data\n", mask_info.is_causal);
+                // Set window parameters for causal attention
+                // window_left=-1 means no limit on left (can see all past tokens)
+                // window_right=0 means cannot see future tokens
+                if (mask_info.is_causal) {
+                    mask_info.window_left = -1;
+                    mask_info.window_right = 0;
+                }
+            } else {
+                // No mask tensor means non-causal (full attention)
+                mask_info.is_causal = false;
+                // For non-causal attention, both window_left and window_right should be -1
+                // This allows each query token to attend to all key tokens
+                mask_info.window_left = -1;
+                mask_info.window_right = -1;
+                GGML_DL_FATTN_DEBUG_PRINT("INFO: no mask tensor, setting is_causal=false, window_left=-1, window_right=-1\n");
+            }
         } else if (mask_info.per_token_window || mask_info.multi_sequence) {
             GGML_DL_FATTN_DEBUG_PRINT(
                 "INFO: mask_metadata has unsupported configuration (per_token_window=%d, multi_sequence=%d)\n",
@@ -757,6 +780,90 @@ static bool is_mask_data_valid(const ggml_tensor * mask, int seqlen_q) {
     return true;
 }
 
+// Helper function to read is_causal from mask params
+// Returns true (causal) by default if mask or mask->extra is null
+// Infer is_causal from mask data by checking if the mask is a causal mask
+// A causal mask has -inf for positions where j > i (future positions)
+static bool infer_is_causal_from_mask_data(ggml_tensor * mask) {
+    if (mask == nullptr || mask->type != GGML_TYPE_F16) {
+        GGML_DL_FATTN_DEBUG_PRINT("infer_is_causal_from_mask_data: mask is null or not F16, defaulting to causal\n");
+        return true;  // Default to causal if we can't read mask data
+    }
+
+    // Read a few samples from the mask to determine if it's causal
+    // For a causal mask, mask[i][j] should be -inf when j > i
+    const int64_t sk = mask->ne[0];  // key sequence length
+    const int64_t sq = mask->ne[1];  // query sequence length (padded)
+
+    if (sk <= 0 || sq <= 0) {
+        GGML_DL_FATTN_DEBUG_PRINT("infer_is_causal_from_mask_data: invalid dimensions sk=%lld sq=%lld, defaulting to causal\n",
+                (long long)sk, (long long)sq);
+        return true;  // Invalid dimensions, default to causal
+    }
+
+    // Sample a few positions to check
+    // For a causal mask: mask[0][1] should be -inf (position 1 is future for position 0)
+    // For a non-causal mask: mask[0][1] should be 0 or finite
+
+    // Check if we need to sample at all - if sk <= 1 or sq <= 1, we can't determine causality
+    if (sk <= 1 || sq <= 1) {
+        GGML_DL_FATTN_DEBUG_PRINT("infer_is_causal_from_mask_data: sk=%lld or sq=%lld <= 1, defaulting to non-causal\n",
+                (long long)sk, (long long)sq);
+        return false;  // Can't determine, assume non-causal
+    }
+
+    // Read mask data from GPU to CPU
+    // Allocate buffer for a small sample of mask data
+    const size_t sample_size = std::min<size_t>(16, sk * sq);  // Sample up to 16 elements
+    std::vector<ggml_fp16_t> mask_sample(sample_size);
+
+    // Read first few elements: mask[0][0], mask[0][1], mask[1][0], mask[1][1], etc.
+    // Mask layout: [sk, sq, 1, nr23[1]] where sk is innermost dimension
+    const size_t bytes_to_read = sample_size * sizeof(ggml_fp16_t);
+    ggml_backend_tensor_get(mask, mask_sample.data(), 0, bytes_to_read);
+
+    // Check if mask[0][1] is -inf (causal) or finite (non-causal)
+    // mask[0][1] is at index: 1 * sk + 0 = sk (since sk is innermost)
+    // Wait, the layout is [sk, sq, ...], so mask[iq][ik] is at index: ik + iq * sk
+    // So mask[0][1] (iq=0, ik=1) is at index 1
+
+    if (sample_size > 1) {
+        const float val_0_1 = ggml_fp16_to_fp32(mask_sample[1]);  // mask[iq=0][ik=1]
+        const bool is_causal = std::isinf(val_0_1) && val_0_1 < 0;  // -inf means causal
+
+        GGML_DL_FATTN_DEBUG_PRINT("infer_is_causal_from_mask_data: sk=%lld sq=%lld, mask[0][1]=%.2f, is_causal=%d\n",
+                (long long)sk, (long long)sq, val_0_1, is_causal);
+
+        return is_causal;
+    }
+
+    GGML_DL_FATTN_DEBUG_PRINT("infer_is_causal_from_mask_data: sample_size=%zu too small, defaulting to non-causal\n",
+            sample_size);
+    return false;  // Can't determine, assume non-causal
+}
+
+// For non-causal attention (no mask tensor), returns false
+static bool get_is_causal_from_mask(ggml_tensor * mask, bool has_mask) {
+    if (!has_mask) {
+        // No mask tensor means non-causal attention
+        return false;
+    }
+    if (mask == nullptr || mask->extra == nullptr) {
+        return true;  // Default to causal for conversation mode
+    }
+    auto * params = static_cast<ggml_flash_attn_mask_params*>(mask->extra);
+
+    // Check if params are properly initialized
+    // When params->present is false, the mask params are not properly set up
+    // In this case, we need to infer is_causal from the mask data
+    if (!params->present) {
+        // Mask params not properly initialized - infer from mask data
+        return infer_is_causal_from_mask_data(mask);
+    }
+
+    return params->is_causal;
+}
+
 // Set flash attention runtime parameters (called after set_inputs, before prepare_varlen_buffers)
 // REFACTORED: This function now ONLY computes host data and stores it in g_varlen_host_data_map
 // It does NOT set op_params - that is done by prepare_flash_attn_varlen_buffers
@@ -770,23 +877,30 @@ static void set_flash_attn_runtime(
         ggml_tensor * attn,
         int batch,
         int seqlen_q_hint) {
-    // [MULTI-GPU-DEBUG] Task 1.1: Print at function entry (commented out after fix verified)
-    // ggml_tensor * mask_for_debug = attn ? attn->src[3] : nullptr;
-    // printf("[MULTI-GPU-DEBUG] set_flash_attn_runtime: mask=%p, seqlen_q=%d\n", (void*)mask_for_debug, seqlen_q_hint);
-
     GGML_ASSERT(batch == 1 && "DL TODO: nowadays batch is always 1, figure out how to handle multiple sequences.");
     GGML_ASSERT(attn && attn->op == GGML_OP_FLASH_ATTN_EXT);
 
     // Get mask from flash attention operation's source tensors
     // attn->src[0] = q, attn->src[1] = k, attn->src[2] = v, attn->src[3] = mask
     ggml_tensor * mask = attn->src[3];
-    if (!mask) {
-        // No mask, no varlen params needed
-        return;
+    ggml_tensor * k = attn->src[1];
+
+    // For non-causal attention (no mask), we still need to set up varlen params
+    // but with is_causal=false. We'll use the attn tensor itself as the key for
+    // storing host data, and infer dimensions from K tensor.
+    bool has_mask = (mask != nullptr);
+    if (!has_mask) {
+        // Use attn tensor as the key for non-causal attention
+        mask = attn;
     }
 
-    const int64_t mask_sk = mask->ne[0];  // key sequence length (padded)
-    const int64_t mask_sq = mask->ne[1];  // query sequence length (padded)
+    // Get KV sequence length from mask (if present) or K tensor (if no mask)
+    const int64_t mask_sk = has_mask ? mask->ne[0] : k->ne[1];  // key sequence length
+    const int64_t mask_sq = has_mask ? mask->ne[1] : k->ne[1];  // query sequence length (same as key for non-causal)
+
+    // [TEST-DEBUG] Task 1 & 2: Print at function entry to understand test behavior
+    // printf("[TEST-DEBUG] set_flash_attn_runtime: mask=%p, has_mask=%d, seqlen_q=%d, mask_sk=%lld, mask_sq=%lld\n",
+    //        (void*)mask, has_mask, seqlen_q_hint, (long long)mask_sk, (long long)mask_sq);
 
     // During warmup, mask might not be properly initialized yet
     // In this case, don't set varlen params
@@ -850,32 +964,47 @@ static void set_flash_attn_runtime(
         }
     }
 
-    // Calculate accumulated value (baseline behavior)
+    // Calculate accumulated value (baseline behavior for conversations)
     int accumulated = (prev_seqlen_k_real > 0 ? prev_seqlen_k_real : 0) + seqlen_q;
 
     // Try to infer seqlen_k_real from mask data (for debugging/sanity check)
     int inferred = (int) infer_from_mask_last_row(mask, seqlen_q - 1);
 
     // Determine final seqlen_k_real
-    // Detection logic for new conversation/warmup transition:
-    // - If seqlen_q > prev_seqlen_k_real, it means we're starting a new conversation
-    //   (the new prefill is longer than the accumulated KV cache, which shouldn't happen
-    //   in normal operation where KV cache grows monotonically)
-    // - This correctly detects warmup→first prefill (seqlen_q=13 > prev=2)
-    // - This doesn't trigger for multi-turn (seqlen_q=10 < prev=33)
+    // Key insight: We need to distinguish between two scenarios:
+    // 1. test-backend-ops: Each test has unique mask pointer → prev_seqlen_k_real=0
+    //    → Tests don't call set_flash_attn_runtime, they use non-varlen path
+    //    → If we get here with prev_seqlen_k_real=0, it's a conversation first prefill
+    // 2. Conversations: Mask pointer is reused → prev_seqlen_k_real>0
+    //    → seqlen_k_real should accumulate
+    //
+    // Detection logic:
+    // - If prev_seqlen_k_real == 0: First prefill in conversation
+    //   → Use seqlen_q (the prompt length)
+    // - If prev_seqlen_k_real > 0 && seqlen_q > prev_seqlen_k_real: New conversation
+    //   → Reset to seqlen_q (warmup→first prefill transition)
+    // - Otherwise: Normal conversation accumulation
+    //   → Use accumulated value
     int seqlen_k_real;
     bool is_new_conversation = false;
 
-    if (prev_seqlen_k_real > 0 && seqlen_q > prev_seqlen_k_real) {
+    if (prev_seqlen_k_real == 0) {
+        // First prefill in conversation - use seqlen_q (the prompt length)
+        // Note: Tests don't call set_flash_attn_runtime, they use non-varlen path
+        // So if we get here with prev_seqlen_k_real=0, it's definitely a conversation
+        seqlen_k_real = seqlen_q;
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: first prefill, using seqlen_q=%d\n",
+                seqlen_q);
+    } else if (seqlen_q > prev_seqlen_k_real) {
         // New conversation detected - start fresh with seqlen_q
         seqlen_k_real = seqlen_q;
         is_new_conversation = true;
         GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: detected new conversation (seqlen_q=%d > prev_seqlen_k_real=%d), starting fresh\n",
                 seqlen_q, prev_seqlen_k_real);
     } else {
-        // Normal operation - accumulate
+        // Normal conversation operation - accumulate
         seqlen_k_real = accumulated;
-        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: normal operation, using accumulated=%d (prev=%d + seqlen_q=%d)\n",
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: normal conversation, using accumulated=%d (prev=%d + seqlen_q=%d)\n",
                 accumulated, prev_seqlen_k_real, seqlen_q);
     }
 
@@ -971,7 +1100,7 @@ static void set_flash_attn_runtime(
         host_data->seqlen_q_for_cu = seqlen_q_for_cu;
         host_data->seqlen_k_real = seqlen_k_real;
         host_data->block_table_stride = bt_stride;
-        host_data->is_causal = true;  // Always true for autoregressive models using this path
+        host_data->is_causal = get_is_causal_from_mask(mask, has_mask);  // Read from mask params or infer from has_mask
         host_data->is_valid = true;
 
         // Compute and store cu_seqlens_q (cumulative sequence lengths for Q)
@@ -1047,16 +1176,14 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
     // debug_counter++;
     GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] varlen_forward: device=%d, dst=%p\n", id, (void*)dst);
 
-    // REFACTORED: Removed fallback logic that called prepare_varlen_buffers
-    // The new execution flow is:
-    // 1. set_flash_attn_runtime (called once after set_inputs) - computes host data
-    // 2. prepare_flash_attn_varlen_buffers (called for each FA node) - transfers to device, sets op_params
-    // 3. varlen_forward (graph execution) - uses prepared data
-    //
-    // If has_varlen_params is false, it means either:
+    // For test-backend-ops compatibility:
+    // When has_varlen_params=0, it means either:
     // - Warmup phase (mask data not valid)
-    // - set_flash_attn_runtime was not called
-    // In either case, fall back to non-varlen path
+    // - set_flash_attn_runtime was not called (e.g., test-backend-ops)
+    // - Tensor pointer mismatch (test framework uses different tensor instance)
+    //
+    // In these cases, fall back to non-varlen path which uses standard GGML tensor layout.
+    // The varlen path requires paged KV cache layout which tests don't use.
     if (!has_varlen_params) {
         GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
         GGML_DL_FATTN_DEBUG_PRINT("varlen_forward: has_varlen_params=0, falling back to non-varlen dldnn path\n");
