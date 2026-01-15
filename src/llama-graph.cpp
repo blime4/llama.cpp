@@ -532,6 +532,8 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
 
         info.multi_sequence = multi_seq;
         info.has_alibi_bias = hparams.use_alibi;
+
+        (void)info;
     }
 #endif
 }
@@ -1524,7 +1526,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         }
 
         if (kq_mask && kq_mask->type != GGML_TYPE_F16) {
-            ggml_tensor * kq_mask_orig = kq_mask;
             kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
         }
 #else
