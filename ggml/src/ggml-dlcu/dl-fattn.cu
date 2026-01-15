@@ -1058,6 +1058,7 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
     // - set_flash_attn_runtime was not called
     // In either case, fall back to non-varlen path
     if (!has_varlen_params) {
+        GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
         GGML_DL_FATTN_DEBUG_PRINT("varlen_forward: has_varlen_params=0, falling back to non-varlen dldnn path\n");
         flash_attn_ext_dldnn_mha_forward(ctx, dst);
         return;
