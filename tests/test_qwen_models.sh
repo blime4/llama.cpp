@@ -8,7 +8,7 @@ set -o pipefail
 
 # ============ 配置区 ============
 # 支持从环境变量或参数传入配置
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+# 不自动设置默认值，保留用户环境中的 CUDA_VISIBLE_DEVICES 设置
 
 # 默认配置，可通过参数覆盖
 DEFAULT_MODEL_BASE_PATH="${LOCAL_MODEL_PATH:-/mars/aebox/LLM/model}"
@@ -128,12 +128,16 @@ update_expected_answer() {
     new_answer=$(echo "$new_answer" | sed 's/[[:space:]]\+/ /g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
 
     awk -v group="$test_group" -v test="$test_name" -v val="$new_answer" '
+        BEGIN { in_group=0; in_test=0 }
         $0 == group ":" { in_group=1; print; next }
-        in_group && /^[a-z0-9_]+_test_cases:$/ && $0 != group ":" { in_group=0; in_test=0 }
-        in_group && $0 == "  " test ":" { in_test=1; print; next }
-        in_test && /^[a-z_]+:$/ { in_test=0 }
+        in_group && /^[a-z0-9_]+_test_cases:$/ && $0 != (group ":") { in_group=0; in_test=0 }
+        in_group && $0 ~ /^[[:space:]]+[a-zA-Z0-9_\.\-]+:$/ && $0 != ("  " test ":") {
+            in_test=0
+        }
+        in_group && $0 == ("  " test ":") { in_test=1; print; next }
         in_test && /^    expected:/ {
             print "    expected: \"" val "\""
+            in_test=0
             next
         }
         { print }
@@ -357,10 +361,17 @@ run_model_test() {
     local expected_content="$4"
     local model_path="$5"
     local test_group="${6:-}"
+    local use_multi="${7:-false}"
+
+    # 根据 use_multi 参数决定使用单卡还是双卡
+    local gpu_devices="0"
+    if [ "$use_multi" = "true" ]; then
+        gpu_devices="0,1"
+    fi
 
     echo "" | tee -a "$LOG_FILE"
     echo "[INFO] ========================================" | tee -a "$LOG_FILE"
-    echo "[INFO] 测试: $model_name - $test_name" | tee -a "$LOG_FILE"
+    echo "[INFO] 测试: $model_name - $test_name (GPU: $gpu_devices)" | tee -a "$LOG_FILE"
     echo "[INFO] 提示: $prompt" | tee -a "$LOG_FILE"
     if [ "$UPDATE_MODE" != "true" ]; then
         echo "[INFO] 期望: $expected_content" | tee -a "$LOG_FILE"
@@ -375,10 +386,10 @@ run_model_test() {
 
     # 输出执行命令
     local cmd
-    cmd="CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 \"$LLAMA_COMPLETION\" -m \"$model_path\" -n 50 --temp $TEMPERATURE --top-k $TOP_K --top_p $TOP_P --repeat-penalty 1.0 -s $SEED -fa on -ngl $GPU_LAYERS -p \"$prompt\" -no-cnv"
+    cmd="CUDA_VISIBLE_DEVICES=${gpu_devices} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 \"$LLAMA_COMPLETION\" -m \"$model_path\" -n 50 --temp $TEMPERATURE --top-k $TOP_K --top_p $TOP_P --repeat-penalty 1.0 -s $SEED -fa on -ngl $GPU_LAYERS -p \"$prompt\" -no-cnv"
     echo "[CMD] $cmd" | tee -a "$LOG_FILE"
     echo "[DEBUG] 使用 Flash Attention (-fa)" | tee -a "$LOG_FILE"
-    CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 "$LLAMA_COMPLETION" \
+    CUDA_VISIBLE_DEVICES=${gpu_devices} QWEN_USE_FP16=1 DLEOL_DISABLE_CU_MATMUL=1 "$LLAMA_COMPLETION" \
         -m "$model_path" \
         -n 50 \
         --temp $TEMPERATURE \
@@ -499,7 +510,7 @@ main() {
         exit 1
     fi
 
-    # 检测GPU资源
+    # 检测GPU资源（用于显存检查）
     local gpu_info
     gpu_info=$(detect_gpu_resources)
     IFS='|' read -r gpu_count total_memory_gb gpu_memory_list <<< "$gpu_info"
@@ -524,6 +535,27 @@ main() {
         skip_qwen3=true
     fi
 
+    # 判断是否使用多卡（基于CUDA_VISIBLE_DEVICES环境变量）
+    local has_multi_gpu=false
+    local used_gpu_count=0
+    if [ -n "$CUDA_VISIBLE_DEVICES" ] && [ "$CUDA_VISIBLE_DEVICES" != "" ]; then
+        # 解析CUDA_VISIBLE_DEVICES，统计GPU数量
+        # 处理如 "0" 或 "0,1,2" 这样的格式
+        local gpu_ids=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -v '^$' | wc -l)
+        used_gpu_count=$gpu_ids
+    else
+        # 如果未设置，使用检测到的所有GPU
+        used_gpu_count=$gpu_count
+    fi
+    echo "[INFO] 当前使用GPU数量: ${used_gpu_count}" | tee -a "$LOG_FILE"
+    
+    if [ "$used_gpu_count" -ge 2 ]; then
+        has_multi_gpu=true
+        echo "[INFO] 检测到多卡配置，将执行多卡测试" | tee -a "$LOG_FILE"
+    else
+        echo "[INFO] 单卡配置，只执行单卡测试" | tee -a "$LOG_FILE"
+    fi
+
     # 定义测试模型和用例
     declare -A qwen2_models=(
         # ["Qwen2-1.5Moe.Q4_K_M"]="Qwen2-1.5B-Moe-GGUF/Qwen2-1.5Moe.Q4_K_M.gguf"
@@ -543,11 +575,34 @@ main() {
         local model_path="${MODEL_BASE_PATH}/${qwen2_models[$model_name]}"
         if [ -f "$model_path" ]; then
             echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
+            local test_count=0
             while IFS='|' read -r test_name prompt expected; do
                 if [ -n "$test_name" ] && [ -n "$prompt" ]; then
-                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "true" "test_cases"
+                if [ "$has_multi_gpu" = "true" ]; then
+                    # 多卡模式：单卡执行2个测试（使用单卡）
+                    if [ $test_count -lt 2 ]; then
+                        run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "test_cases" "false"
+                    fi
+                else
+                    # 单卡模式：执行3个测试
+                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "test_cases" "false"
+                fi
+                    test_count=$((test_count + 1))
                 fi
             done < <(load_test_cases "test_cases")
+
+            # 多卡模式：双卡执行2个测试
+            if [ "$has_multi_gpu" = "true" ]; then
+                local multi_test_count=0
+                while IFS='|' read -r test_name prompt expected; do
+                    if [ -n "$test_name" ] && [ -n "$prompt" ]; then
+                        if [ $multi_test_count -lt 2 ]; then
+                            run_model_test "$model_name" "${test_name}_multi" "$prompt" "$expected" "$model_path" "test_cases" "true"
+                        fi
+                        multi_test_count=$((multi_test_count + 1))
+                    fi
+                done < <(load_test_cases "test_cases")
+            fi
         else
             echo "[WARN] 模型文件不存在: $model_path" | tee -a "$LOG_FILE"
         fi
@@ -558,11 +613,34 @@ main() {
         local model_path="${MODEL_BASE_PATH}/${qwen25_models[$model_name]}"
         if [ -f "$model_path" ]; then
             echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
+            local test_count=0
             while IFS='|' read -r test_name prompt expected; do
                 if [ -n "$test_name" ] && [ -n "$prompt" ]; then
-                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "true" "qwen25_test_cases"
+                if [ "$has_multi_gpu" = "true" ]; then
+                    # 多卡模式：单卡执行2个测试（使用单卡）
+                    if [ $test_count -lt 2 ]; then
+                        run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "qwen25_test_cases" "false"
+                    fi
+                else
+                    # 单卡模式：执行3个测试
+                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "qwen25_test_cases" "false"
+                fi
+                test_count=$((test_count + 1))
+            fi
+        done < <(load_test_cases "qwen25_test_cases")
+
+        # 多卡模式：双卡执行2个测试
+        if [ "$has_multi_gpu" = "true" ]; then
+            local multi_test_count=0
+            while IFS='|' read -r test_name prompt expected; do
+                if [ -n "$test_name" ] && [ -n "$prompt" ]; then
+                    if [ $multi_test_count -lt 2 ]; then
+                        run_model_test "$model_name" "${test_name}_multi" "$prompt" "$expected" "$model_path" "qwen25_test_cases" "true"
+                    fi
+                    multi_test_count=$((multi_test_count + 1))
                 fi
             done < <(load_test_cases "qwen25_test_cases")
+        fi
         else
             echo "[WARN] 模型文件不存在: $model_path" | tee -a "$LOG_FILE"
         fi
@@ -576,11 +654,34 @@ main() {
             local model_path="${MODEL_BASE_PATH}/${qwen3_models[$model_name]}"
             if [ -f "$model_path" ]; then
                 echo "[INFO] 测试模型: $model_name" | tee -a "$LOG_FILE"
+                local test_count=0
                 while IFS='|' read -r test_name prompt expected; do
                     if [ -n "$test_name" ] && [ -n "$prompt" ]; then
-                        run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "true" "qwen3_test_cases"
+                if [ "$has_multi_gpu" = "true" ]; then
+                    # 多卡模式：单卡执行2个测试（使用单卡）
+                    if [ $test_count -lt 2 ]; then
+                        run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "qwen3_test_cases" "false"
                     fi
-                done < <(load_test_cases "qwen3_test_cases")
+                else
+                    # 单卡模式：执行3个测试
+                    run_model_test "$model_name" "$test_name" "$prompt" "$expected" "$model_path" "qwen3_test_cases" "false"
+                fi
+                test_count=$((test_count + 1))
+            fi
+        done < <(load_test_cases "qwen3_test_cases")
+
+        # 多卡模式：双卡执行2个测试
+        if [ "$has_multi_gpu" = "true" ]; then
+            local multi_test_count=0
+            while IFS='|' read -r test_name prompt expected; do
+                if [ -n "$test_name" ] && [ -n "$prompt" ]; then
+                    if [ $multi_test_count -lt 2 ]; then
+                        run_model_test "$model_name" "${test_name}_multi" "$prompt" "$expected" "$model_path" "qwen3_test_cases" "true"
+                    fi
+                    multi_test_count=$((multi_test_count + 1))
+                fi
+            done < <(load_test_cases "qwen3_test_cases")
+        fi
             else
                 echo "[WARN] 模型文件不存在: $model_path" | tee -a "$LOG_FILE"
             fi
