@@ -725,12 +725,10 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
 
     auto udata = std::make_shared<llama_ubatch::data_t>();
 
-    const int32_t n_pos_cur = batch.embd ? n_pos_per_embd : 1;
     #ifdef GGML_USE_DLFA
-    // DL-TODO: check the llama: fix ASAN error with M-RoPE (#16848)
     const uint32_t padding_size = get_cuda_graph_padding(n_tokens);
     const int64_t n_embd_all = batch.embd ? (int64_t) padding_size*n_embd : 0;
-    const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_cur;
+    const int64_t n_pos_all  =              (int64_t) n_tokens*n_pos_per_embd;
 
     udata->token     .resize(padding_size);
     udata->embd      .resize(n_embd_all);
