@@ -1004,6 +1004,17 @@ compile_llama_cpp() {
     local compile_duration=$((compile_end_time - compile_start_time))
 
     log_success "Compilation completed, time taken: ${compile_duration} seconds"
+
+    # Update compile_commands.json symlink for IDE support
+    local compile_commands_src="$build_dir/compile_commands.json"
+    local compile_commands_dst="${REPO_PATH}/compile_commands.json"
+    if [ -f "$compile_commands_src" ]; then
+        rm -f "$compile_commands_dst"
+        ln -sf "$compile_commands_src" "$compile_commands_dst"
+        log_info "Updated compile_commands.json symlink"
+    else
+        log_warn "compile_commands.json not found in $build_dir"
+    fi
 }
 
 # Run tests with repeat support
