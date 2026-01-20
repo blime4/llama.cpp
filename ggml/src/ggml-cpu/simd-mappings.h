@@ -1197,6 +1197,46 @@ static inline void __lzs_f16cx4_store(ggml_fp16_t * x, float32x4_t v_y) {
 #define GGML_F32_VEC_MUL    GGML_F32x4_MUL
 #define GGML_F32_VEC_REDUCE GGML_F32x4_REDUCE
 
+#elif defined(__riscv)
+
+// RISC-V without RVV (vector extension) - scalar fallback for FP16 operations
+
+// F32
+#define GGML_F32_STEP 1
+#define GGML_F32_EPR  1
+
+#define GGML_F32x4              float
+#define GGML_F32x4_ZERO         0.0f
+#define GGML_F32x4_SET1(x)      (x)
+#define GGML_F32x4_LOAD(x)      ((x)[0])
+#define GGML_F32x4_STORE(p, x)  ((p)[0] = (x))
+#define GGML_F32x4_FMA(a, b, c) ((a) + (b) * (c))
+#define GGML_F32x4_ADD(a, b)    ((a) + (b))
+#define GGML_F32x4_MUL(a, b)    ((a) * (b))
+#define GGML_F32x4_REDUCE(res, x) ((res) = (x))
+
+#define GGML_F32_VEC        GGML_F32x4
+#define GGML_F32_VEC_ZERO   GGML_F32x4_ZERO
+#define GGML_F32_VEC_SET1   GGML_F32x4_SET1
+#define GGML_F32_VEC_LOAD   GGML_F32x4_LOAD
+#define GGML_F32_VEC_STORE  GGML_F32x4_STORE
+#define GGML_F32_VEC_FMA    GGML_F32x4_FMA
+#define GGML_F32_VEC_ADD    GGML_F32x4_ADD
+#define GGML_F32_VEC_MUL    GGML_F32x4_MUL
+#define GGML_F32_VEC_REDUCE GGML_F32x4_REDUCE
+
+// F16 - scalar fallback using float operations
+#define GGML_F16_STEP 1
+#define GGML_F16_EPR  1
+
+#define GGML_F16_VEC             float
+#define GGML_F16_VEC_ZERO        0.0f
+#define GGML_F16_VEC_SET1(x)     (x)
+#define GGML_F16_VEC_LOAD(p, i)  GGML_CPU_FP16_TO_FP32((p)[i])
+#define GGML_F16_VEC_STORE(p, v, i) ((p)[i] = GGML_CPU_FP32_TO_FP16(v))
+#define GGML_F16_VEC_FMA(a, b, c) ((a) + (b) * (c))
+#define GGML_F16_VEC_REDUCE(res, x) ((res) = (x))
+
 #endif
 
 // GGML_F32_ARR / GGML_F16_ARR
