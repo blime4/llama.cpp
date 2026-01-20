@@ -134,6 +134,8 @@ init_logging() {
     else
         echo "[INFO] Standard mode - Only limited output shown (use --verbose for full output)" | tee -a "$summary_log"
     fi
+
+    export TEST_LOG_FILE="$test_log"
 }
 
 setup_environment_context() {

@@ -2,6 +2,9 @@
 
 # Qwen模型单元测试脚本
 # 使用 llama-completion 进行确定性输出测试
+#
+# 支持通过 TEST_LOG_FILE 环境变量从父脚本接收日志文件路径
+# 以实现测试日志集中管理（详见 OpenSpec 变更：consolidate-test-logs）
 
 # 不使用 set -e，因为需要手动处理错误
 set -o pipefail
@@ -47,7 +50,11 @@ done
 # 从位置参数或环境变量获取配置
 MODEL_BASE_PATH="${POSITIONAL_ARGS[0]:-${MODEL_BASE_PATH:-$DEFAULT_MODEL_BASE_PATH}}"
 LLAMA_COMPLETION="${POSITIONAL_ARGS[1]:-${LLAMA_COMPLETION:-$DEFAULT_LLAMA_COMPLETION}}"
-LOG_FILE="qwen_model_test_$(date +%Y%m%d_%H%M%S).log"
+if [ -n "${TEST_LOG_FILE:-}" ]; then
+    LOG_FILE="$TEST_LOG_FILE"
+else
+    LOG_FILE="qwen_model_test_$(date +%Y%m%d_%H%M%S).log"
+fi
 
 # 测试参数 - 设置为确定性输出
 TEMPERATURE=0.0

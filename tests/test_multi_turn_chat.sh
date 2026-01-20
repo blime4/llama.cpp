@@ -2,6 +2,9 @@
 
 # 多轮对话单元测试脚本
 # 使用 llama-server 实现真正的上下文保持
+#
+# 支持通过 TEST_LOG_FILE 环境变量从父脚本接收日志文件路径
+# 以实现测试日志集中管理（详见 OpenSpec 变更：consolidate-test-logs）
 
 # 不使用 set -e，因为 jq 可能返回非零退出码
 set -o pipefail
@@ -53,7 +56,11 @@ MODEL_PATH="${POSITIONAL_ARGS[0]:-${MODEL_PATH:-$DEFAULT_MODEL_PATH}}"
 LLAMA_SERVER="${POSITIONAL_ARGS[1]:-${LLAMA_SERVER:-$DEFAULT_LLAMA_SERVER}}"
 SERVER_PORT="${POSITIONAL_ARGS[2]:-${SERVER_PORT:-$DEFAULT_SERVER_PORT}}"
 SERVER_URL="http://localhost:${SERVER_PORT}"
-LOG_FILE="multi_turn_test_$(date +%Y%m%d_%H%M%S).log"
+if [ -n "${TEST_LOG_FILE:-}" ]; then
+    LOG_FILE="$TEST_LOG_FILE"
+else
+    LOG_FILE="multi_turn_test_$(date +%Y%m%d_%H%M%S).log"
+fi
 SCRIPT_NAME="test_multi_turn_chat"
 
 # 测试参数 - 设置为确定性输出
