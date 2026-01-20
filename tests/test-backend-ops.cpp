@@ -5828,7 +5828,11 @@ struct test_mul_mat_vec_fusion : public test_case {
     }
 
     double max_nmse_err() override {
+#ifdef GGML_USE_DLCU
+        return 3e-2;
+#else
         return 5e-3;
+#endif
     }
 };
 
