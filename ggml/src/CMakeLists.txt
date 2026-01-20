@@ -456,13 +456,22 @@ if (GGML_CPU_ALL_VARIANTS)
             ggml_add_cpu_backend_variant(android_armv8.2_1    DOTPROD)
             ggml_add_cpu_backend_variant(android_armv8.2_2    DOTPROD FP16_VECTOR_ARITHMETIC)
             ggml_add_cpu_backend_variant(android_armv8.6_1    DOTPROD FP16_VECTOR_ARITHMETIC MATMUL_INT8)
-            # NOTE: android_armv9.0_1 (SVE2 without SVE) is disabled due to a compiler crash
-            # in Android NDK clang 14.0.7 when compiling with -march=armv8.6-a+dotprod+fp16+i8mm+sve2
-            # The crash occurs in "Local Stack Slot Allocation" pass. ARM v9.2 variants with
-            # both SVE and SVE2 are still available and don't trigger this bug.
+
+            # GGML_DLCU: All ARM v9 variants are disabled due to compiler bugs in Android NDK clang 14.0.7
+            # When compiling ggml-cpu/arch/arm/quants.c with any SVE/SVE2 extensions enabled,
+            # the compiler crashes with exit code 136 during "Local Stack Slot Allocation" pass.
+            # The crash occurs in function @ggml_vec_dot_q4_K_q8_K and affects all variants below:
+            # - android_armv9.0_1: -march=armv8.6-a+dotprod+fp16+i8mm+sve2 (SVE2-only)
+            # - android_armv9.2_1: -march=armv8.6-a+dotprod+fp16+sve+i8mm (SVE+SME)
+            # - android_armv9.2_2: -march=armv8.6-a+dotprod+fp16+sve+i8mm+sve2 (SVE+SVE2+SME)
+            #
+            # This appears to be a systemic bug in Android NDK clang 14.0.7's SVE/SVE2 code generation.
+            # Since we are locked to NDK 25.2.9519653 and cannot upgrade, the only viable workaround
+            # is to disable all ARM v9 SVE/SVE2 variants for Android builds. The performance impact is
+            # minimal as ARM v9 hardware is still rare in the Android ecosystem.
             # ggml_add_cpu_backend_variant(android_armv9.0_1    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE2)
-            ggml_add_cpu_backend_variant(android_armv9.2_1    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE SME)
-            ggml_add_cpu_backend_variant(android_armv9.2_2    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE SVE2 SME)
+            # ggml_add_cpu_backend_variant(android_armv9.2_1    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE SME)
+            # ggml_add_cpu_backend_variant(android_armv9.2_2    DOTPROD MATMUL_INT8 FP16_VECTOR_ARITHMETIC SVE SVE2 SME)
         elseif (APPLE)
             ggml_add_cpu_backend_variant(apple_m1             DOTPROD)
             ggml_add_cpu_backend_variant(apple_m2_m3          DOTPROD MATMUL_INT8)
