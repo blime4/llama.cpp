@@ -1197,6 +1197,54 @@ static inline void __lzs_f16cx4_store(ggml_fp16_t * x, float32x4_t v_y) {
 #define GGML_F32_VEC_MUL    GGML_F32x4_MUL
 #define GGML_F32_VEC_REDUCE GGML_F32x4_REDUCE
 
+// F16 - RISC-V RVV doesn't have native FP16 vector support, use F32 vectors
+// We convert FP16 to FP32 during load and back during store
+#define GGML_F16_STEP 16
+#define GGML_F16_EPR  4
+
+// Helper functions for F16 vector operations using F32 vectors
+static inline vfloat32m1_t ggml_riscv_f16_load_f32m1(const ggml_fp16_t *ptr, size_t vl) {
+    float tmp[4];
+    #if defined(GGML_CPU_FP16_TO_FP32)
+        for (size_t i = 0; i < vl; i++) {
+            tmp[i] = GGML_CPU_FP16_TO_FP32(ptr[i]);
+        }
+    #else
+        for (size_t i = 0; i < vl; i++) {
+            tmp[i] = GGML_COMPUTE_FP16_TO_FP32(ptr[i]);
+        }
+    #endif
+    return __riscv_vle32_v_f32m1(tmp, vl);
+}
+
+static inline void ggml_riscv_f16_store_f32m1(ggml_fp16_t *ptr, vfloat32m1_t val, size_t vl) {
+    float tmp[4];
+    __riscv_vse32_v_f32m1(tmp, val, vl);
+    #if defined(GGML_CPU_FP32_TO_FP16)
+        for (size_t i = 0; i < vl; i++) {
+            ptr[i] = GGML_CPU_FP32_TO_FP16(tmp[i]);
+        }
+    #else
+        for (size_t i = 0; i < vl; i++) {
+            ptr[i] = GGML_COMPUTE_FP32_TO_FP16(tmp[i]);
+        }
+    #endif
+}
+
+#define GGML_F16_VEC             vfloat32m1_t
+#define GGML_F16_VEC_ZERO        __riscv_vfmv_v_f_f32m1(0.0f, GGML_F16_EPR)
+#define GGML_F16_VEC_SET1(x)     __riscv_vfmv_v_f_f32m1(x, GGML_F16_EPR)
+#define GGML_F16_VEC_LOAD(p, i)  ggml_riscv_f16_load_f32m1(p, GGML_F16_EPR)
+#define GGML_F16_VEC_STORE(p, v, i) ggml_riscv_f16_store_f32m1(p, v, GGML_F16_EPR)
+#define GGML_F16_VEC_FMA(a, b, c) __riscv_vfmacc_vv_f32m1(a, b, c, GGML_F16_EPR)
+#define GGML_F16_VEC_REDUCE(res, x) ((res) = ggml_riscv_reduce_sum_f32m1(x))
+
+static inline float ggml_riscv_reduce_sum_f32m1(vfloat32m1_t v) {
+    size_t vl = __riscv_vsetvlmax_e32m1();
+    vfloat32m1_t sum = __riscv_vfredusum_vs_f32m1_f32m1(v, __riscv_vfmv_v_f_f32m1(0.0f, 1), vl);
+    return __riscv_vfmv_f_s_f32m1_f32(sum);
+}
+
 #elif defined(__riscv)
 
 // RISC-V without RVV (vector extension) - scalar fallback for FP16 operations
