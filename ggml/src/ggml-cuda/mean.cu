@@ -18,14 +18,9 @@ void ggml_cuda_op_mean(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     float *             dst_d  = (float *) dst->data;
     cudaStream_t        stream = ctx.stream();
 
-#ifndef GGML_USE_DLCU
-    GGML_ASSERT(src0->type == GGML_TYPE_F32);
-    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-#else
     GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
     GGML_ASSERT(dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_F16);
     GGML_ASSERT(src0->type == dst->type);
-#endif
     GGML_ASSERT(ggml_is_contiguous(src0));
 
     const int64_t ncols = src0->ne[0];
@@ -72,33 +67,21 @@ void ggml_cuda_op_mean(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int id  = ggml_cuda_get_device();
     const int nsm = ggml_cuda_info().devices[id].nsm;
 
-#ifndef GGML_USE_DLCU // DL-FP16
     // Heuristic for block size selection to optimize occupancy.
     // See discussion in: https://github.com/ggml-org/llama.cpp/pull/15132
     if ((nrows / nsm) < 2) {
         const dim3 block_dims(512, 1, 1);
-        reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
-    } else {
-        const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
-        reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
-    }
-#else
-    if ((nrows / nsm) < 2) {
-        const dim3 block_dims(512, 1, 1);
-        if (src0->type == GGML_TYPE_F32) {
-            reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
-        }
-        else {
-            reduce_rows_f16</*norm=*/true><<<block_nums, block_dims, 0, stream>>>((const half *)src0_d, (half *)dst_d, ncols);
+        if (src0->type == GGML_TYPE_F16) {
+            reduce_rows<true, half><<<block_nums, block_dims, 0, stream>>>((const half *)src0_d, (half *)dst_d, ncols);
+        } else {
+            reduce_rows<true, float><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
         }
     } else {
         const dim3 block_dims(ncols < 1024 ? 32 : 128, 1, 1);
-        if (src0->type == GGML_TYPE_F32) {
-            reduce_rows_f32</*norm=*/true><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
-        }
-        else {
-            reduce_rows_f16</*norm=*/true><<<block_nums, block_dims, 0, stream>>>((const half *)src0_d, (half *)dst_d, ncols);
+        if (src0->type == GGML_TYPE_F16) {
+            reduce_rows<true, half><<<block_nums, block_dims, 0, stream>>>((const half *)src0_d, (half *)dst_d, ncols);
+        } else {
+            reduce_rows<true, float><<<block_nums, block_dims, 0, stream>>>(src0_d, dst_d, ncols);
         }
     }
-#endif
 }

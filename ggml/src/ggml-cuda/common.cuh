@@ -47,7 +47,6 @@
 
 #if defined(GGML_USE_DLCU)
 static const bool GGML_IS_TEST= std::getenv("GGML_IS_TEST") != nullptr;
-#include "../ggml-dlcu/fp16/dl-fp16.cuh"
 #endif
 
 #define GGML_CUDA_CC_PASCAL          600
@@ -802,6 +801,35 @@ static __device__ __forceinline__ uint2 fast_div_modulo(uint32_t n, const uint3 
     const uint32_t div_val = fastdiv(n, fastdiv_values);
     const uint32_t mod_val = n - div_val * fastdiv_values.z;
     return make_uint2(div_val, mod_val);
+}
+
+// Type conversion utilities for fp16/fp32 template implementations
+template <typename T>
+static __device__ __forceinline__ float to_float(T val) {
+    return static_cast<float>(val);
+}
+
+template <>
+__device__ __forceinline__ float to_float<half>(half val) {
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    return __half2float(val);
+#else
+    return __half2float(val);
+#endif
+}
+
+template <typename T>
+static __device__ __forceinline__ T from_float(float val) {
+    return static_cast<T>(val);
+}
+
+template <>
+__device__ __forceinline__ half from_float<half>(float val) {
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    return __float2half(val);
+#else
+    return __float2half(val);
+#endif
 }
 
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, float2 & v);
