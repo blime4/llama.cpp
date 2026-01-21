@@ -1237,6 +1237,7 @@ static inline void ggml_riscv_f16_store_f32m1(ggml_fp16_t *ptr, vfloat32m1_t val
 #define GGML_F16_VEC_LOAD(p, i)  ggml_riscv_f16_load_f32m1(p, GGML_F16_EPR)
 #define GGML_F16_VEC_STORE(p, v, i) ggml_riscv_f16_store_f32m1(p, v, GGML_F16_EPR)
 #define GGML_F16_VEC_FMA(a, b, c) __riscv_vfmacc_vv_f32m1(a, b, c, GGML_F16_EPR)
+#define GGML_F16_VEC_MUL(a, b)    __riscv_vfmul_vv_f32m1(a, b, GGML_F16_EPR)
 #define GGML_F16_VEC_REDUCE(res, x) ((res) = ggml_riscv_reduce_sum_f32m1(x))
 
 static inline float ggml_riscv_reduce_sum_f32m1(vfloat32m1_t v) {

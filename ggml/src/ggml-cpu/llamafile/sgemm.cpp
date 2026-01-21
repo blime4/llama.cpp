@@ -417,7 +417,7 @@ template <> inline vbfloat16m2_t load(const ggml_bf16_t *p) {
 }
 #endif
 
-#if defined(__riscv_zvfh)
+#if defined(__riscv_v_intrinsic)
 template <typename T> T set_zero();
 
 template <> inline vfloat16mf2_t set_zero() {

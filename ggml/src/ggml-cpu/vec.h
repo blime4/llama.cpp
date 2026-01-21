@@ -292,6 +292,29 @@ inline static void ggml_vec_dot_f16_unroll(const int n, const int xs, float * GG
         sumf[0] = __riscv_vfmv_f_s_f32m1_f32(redsum0);
         sumf[1] = __riscv_vfmv_f_s_f32m1_f32(redsum1);
 
+    #elif defined(__riscv_v_intrinsic)
+        const int np = (n & ~(GGML_F16_STEP - 1));
+
+        for (int i = 0; i < np; i += GGML_F16_STEP) {
+            for (int k = 0; k < GGML_VEC_DOT_UNROLL; ++k) {
+                for (int j = 0; j < GGML_F16_ARR; j++) {
+                    GGML_F16_VEC ax = GGML_F16_VEC_LOAD(x[k] + i + j*GGML_F16_EPR, j);
+                    GGML_F16_VEC ay = GGML_F16_VEC_LOAD(y + i + j*GGML_F16_EPR, j);
+                    float fsum;
+                    GGML_F16_VEC_REDUCE(fsum, ay);
+                    GGML_F16_VEC_REDUCE(fsum, ax);
+                    sumf[k] += fsum;
+                }
+            }
+        }
+
+        // leftovers
+        for (int i = np; i < n; ++i) {
+            for (int j = 0; j < GGML_VEC_DOT_UNROLL; ++j) {
+                sumf[j] += (ggml_float)(GGML_CPU_FP16_TO_FP32(x[j][i])*GGML_CPU_FP16_TO_FP32(y[i]));
+            }
+        }
+
     #else
         const int np = (n & ~(GGML_F16_STEP - 1));
 
@@ -569,6 +592,24 @@ inline static void ggml_vec_mad_f16(const int n, ggml_fp16_t * GGML_RESTRICT y, 
         __riscv_vse16_v_f16m4((_Float16*)y + i, ay0, vl);
     }
     np = n;
+#elif defined(__riscv_v_intrinsic)
+    const int np = (n & ~(GGML_F16_STEP - 1));
+
+    GGML_F16_VEC vx = GGML_F16_VEC_SET1(v);
+
+    for (int i = 0; i < np; i += GGML_F16_STEP) {
+        for (int j = 0; j < GGML_F16_ARR; j++) {
+            GGML_F16_VEC ax = GGML_F16_VEC_LOAD(x + i + j*GGML_F16_EPR, j);
+            GGML_F16_VEC ay = GGML_F16_VEC_LOAD(y + i + j*GGML_F16_EPR, j);
+            ay = GGML_F16_VEC_FMA(ay, ax, vx);
+            GGML_F16_VEC_STORE(y + i + j*GGML_F16_EPR, ay, j);
+        }
+    }
+
+    // leftovers
+    for (int i = np; i < n; ++i) {
+        y[i] = GGML_CPU_FP32_TO_FP16(GGML_CPU_FP16_TO_FP32(y[i]) + GGML_CPU_FP16_TO_FP32(x[i]) * v);
+    }
 #elif defined(GGML_SIMD)
     const int np = (n & ~(GGML_F16_STEP - 1));
 
@@ -837,6 +878,23 @@ inline static void ggml_vec_scale_f16(const int n, ggml_fp16_t * y, const float 
         vfloat16m4_t ay0 = __riscv_vle16_v_f16m4((const _Float16*)y + i, vl);
         ay0 = __riscv_vfmul_vf_f16m4(ay0, scale, vl);
         __riscv_vse16_v_f16m4((_Float16*)y + i, ay0, vl);
+    }
+#elif defined(__riscv_v_intrinsic)
+    const int np = (n & ~(GGML_F16_STEP - 1));
+
+    GGML_F16_VEC vx = GGML_F16_VEC_SET1(v);
+
+    for (int i = 0; i < np; i += GGML_F16_STEP) {
+        for (int j = 0; j < GGML_F16_ARR; j++) {
+            GGML_F16_VEC ay = GGML_F16_VEC_LOAD(y + i + j*GGML_F16_EPR, j);
+            ay = GGML_F16_VEC_MUL(ay, vx);
+            GGML_F16_VEC_STORE(y + i + j*GGML_F16_EPR, ay, j);
+        }
+    }
+
+    // leftovers
+    for (int i = np; i < n; ++i) {
+        y[i] = GGML_CPU_FP32_TO_FP16(GGML_CPU_FP16_TO_FP32(y[i]) * v);
     }
 #elif defined(GGML_SIMD)
     const int np = (n & ~(GGML_F16_STEP - 1));
