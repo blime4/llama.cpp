@@ -979,6 +979,7 @@ declare -a test_cases_part2=()
 declare -a test_cases=()
 declare -a qwen_model_tests=()
 declare -a multi_turn_tests=()
+declare -a prefix_cache_tests=()
 declare -a full_suite_fail_list=()
 declare -a test_results_names=()
 declare -a test_results_status=()
@@ -1150,6 +1151,27 @@ add_multi_turn_tests() {
     # Add the test to the array
     multi_turn_tests+=("$test_script")
     echo "[INFO] Added multi-turn conversation test" | tee -a "$summary_log"
+}
+
+add_prefix_cache_tests() {
+    echo "[INFO] Adding prefix cache tests" | tee -a "$summary_log"
+
+    # Add the prefix cache test script
+    local test_script="${REPO_PATH}/tests/test_prefix_cache.sh"
+
+    if [ ! -f "$test_script" ]; then
+        echo "[WARN] Prefix cache test script not found: $test_script" | tee -a "$summary_log"
+        return
+    fi
+
+    if [ ! -x "$test_script" ]; then
+        echo "[INFO] Making prefix cache test script executable" | tee -a "$summary_log"
+        chmod +x "$test_script"
+    fi
+
+    # Add the test to the array
+    prefix_cache_tests+=("$test_script")
+    echo "[INFO] Added prefix cache test" | tee -a "$summary_log"
 }
 
 validate_qwen_output() {
@@ -1558,6 +1580,40 @@ full_suite_run_multi_turn_case() {
     full_suite_print_case_summary "$test_name_for_summary" "$ret" false
 }
 
+full_suite_run_prefix_cache_case() {
+    local test_script="$1"
+    local test_name_for_summary="prefix_cache_tests"
+
+    echo "Running prefix cache tests from script: $test_script" | tee -a "$summary_log"
+    echo "Running prefix cache tests from script: $test_script" >> "$test_log"
+    echo "-----------------------------" | tee -a "$test_log"
+
+    local start_time end_time duration
+    start_time=$(date +%s)
+
+    set +e
+    # Output to both stdout and log file using tee
+    bash "$test_script" 2>&1 | tee -a "$test_log"
+    local ret=${PIPESTATUS[0]}
+    set -e
+
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    if [ $ret -ne 0 ]; then
+        full_suite_fail_list+=("$test_name_for_summary (exit code $ret)")
+        full_suite_fail_count=$((full_suite_fail_count + 1))
+        test_results_names+=("$test_name_for_summary")
+        test_results_status+=("FAILED")
+    else
+        test_results_names+=("$test_name_for_summary")
+        test_results_status+=("PASSED")
+    fi
+
+    echo "-----------------------------" | tee -a "$test_log"
+    full_suite_print_case_summary "$test_name_for_summary" "$ret" false
+}
+
 full_suite_run_all_cases() {
     full_suite_fail_count=0
     full_suite_fail_list=()
@@ -1571,6 +1627,8 @@ full_suite_run_all_cases() {
                 full_suite_run_qwen_case "$test_case"
             elif [[ "$test_case" == *"test_multi_turn_chat.sh"* ]]; then
                 full_suite_run_multi_turn_case "$test_case"
+            elif [[ "$test_case" == *"test_prefix_cache.sh"* ]]; then
+                full_suite_run_prefix_cache_case "$test_case"
             else
                 # Generic script execution
                 full_suite_run_regular_case "$test_case"
@@ -1684,6 +1742,7 @@ run_full_test_suite() {
     echo "[INFO] Preparing Qwen model tests for correctness validation" | tee -a "$summary_log"
     add_qwen_model_tests
     add_multi_turn_tests
+    add_prefix_cache_tests
     full_suite_prepare_part2_cases
 
     test_cases=(
@@ -1691,6 +1750,7 @@ run_full_test_suite() {
         "${test_cases_part2[@]}"
         "${qwen_model_tests[@]}"
         "${multi_turn_tests[@]}"
+        "${prefix_cache_tests[@]}"
     )
 
     full_suite_run_all_cases
