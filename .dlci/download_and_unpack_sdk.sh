@@ -24,31 +24,28 @@ if ! is_platform_supported "$ARCH"; then
     exit 1
 fi
 
+# Clean up old SDK directories with different TAGs before creating new workspace
+SDK_PARENT_DIR="$(dirname "$SDK_WORKSPACE")"
+if [[ -d "$SDK_PARENT_DIR" ]]; then
+    echo "[INFO] Checking for old SDK directories in $SDK_PARENT_DIR"
+    # Find and remove directories with names different from current TAG
+    for old_dir in "$SDK_PARENT_DIR"/*; do
+        if [[ -d "$old_dir" ]]; then
+            old_dir_name="$(basename "$old_dir")"
+            if [[ "$old_dir_name" != "$SDK_TAG" && "$old_dir_name" != "docker" ]]; then
+                echo "[INFO] Removing old SDK directory: $old_dir_name"
+                rm -rf "$old_dir" 2>/dev/null || true
+            fi
+        fi
+    done
+fi
+
 echo "[INFO] Creating SDK workspace: $SDK_WORKSPACE"
 mkdir -p "$SDK_WORKSPACE"
 cd "$SDK_WORKSPACE"
 
-# Check if cached SDK has a different TAG
-SDK_TAG_FILE=".sdk_tag"
-CURRENT_CACHED_TAG=""
-if [[ -f "$SDK_TAG_FILE" ]]; then
-    CURRENT_CACHED_TAG=$(cat "$SDK_TAG_FILE" 2>/dev/null || echo "")
-fi
-
-if [[ -n "$CURRENT_CACHED_TAG" && "$CURRENT_CACHED_TAG" != "$SDK_TAG" ]]; then
-    echo "[INFO] SDK TAG has changed from '$CURRENT_CACHED_TAG' to '$SDK_TAG'"
-    echo "[INFO] Cleaning up old SDK files..."
-    # Remove old SDK archives and extracted directories
-    rm -rf *.tar.xz sdk sdk_aarch64 2>/dev/null || true
-    echo "[INFO] Old SDK files cleaned up"
-elif [[ -z "$CURRENT_CACHED_TAG" ]]; then
-    echo "[INFO] No cached SDK TAG found, will use: $SDK_TAG"
-else
-    echo "[INFO] Using cached SDK with matching TAG: $SDK_TAG"
-fi
-
-# Save current SDK TAG
-echo "$SDK_TAG" > "$SDK_TAG_FILE"
+# Save current SDK TAG to track this workspace
+echo "$SDK_TAG" > .sdk_tag
 
 # Get SDK download configuration from config.yml
 get_sdk_download_config() {
