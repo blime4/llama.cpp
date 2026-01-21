@@ -28,7 +28,7 @@ platform_suffixes:
 
 build:
   sdk:
-    tag: "V2_SOFTWARE_master_202512192145"
+    tag: "V2_SOFTWARE_master_202601191452"
     workspace_template: "${CI_BUILDS_DIR}/sdk_llama_cpp/${DOCKER_PLATFORM}/${SDK_TAG}"
     docker_REPO_PATH: "${CI_BUILDS_DIR}/sdk_llama_cpp/docker"
 
