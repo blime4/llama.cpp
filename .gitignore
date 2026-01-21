@@ -155,6 +155,7 @@ third
 .kilocode/
 .kiro/
 .opencode/
+openspec/
 
 # emscripten
 a.out.*
