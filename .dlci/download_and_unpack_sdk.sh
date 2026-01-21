@@ -28,6 +28,28 @@ echo "[INFO] Creating SDK workspace: $SDK_WORKSPACE"
 mkdir -p "$SDK_WORKSPACE"
 cd "$SDK_WORKSPACE"
 
+# Check if cached SDK has a different TAG
+SDK_TAG_FILE=".sdk_tag"
+CURRENT_CACHED_TAG=""
+if [[ -f "$SDK_TAG_FILE" ]]; then
+    CURRENT_CACHED_TAG=$(cat "$SDK_TAG_FILE" 2>/dev/null || echo "")
+fi
+
+if [[ -n "$CURRENT_CACHED_TAG" && "$CURRENT_CACHED_TAG" != "$SDK_TAG" ]]; then
+    echo "[INFO] SDK TAG has changed from '$CURRENT_CACHED_TAG' to '$SDK_TAG'"
+    echo "[INFO] Cleaning up old SDK files..."
+    # Remove old SDK archives and extracted directories
+    rm -rf *.tar.xz sdk sdk_aarch64 2>/dev/null || true
+    echo "[INFO] Old SDK files cleaned up"
+elif [[ -z "$CURRENT_CACHED_TAG" ]]; then
+    echo "[INFO] No cached SDK TAG found, will use: $SDK_TAG"
+else
+    echo "[INFO] Using cached SDK with matching TAG: $SDK_TAG"
+fi
+
+# Save current SDK TAG
+echo "$SDK_TAG" > "$SDK_TAG_FILE"
+
 # Get SDK download configuration from config.yml
 get_sdk_download_config() {
     local platform="$1"
