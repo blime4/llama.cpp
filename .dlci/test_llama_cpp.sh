@@ -1308,6 +1308,7 @@ full_suite_prepare_part2_cases() {
     test_cases_part2=(
         "${build_dir_bin}/test-tokenizer-1-bpe models/ggml-vocab-llama-bpe.gguf"
         "${build_dir_bin}/test-tokenizer-1-spm models/ggml-vocab-llama-spm.gguf"
+        "${build_dir_bin}/test-state-restore-fragmented --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
     )
     add_tokenizer_vocab_tests
 }
