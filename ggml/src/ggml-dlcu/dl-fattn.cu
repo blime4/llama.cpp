@@ -946,8 +946,6 @@ static void set_flash_attn_runtime(
     // Use seqlen_q_hint directly from Q->ne[1]
     const int seqlen_q = seqlen_q_hint;
 
-    printf("[DLFA-DEBUG] set_flash_attn_runtime ENTRY: seq_id=%d, state_key=%p, seqlen_q=%d\n", seq_id, state_key, seqlen_q);
-
     GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: seqlen_q=%d (from Q->ne[1])\n", seqlen_q);
 
     // Check if mask data is properly initialized using actual_seqlen_q
@@ -1026,9 +1024,6 @@ static void set_flash_attn_runtime(
     int seqlen_k_real;
     bool is_new_conversation = false;
 
-    printf("[DLFA-DEBUG] set_flash_attn_runtime: seqlen_q=%d, prev_seqlen_k_real=%d, accumulated=%d, inferred=%d, condition_check: prefill && prev > q+50 ? %d > %d ? %d\n",
-            seqlen_q, prev_seqlen_k_real, accumulated, inferred, seqlen_q > 1, prev_seqlen_k_real > seqlen_q + 50, seqlen_q > 1 && prev_seqlen_k_real > seqlen_q + 50);
-
     if (prev_seqlen_k_real == 0) {
         // First prefill in conversation - use seqlen_q (the prompt length)
         // Note: Tests don't call set_flash_attn_runtime, they use non-varlen path
@@ -1062,8 +1057,6 @@ static void set_flash_attn_runtime(
     } else {
         // Normal conversation operation - accumulate
         seqlen_k_real = accumulated;
-        printf("[DLFA-DEBUG] set_flash_attn_runtime: normal conversation, using accumulated=%d (prev=%d + seqlen_q=%d)\n",
-                accumulated, prev_seqlen_k_real, seqlen_q);
 
         // DISABLED: KV cache cleanup detection via mask inference
         // The callback mechanism (dlfa_kv_cache_removal_hook) already synchronizes
@@ -1598,7 +1591,7 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
     }
 
     // Check basic requirements
-    if (hsk > 288) { // adapt from flash-attn
+    if (hsk > 288) { // adapt from flash-attn // DL-TODO: update to 576 if SDK update.
         GGML_LOG_WARN("DLDNN is not available for ne[0] %ld\n", hsk);
         return false;
     }
@@ -1872,8 +1865,6 @@ void flash_attn_ext_dldnn_clear_state_for_seq_id(llama_seq_id seq_id, llama_pos 
 
     GGML_DL_FATTN_DEBUG_PRINT("dlfa_clear_state: seq_id=%d, state_key=%p, new_kv_size=%d\n",
             seq_id, state_key, new_kv_size);
-    printf("[DLFA-STATE-CLEANUP] Cleared state for seq_id=%d, state_key=%p, new_kv_size=%d\n",
-           seq_id, state_key, new_kv_size);
 }
 
 } // namespace ggml_dl

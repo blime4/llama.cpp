@@ -1318,19 +1318,31 @@ full_suite_record_backend_subtests() {
     local temp_clean
     temp_clean=$(mktemp)
     sed $'s/\033\[[0-9;]*m//g' "$temp_output" > "$temp_clean"
+
+    # Track the last seen test to associate status-only lines with it
+    local last_seen_test=""
+    local last_seen_params=""
+
     local regex_pattern='^[[:space:]]*([A-Z_]+)\(([^)]+)\):[[:space:]]*(.+)$'
+    local status_pattern='^[[:space:]]*(not supported|skipping|passed|failed|OK|\.OK)([[:space:]].*)?$'
+
     while IFS= read -r line; do
         if [[ "$line" =~ $regex_pattern ]]; then
             local sub_test_name="${BASH_REMATCH[1]}"
             local sub_test_params="${BASH_REMATCH[2]}"
-            local sub_case_name="${test_name_for_summary}-${sub_test_name}(${sub_test_params})"
             local sub_test_result="${BASH_REMATCH[3]}"
+
+            local sub_case_name="${test_name_for_summary}-${sub_test_name}(${sub_test_params})"
+
+            # Remember this test for potential future status-only lines
+            last_seen_test="$sub_case_name"
+            last_seen_params="$sub_test_params"
 
             # Determine status for this sub-test line
             local sub_status
-            if [[ "$sub_test_result" =~ ^OK ]]; then
+            if [[ "$sub_test_result" =~ ^OK ]] || [[ "$sub_test_result" =~ \.OK$ ]]; then
                 sub_status="PASSED"
-            elif [[ "$sub_test_result" == skipping* ]] || [[ "$sub_test_result" == *"not supported"* ]]; then
+            elif [[ "$sub_test_result" =~ skipping ]] || [[ "$sub_test_result" =~ "not supported" ]]; then
                 sub_status="skipped"
             else
                 sub_status="FAILED"
@@ -1348,6 +1360,25 @@ full_suite_record_backend_subtests() {
                 test_results_names+=("$sub_case_name")
                 test_results_status+=("$sub_status")
             fi
+        elif [[ -n "$last_seen_test" && "$line" =~ $status_pattern ]]; then
+            # This is a status-only line (no test name), associate with last seen test
+            local status_text="${BASH_REMATCH[1]}"
+            local sub_status
+            if [[ "$status_text" =~ ^OK ]] || [[ "$status_text" =~ \.OK$ ]] || [[ "$status_text" =~ passed ]]; then
+                sub_status="PASSED"
+            elif [[ "$status_text" =~ skipping ]] || [[ "$status_text" =~ "not supported" ]]; then
+                sub_status="skipped"
+            else
+                sub_status="FAILED"
+            fi
+
+            # Update the status for the last seen test
+            for i in "${!test_results_names[@]}"; do
+                if [ "${test_results_names[$i]}" = "$last_seen_test" ]; then
+                    test_results_status[$i]="$sub_status"
+                    break
+                fi
+            done
         fi
     done < "$temp_clean"
     safe_rm -f "$temp_clean"
@@ -1394,8 +1425,9 @@ full_suite_run_qwen_case() {
     start_time=$(date +%s)
 
     set +e
-    bash "$test_script" >> "$test_log" 2>&1
-    local ret=$?
+    # Output to both stdout and log file using tee
+    bash "$test_script" 2>&1 | tee -a "$test_log"
+    local ret=${PIPESTATUS[0]}
     set -e
 
     end_time=$(date +%s)
@@ -1503,8 +1535,9 @@ full_suite_run_multi_turn_case() {
     start_time=$(date +%s)
 
     set +e
-    bash "$test_script" >> "$test_log" 2>&1
-    local ret=$?
+    # Output to both stdout and log file using tee
+    bash "$test_script" 2>&1 | tee -a "$test_log"
+    local ret=${PIPESTATUS[0]}
     set -e
 
     end_time=$(date +%s)
