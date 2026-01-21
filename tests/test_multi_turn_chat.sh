@@ -80,6 +80,30 @@ EXPECTED_ANSWERS_FILE="tests/expected_answers.yml"
 
 # ============ 函数定义 ============
 
+# 转义字符串中的特殊字符用于 sed 替换
+# 处理: \ / & 和换行符
+escape_for_sed() {
+    local str="$1"
+    # 转义反斜杠和分隔符
+    str="${str//\\/\\\\}"
+    str="${str//\//\\/}"
+    str="${str//&/\\&}"
+    # 将换行符转义为 \n
+    str="${str//$'\n'/\\n}"
+    printf '%s' "$str"
+}
+
+# 验证测试用例名称和轮次标识的安全性
+validate_test_case_name() {
+    local name="$1"
+    # 只允许字母、数字、下划线和连字符
+    if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]; then
+        echo "[错误] 测试用例名称包含非法字符: $name" | tee -a "$LOG_FILE"
+        return 1
+    fi
+    return 0
+}
+
 # 读取YAML文件中指定测试用例和轮次的期望答案
 get_expected_answer() {
     local test_case="$1"
@@ -126,6 +150,14 @@ update_expected_answer() {
     local round="$2"
     local new_answer="$3"
 
+    # 验证名称安全性
+    if ! validate_test_case_name "$test_case"; then
+        return 1
+    fi
+    if ! validate_test_case_name "$round"; then
+        return 1
+    fi
+
     # 如果YAML文件不存在，创建它
     if [ ! -f "$EXPECTED_ANSWERS_FILE" ]; then
         mkdir -p "$(dirname "$EXPECTED_ANSWERS_FILE")"
@@ -137,34 +169,72 @@ EOF
     fi
 
     local temp_file="${EXPECTED_ANSWERS_FILE}.tmp"
-    local section_found=false
-    local in_test_case=false
     local updated=false
+    local in_test_case=false
 
-    # 使用sed进行更新，如果找不到则添加
-    if grep -q "^${test_case}:" "$EXPECTED_ANSWERS_FILE"; then
-        # 测试用例存在，尝试更新特定的轮次
-        sed -i "/^${test_case}:/,/^[a-zA-Z_]\+:/ {
-            /^${test_case}:/ {
-                h
-                n
-                :loop
-                /^  ${round}:/ {
-                    s|^\(  ${round}:\).*|\1 \"${new_answer}\"|
-                    b end
-                }
-                /^$/ { n; b loop }
-                /^[a-zA-Z_]\+:/ { b end }
-                n
-                b loop
-                :end
-            }
-        }" "$EXPECTED_ANSWERS_FILE"
-    else
-        # 测试用例不存在，添加到文件末尾
-        echo "" >> "$EXPECTED_ANSWERS_FILE"
-        echo "${test_case}:" >> "$EXPECTED_ANSWERS_FILE"
-        echo "  ${round}: \"${new_answer}\"" >> "$EXPECTED_ANSWERS_FILE"
+    # 使用更安全的方法：逐行处理
+    while IFS= read -r line || [ -n "$line" ]; do
+        # 检查是否进入指定的测试用例部分
+        if [[ "$line" =~ ^${test_case}: ]]; then
+            in_test_case=true
+            echo "$line" >> "$temp_file"
+            continue
+        fi
+
+        if [ "$in_test_case" = true ]; then
+            # 检查是否到达下一个测试用例
+            if [[ "$line" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*: ]]; then
+                in_test_case=false
+                # 在新测试用例之前添加本轮次（如果未找到）
+                if [ "$updated" = false ]; then
+                    echo "  ${round}: \"$(escape_for_sed "$new_answer")\"" >> "$temp_file"
+                    updated=true
+                fi
+                echo "$line" >> "$temp_file"
+                continue
+            fi
+
+            # 查找指定的轮次并更新
+            if [[ "$line" =~ ^[[:space:]]*${round}: ]]; then
+                echo "  ${round}: \"$(escape_for_sed "$new_answer")\"" >> "$temp_file"
+                updated=true
+                continue
+            fi
+
+            echo "$line" >> "$temp_file"
+        else
+            echo "$line" >> "$temp_file"
+        fi
+    done < "$EXPECTED_ANSWERS_FILE"
+
+    # 如果测试用例不存在或轮次未找到，追加到文件末尾
+    if [ "$updated" = false ]; then
+        if ! grep -q "^${test_case}:" "$EXPECTED_ANSWERS_FILE"; then
+            echo "" >> "$temp_file"
+            echo "${test_case}:" >> "$temp_file"
+        fi
+        echo "  ${round}: \"$(escape_for_sed "$new_answer")\"" >> "$temp_file"
+    fi
+
+    # 原子替换文件
+    mv "$temp_file" "$EXPECTED_ANSWERS_FILE"
+}
+
+# 清理可能残留的服务器进程
+cleanup_stale_processes() {
+    # 查找可能在同一端口上运行的旧服务器进程
+    local old_pids=$(lsof -ti:$SERVER_PORT 2>/dev/null || true)
+    if [ -n "$old_pids" ]; then
+        echo "检测到端口 $SERVER_PORT 上有残留进程，正在清理..." | tee -a "$LOG_FILE"
+        for pid in $old_pids; do
+            # 检查进程是否是 llama-server
+            if ps -p "$pid" -o command= 2>/dev/null | grep -q "llama-server"; then
+                echo "  杀死残留进程 PID: $pid" | tee -a "$LOG_FILE"
+                kill "$pid" 2>/dev/null || true
+            fi
+        done
+        # 等待进程完全退出
+        sleep 1
     fi
 }
 
@@ -197,6 +267,9 @@ check_dependencies() {
 
 # 启动服务器
 start_server() {
+    # 先清理可能残留的进程
+    cleanup_stale_processes
+
     echo "启动 llama-server..." | tee -a "$LOG_FILE"
     # Simplified configuration to avoid crashes:
     # - No warmup/CUDA graphs (--no-warmup)
@@ -271,7 +344,10 @@ EOF
     echo "请求JSON: $request_json" >> "${LOG_FILE}.debug"
 
     while [ $retry -lt $max_retries ]; do
-        response=$(curl -s -w "\nHTTP_CODE:%{http_code}" "${SERVER_URL}/v1/chat/completions" \
+        response=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+            --max-time 300 \
+            --connect-timeout 30 \
+            "${SERVER_URL}/v1/chat/completions" \
             -H "Content-Type: application/json" \
             -d "$request_json")
 
@@ -356,10 +432,11 @@ build_messages() {
         local content="${CONVERSATION[$i]#*:}"
         # 使用 jq 正确转义 JSON 字符串（如果可用）
         if command -v jq >/dev/null 2>&1; then
-            local escaped_content=$(echo -n "$content" | jq -Rs .)
+            # 使用 -R 读取原始输入，-r 输出原始 JSON 字符串
+            local escaped_content=$(printf '%s' "$content" | jq -R .)
         else
-            # 简单转义
-            local escaped_content="\"$(echo -n "$content" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g')\""
+            # 简单转义：转义双引号和反斜杠，控制字符转为 Unicode
+            local escaped_content="\"$(printf '%s' "$content" | sed 's/\\/\\\\/g; s/"/\\"/g; s/$$/\\n/g' | tr -d '\n' | sed 's/\\n$//')\""
         fi
         result+="{\"role\":\"$role\",\"content\":$escaped_content}"
     done
@@ -590,7 +667,11 @@ print_test_summary() {
     echo "总测试数: $TOTAL_TESTS" | tee -a "$LOG_FILE"
     echo "通过: $PASSED_TESTS" | tee -a "$LOG_FILE"
     echo "失败: $FAILED_TESTS" | tee -a "$LOG_FILE"
-    echo "成功率: $(( PASSED_TESTS * 100 / TOTAL_TESTS ))%" | tee -a "$LOG_FILE"
+    if [ $TOTAL_TESTS -gt 0 ]; then
+        echo "成功率: $(( PASSED_TESTS * 100 / TOTAL_TESTS ))%" | tee -a "$LOG_FILE"
+    else
+        echo "成功率: N/A (无测试执行)" | tee -a "$LOG_FILE"
+    fi
     echo "========================================" | tee -a "$LOG_FILE"
 
     if [ $FAILED_TESTS -eq 0 ]; then
@@ -630,8 +711,8 @@ main() {
         exit 1
     fi
 
-    # 设置清理函数
-    trap stop_server EXIT
+    # 设置清理函数 - 捕获多种退出信号
+    trap stop_server EXIT INT TERM HUP ERR
 
     # 启动服务器
     if ! start_server; then
