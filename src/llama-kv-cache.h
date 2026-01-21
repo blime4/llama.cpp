@@ -18,6 +18,15 @@ struct llama_hparams;
 struct llama_model;
 struct llama_context;
 
+// Callback function type for KV cache removal events
+// Invoked when llama_memory_seq_rm is called to notify DLFA of state changes
+// Parameters:
+//   - seq_id: The sequence identifier (equals slot.id in llama-server)
+//   - pos0: The starting position being removed (inclusive)
+//   - pos1: The ending position being removed (exclusive, -1 for end)
+//   - user_data: User-provided context data
+typedef void (*llama_kv_cache_removal_callback)(llama_seq_id seq_id, llama_pos pos0, llama_pos pos1, void *user_data);
+
 //
 // llama_kv_cache
 //
@@ -129,6 +138,12 @@ public:
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
 
     bool get_can_shift() const override;
+
+    // Set callback for KV cache removal events (used to synchronize DLFA state)
+    void set_seq_rm_callback(llama_kv_cache_removal_callback callback, void *user_data) {
+        seq_rm_callback = callback;
+        seq_rm_callback_user_data = user_data;
+    }
 
     void clear(bool data) override;
 
@@ -261,6 +276,10 @@ private:
 
     // pending stream copies that will be applied during the next update
     stream_copy_info sc_info;
+
+    // Callback for KV cache removal events (used to synchronize DLFA state)
+    llama_kv_cache_removal_callback seq_rm_callback = nullptr;
+    void * seq_rm_callback_user_data = nullptr;
 
     std::vector<kv_layer> layers;
 

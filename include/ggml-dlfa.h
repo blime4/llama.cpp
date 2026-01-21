@@ -32,7 +32,8 @@ flash_attn_ext_decode_state & flash_attn_ext_dldnn_decode_state();
 // Prepare device buffers for varlen forward (called early for async overlap)
 // This should be called after set_inputs and before graph_compute
 // Note: ggml_backend_cuda_context is defined in ggml-cuda/common.cuh
-void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+// NEW: Updated to accept seq_id parameter for proper slot isolation
+void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int32_t seq_id);
 
 // Cleanup function to free all varlen_data and device memory
 // NOTE: This function is available for manual cleanup but is not automatically

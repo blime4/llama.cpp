@@ -137,6 +137,10 @@ llama_kv_cache::llama_kv_cache(
         ggml_format_name(k, "cache_k_l%d", il);
         ggml_format_name(v, "cache_v_l%d", il);
 
+        // Store llama_kv_cache pointer in K tensor's extra field for DLFA state management
+        // This provides a stable key that is shared across all FA layers and persists across build_graph() calls
+        k->extra = (void *)this;
+
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
 
@@ -243,6 +247,11 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 
     if (p1 < 0) {
         p1 = std::numeric_limits<llama_pos>::max();
+    }
+
+    // Call callback before actual cleanup to notify DLFA of state changes
+    if (seq_rm_callback) {
+        seq_rm_callback(seq_id, p0, p1, seq_rm_callback_user_data);
     }
 
     if (seq_id >= 0) {

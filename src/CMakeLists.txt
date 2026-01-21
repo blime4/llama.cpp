@@ -160,10 +160,13 @@ endif()
 # In GGML_BACKEND_DL mode, ggml-dlcu is a MODULE, but we still need to link it for symbols
 # Note: ggml_backend_cuda_get_context and ggml_backend_is_cuda are also in ggml-dlcu
 if (GGML_USE_DLFA)
-    # For MODULE targets, link the library file directly using relative path from build dir
-    # The library is in the same output directory as binaries (bin/)
-    target_link_libraries(llama PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/../bin/libggml-dlcu.so")
-    message(STATUS "Linking llama with ggml-dlcu: ${CMAKE_CURRENT_BINARY_DIR}/../bin/libggml-dlcu.so")
+    # For MODULE targets, link the library file directly using absolute path from build dir
+    # The library is in the bin/ directory
+    set(DLCU_LIB_PATH "${CMAKE_BINARY_DIR}/bin/libggml-dlcu.so")
+    target_link_libraries(llama PRIVATE "${DLCU_LIB_PATH}")
+    # Also add the library directory to the rpath so it can be found at runtime
+    target_link_options(llama PRIVATE "-Wl,-rpath,${CMAKE_BINARY_DIR}/bin")
+    message(STATUS "Linking llama with ggml-dlcu: ${DLCU_LIB_PATH}")
 endif()
 
 # DL

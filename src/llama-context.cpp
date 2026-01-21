@@ -4,6 +4,7 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-kv-cache.h"
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
@@ -55,6 +56,74 @@ static bool LLAMA_OPS_FUSION = []() -> bool {
 // llama_context
 //
 
+#ifdef GGML_USE_DLCU
+#include <dlfcn.h>
+
+// Function pointer type for DLFA state cleanup function
+typedef void (*dlfa_clear_state_fn_t)(llama_seq_id seq_id, llama_pos new_kv_size);
+
+// Global state for runtime linking
+static void *g_dlcu_handle = nullptr;
+static dlfa_clear_state_fn_t g_dlfa_clear_state_func = nullptr;
+
+// KV cache removal callback for DLFA state synchronization
+// Uses runtime linking (dlopen/dlsym) to work around CUDA/C++ linking limitations
+// pos0 represents the new KV cache size after cleanup (retained positions)
+static void dlfa_kv_cache_removal_hook(llama_seq_id seq_id, llama_pos pos0, llama_pos pos1, void *user_data) {
+    GGML_UNUSED(user_data);
+    GGML_UNUSED(pos1);
+
+    // pos0 is the retained KV cache size (the new size after cleanup)
+    llama_pos new_kv_size = pos0;
+
+    // Call the state cleanup function to synchronize DLFA state for this sequence
+    if (g_dlfa_clear_state_func != nullptr) {
+        LLAMA_LOG_DEBUG("%s: DLFA cleanup: seq_id=%d, new_kv_size=%d (removed [%d, %d))\n",
+                        __func__, seq_id, new_kv_size, pos0, pos1);
+        g_dlfa_clear_state_func(seq_id, new_kv_size);
+    }
+}
+
+// Initialize runtime linking for DLFA functions
+static void init_dlfa_runtime_linking() {
+    if (g_dlcu_handle != nullptr) {
+        return;  // Already initialized
+    }
+
+    // Try multiple paths to find the library
+    const char *paths[] = {
+        "libggml-dlcu.so",
+        "./build_x86_64/bin/libggml-dlcu.so",
+        "../build_x86_64/bin/libggml-dlcu.so",
+        nullptr
+    };
+
+    for (int i = 0; paths[i] != nullptr; i++) {
+        g_dlcu_handle = dlopen(paths[i], RTLD_LAZY | RTLD_NOLOAD);
+        if (g_dlcu_handle != nullptr) {
+            LLAMA_LOG_INFO("%s: Loaded libggml-dlcu.so from %s\n", __func__, paths[i]);
+            break;
+        }
+    }
+
+    if (g_dlcu_handle == nullptr) {
+        LLAMA_LOG_WARN("%s: Failed to load libggml-dlcu.so from any path: %s\n", __func__, dlerror());
+        return;
+    }
+
+    // Find the per-sequence state cleanup function
+    g_dlfa_clear_state_func = (dlfa_clear_state_fn_t)dlsym(g_dlcu_handle, "dlfa_clear_state");
+    if (g_dlfa_clear_state_func == nullptr) {
+        LLAMA_LOG_WARN("%s: Failed to find dlfa_clear_state: %s\n", __func__, dlerror());
+        dlclose(g_dlcu_handle);
+        g_dlcu_handle = nullptr;
+        return;
+    }
+
+    LLAMA_LOG_INFO("%s: Successfully initialized DLFA runtime linking\n", __func__);
+}
+#endif  // GGML_USE_DLCU
+
 llama_context::llama_context(
         const llama_model & model,
               llama_context_params params) :
@@ -63,6 +132,11 @@ llama_context::llama_context(
     // TODO warning when creating llama_context with awkward ctx size that is not a power of 2,
     //     may need to be backend-dependent
     LLAMA_LOG_INFO("%s: constructing llama_context\n", __func__);
+
+#ifdef GGML_USE_DLCU
+    // Initialize runtime linking for DLFA functions (for KV cache cleanup callback)
+    init_dlfa_runtime_linking();
+#endif
 
     t_start_us = model.t_start_us;
     t_load_us  = model.t_load_us;
@@ -305,6 +379,16 @@ llama_context::llama_context(
         };
 
         memory.reset(model.create_memory(params_mem, cparams));
+
+#ifdef GGML_USE_DLCU
+        // Register DLFA KV cache removal callback for state synchronization
+        // Uses runtime linking (dlopen/dlsym) to work around CUDA/C++ linking limitations
+        if (memory) {
+            auto * kv_cache = static_cast<llama_kv_cache*>(memory.get());
+            kv_cache->set_seq_rm_callback(dlfa_kv_cache_removal_hook, nullptr);
+            LLAMA_LOG_DEBUG("%s: Registered DLFA KV cache removal callback with runtime linking\n", __func__);
+        }
+#endif  // GGML_USE_DLCU
     }
 
     // init backends
@@ -862,16 +946,19 @@ bool llama_context::apply_adapter_cvec(
 
 #ifdef GGML_USE_DLFA
 // Propagate runtime metadata from original mask to all copied masks.
-// NEW: Call set_flash_attn_runtime for each unique mask pointer
+// NEW: Use seq_id as state_key instead of mask pointer to avoid state pollution
 // This must be called after set_inputs (when mask data is available) and before prepare_flash_attn_varlen_buffers
-static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph * gf, int n_tokens) {
+static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph * gf, int n_tokens, const llama_ubatch & ubatch) {
     const int n_nodes = ggml_graph_n_nodes(gf);
+
+    // Assert single-slot scenario for current implementation
+    GGML_ASSERT(ubatch.n_seqs_unq == 1 && "DL TODO: Multi-slot concurrent not yet supported");
+
+    // Extract seq_id from ubatch
+    llama_seq_id seq_id = ubatch.seq_id_unq[0];
 
     // Track which mask pointers we've already processed
     std::set<void*> processed_masks;
-
-    // Store the first mask pointer to copy host data from
-    void * first_mask = nullptr;
 
     // Find all FLASH_ATTN_EXT nodes and call set_flash_attn_runtime for each unique mask
     // In multi-GPU mode, each GPU may have its own copy of the mask tensor
@@ -930,34 +1017,11 @@ static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph 
             continue;
         }
 
-        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int);
+        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int, llama_seq_id);
         auto fn = reinterpret_cast<set_runtime_backend_fn_t>(set_runtime_fn);
 
-        // For the first mask, call set_flash_attn_runtime normally
-        // For subsequent masks, we need to copy the host data from the first mask
-        if (first_mask == nullptr) {
-            // First mask - call set_flash_attn_runtime to compute host data
-            fn(backend, node, n_tokens);
-            first_mask = mask;
-        } else {
-            // Subsequent masks - call set_flash_attn_runtime, but it will use the
-            // accumulation state from the first mask (since we're using the same seqlen_q_hint)
-            // However, the accumulation state is keyed by mask pointer, so we need to
-            // copy the host data from the first mask to this mask
-
-            // First, call set_flash_attn_runtime to create the host data entry
-            fn(backend, node, n_tokens);
-
-            // Then, copy the host data from the first mask to this mask
-            // This is done by the copy_varlen_host_data function in dl-fattn.cu
-            auto * copy_fn = ggml_backend_reg_get_proc_address(
-                reg, "flash_attn_ext_dldnn_copy_host_data_backend");
-            if (copy_fn != nullptr) {
-                using copy_backend_fn_t = void (*)(ggml_backend_t, void *, void *);
-                auto copy = reinterpret_cast<copy_backend_fn_t>(copy_fn);
-                copy(backend, first_mask, mask);
-            }
-        }
+        // Since we now use seq_id as state_key, all masks with the same seq_id share the same state
+        fn(backend, node, n_tokens, seq_id);
 
         // Mark this mask as processed
         processed_masks.insert(mask);
@@ -967,8 +1031,12 @@ static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph 
 // Prepare varlen buffers for flash attention tensors in the graph.
 // Must run after set_flash_attn_runtime_once (which computes host data)
 // and before graph_compute to keep CUDA graph capture stable.
-static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_cgraph * gf) {
+static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_cgraph * gf, const llama_ubatch & ubatch) {
     const int n_nodes = ggml_graph_n_nodes(gf);
+
+    // Extract seq_id from ubatch (same as in set_flash_attn_runtime_once)
+    GGML_ASSERT(ubatch.n_seqs_unq == 1 && "DL TODO: Multi-slot concurrent not yet supported");
+    llama_seq_id seq_id = ubatch.seq_id_unq[0];
 
     // Track which (node, backend) pairs we've already prepared to avoid redundant calls
     std::set<std::pair<void*, ggml_backend_t>> prepared_pairs;
@@ -1035,10 +1103,10 @@ static void prepare_flash_attn_varlen_buffers(ggml_backend_sched_t sched, ggml_c
             continue;
         }
 
-        using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *);
+        using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int32_t);
         auto fn = reinterpret_cast<prepare_backend_fn_t>(prepare_fn);
 
-        fn(backend, node);
+        fn(backend, node, seq_id);
 
         // Mark this (node, backend) pair as prepared
         prepared_pairs.insert(pair);
@@ -1123,11 +1191,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // 3. graph_compute: Execute (varlen_forward uses prepared data)
 
     // Step 1: Compute host data (only needs to be called once since all FA layers share the same mask)
-    set_flash_attn_runtime_once(sched.get(), gf, ubatch.n_tokens);
+    set_flash_attn_runtime_once(sched.get(), gf, ubatch.n_tokens, ubatch);
 
     // Step 2: Prepare varlen buffers for flash attention
     // This enables async overlap of cudaMemcpyAsync with subsequent graph_compute operations
-    prepare_flash_attn_varlen_buffers(sched.get(), gf);
+    prepare_flash_attn_varlen_buffers(sched.get(), gf, ubatch);
 #endif
 
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);

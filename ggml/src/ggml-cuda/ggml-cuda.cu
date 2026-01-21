@@ -13,9 +13,10 @@
 #ifdef GGML_USE_DLFA
 #include "../ggml-dlcu/dl-fattn.cuh"
 // Forward declaration for C linkage wrapper function in ggml-dlcu
-extern "C" void ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+// NEW: Updated to accept seq_id parameter for proper slot isolation
+extern "C" void ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int32_t seq_id);
 // NEW: Forward declaration for set_flash_attn_runtime wrapper
-extern "C" void ggml_dl_flash_attn_ext_dldnn_set_runtime(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int seqlen_q_hint);
+extern "C" void ggml_dl_flash_attn_ext_dldnn_set_runtime(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int seqlen_q_hint, int32_t seq_id);
 // NEW: Forward declaration for copy_host_data wrapper
 extern "C" void ggml_dl_flash_attn_ext_dldnn_copy_host_data(ggml_backend_cuda_context & ctx, void * src_mask, void * dst_mask);
 #endif
@@ -5111,29 +5112,25 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
 #endif
 #ifdef GGML_USE_DLFA
-    // Register flash attention prepare function from ggml-dlcu
-    if (strcmp(name, "flash_attn_ext_dldnn_prepare_varlen_buffers") == 0) {
-        // Function is in ggml-dlcu, declared with C linkage (forward declared at top of file)
-        return reinterpret_cast<void *>(ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers);
-    }
     // Wrapper that takes backend and retrieves CUDA context internally
+    // NEW: Updated to accept seq_id parameter for proper slot isolation
     if (strcmp(name, "flash_attn_ext_dldnn_prepare_varlen_buffers_backend") == 0) {
-        using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *);
-        static auto wrapper = [](ggml_backend_t backend, ggml_tensor * dst) {
+        using prepare_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int32_t);
+        static auto wrapper = [](ggml_backend_t backend, ggml_tensor * dst, int32_t seq_id) {
             ggml_backend_cuda_context * ctx = ggml_backend_cuda_get_context(backend);
             if (ctx != nullptr) {
-                ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(*ctx, dst);
+                ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(*ctx, dst, seq_id);
             }
         };
         return reinterpret_cast<void *>(+wrapper);
     }
     // NEW: Wrapper for set_flash_attn_runtime (called once after set_inputs)
     if (strcmp(name, "flash_attn_ext_dldnn_set_runtime_backend") == 0) {
-        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int);
-        static auto wrapper = [](ggml_backend_t backend, ggml_tensor * dst, int seqlen_q_hint) {
+        using set_runtime_backend_fn_t = void (*)(ggml_backend_t, ggml_tensor *, int, int32_t);
+        static auto wrapper = [](ggml_backend_t backend, ggml_tensor * dst, int seqlen_q_hint, int32_t seq_id) {
             ggml_backend_cuda_context * ctx = ggml_backend_cuda_get_context(backend);
             if (ctx != nullptr) {
-                ggml_dl_flash_attn_ext_dldnn_set_runtime(*ctx, dst, seqlen_q_hint);
+                ggml_dl_flash_attn_ext_dldnn_set_runtime(*ctx, dst, seqlen_q_hint, seq_id);
             }
         };
         return reinterpret_cast<void *>(+wrapper);

@@ -200,16 +200,18 @@ start_server() {
     echo "启动 llama-server..." | tee -a "$LOG_FILE"
     # Simplified configuration to avoid crashes:
     # - No warmup/CUDA graphs (--no-warmup)
-    # - Single parallel slot (-np 1)
+    # - Multiple parallel slots (-np 3) for test isolation
     # - Larger context to handle multi-turn conversations (-c 4096)
+    # - Disabled slot prompt similarity (-sps 0) to avoid cross-test pollution
     $LLAMA_SERVER \
         -m "$MODEL_PATH" \
         --port $SERVER_PORT \
         -ngl 999 \
         -fa on \
         --no-warmup \
-        -np 1 \
+        -np 3 \
         -c 4096 \
+        -sps 0 \
         > "${LOG_FILE}.server" 2>&1 &
 
     SERVER_PID=$!
@@ -217,8 +219,9 @@ start_server() {
 
     # 等待服务器启动
     echo "等待服务器就绪..."
-    for i in {1..60}; do
-        if curl -s "${SERVER_URL}/health" > /dev/null 2>&1; then
+    for i in {1..120}; do
+        # -f: HTTP错误时失败(如503), -s: 静默模式, -o: 输出到文件
+        if curl -s -f -o /dev/null "${SERVER_URL}/health" 2>&1; then
             echo "服务器已就绪，等待模型加载完成..." | tee -a "$LOG_FILE"
             # 没有warmup，等待时间可以短一些
             sleep 5
@@ -242,8 +245,10 @@ stop_server() {
 }
 
 # 发送单轮对话请求
+# 参数: $1 = messages_json, $2 = slot_id (optional, default -1 for auto-selection)
 send_message() {
     local messages_json="$1"
+    local slot_id="${2:--1}"  # 默认-1表示自动选择slot
     local response
     local max_retries=5  # 增加重试次数
     local retry=0
@@ -256,7 +261,8 @@ send_message() {
     "temperature": $TEMPERATURE,
     "top_k": $TOP_K,
     "top_p": $TOP_P,
-    "seed": $SEED
+    "seed": $SEED,
+    "id_slot": $slot_id
 }
 EOF
 )
@@ -458,20 +464,21 @@ validate_test_result() {
 
 # ============ 测试用例 ============
 
-# 测试用例1: 基础多轮对话
+# 测试用例1: 基础多轮对话 (使用 slot 0)
 test_case_1() {
     echo "" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
     echo "测试用例 1: 基础多轮对话（全匹配模式）" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
+    local SLOT_ID=0  # 使用slot 0
     CONVERSATION=()
 
     # 第1轮
     echo -e "\n[轮次 1] 用户: 北京是中国的什么？" | tee -a "$LOG_FILE"
     CONVERSATION+=("user:北京是中国的什么？")
     messages=$(build_messages)
-    response=$(send_message "$messages")
+    response=$(send_message "$messages" $SLOT_ID)
     assistant_reply=$(extract_content "$response")
     if [ $? -eq 0 ]; then
         echo "[轮次 1] 助手: $assistant_reply" | tee -a "$LOG_FILE"
@@ -488,7 +495,7 @@ test_case_1() {
     echo -e "\n[轮次 2] 用户: 它有多少人口？" | tee -a "$LOG_FILE"
     CONVERSATION+=("user:它有多少人口？")
     messages=$(build_messages)
-    response=$(send_message "$messages")
+    response=$(send_message "$messages" $SLOT_ID)
     assistant_reply=$(extract_content "$response")
     if [ $? -eq 0 ]; then
         echo "[轮次 2] 助手: $assistant_reply" | tee -a "$LOG_FILE"
@@ -504,20 +511,21 @@ test_case_1() {
     echo -e "\n测试用例 1 完成" | tee -a "$LOG_FILE"
 }
 
-# 测试用例2: 数学计算连续性
+# 测试用例2: 数学计算连续性 (使用 slot 1)
 test_case_2() {
     echo "" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
     echo "测试用例 2: 数学计算连续性（全匹配模式）" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
+    local SLOT_ID=1  # 使用slot 1（与测试用例1隔离）
     CONVERSATION=()
 
     # 第1轮
     echo -e "\n[轮次 1] 用户: 1+1等于几？" | tee -a "$LOG_FILE"
     CONVERSATION+=("user:1+1等于几？")
     messages=$(build_messages)
-    response=$(send_message "$messages")
+    response=$(send_message "$messages" $SLOT_ID)
     assistant_reply=$(extract_content "$response")
     echo "[轮次 1] 助手: $assistant_reply" | tee -a "$LOG_FILE"
     CONVERSATION+=("assistant:$assistant_reply")
@@ -528,7 +536,7 @@ test_case_2() {
     echo -e "\n[轮次 2] 用户: 那结果乘以3呢？" | tee -a "$LOG_FILE"
     CONVERSATION+=("user:那结果乘以3呢？")
     messages=$(build_messages)
-    response=$(send_message "$messages")
+    response=$(send_message "$messages" $SLOT_ID)
     assistant_reply=$(extract_content "$response")
     echo "[轮次 2] 助手: $assistant_reply" | tee -a "$LOG_FILE"
     # 精确匹配期望回复，测试上下文理解
@@ -537,13 +545,14 @@ test_case_2() {
     echo -e "\n测试用例 2 完成" | tee -a "$LOG_FILE"
 }
 
-# 测试用例3: 长对话稳定性
+# 测试用例3: 长对话稳定性 (使用 slot 2)
 test_case_3() {
     echo "" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
     echo "测试用例 3: 长对话稳定性 (5轮，全匹配模式)" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
+    local SLOT_ID=2  # 使用slot 2（与其他测试用例隔离）
     CONVERSATION=()
 
     local questions=(
@@ -561,7 +570,7 @@ test_case_3() {
         echo -e "\n[轮次 $round] 用户: ${questions[$i]}" | tee -a "$LOG_FILE"
         CONVERSATION+=("user:${questions[$i]}")
         messages=$(build_messages)
-        response=$(send_message "$messages")
+        response=$(send_message "$messages" $SLOT_ID)
         assistant_reply=$(extract_content "$response")
         echo "[轮次 $round] 助手: $assistant_reply" | tee -a "$LOG_FILE"
         CONVERSATION+=("assistant:$assistant_reply")

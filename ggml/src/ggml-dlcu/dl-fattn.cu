@@ -9,6 +9,9 @@
 #include "../ggml-cuda/common.cuh"
 #include "../ggml-cuda/convert.cuh"
 
+// Include llama types for the callback function
+#include "../../../include/llama.h"
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cudnn.h>
@@ -864,6 +867,30 @@ static bool get_is_causal_from_mask(ggml_tensor * mask, bool has_mask) {
     return params->is_causal;
 }
 
+// Helper function to get state key from flash attention operation
+// The state key combines two components:
+// 1. llama_kv_cache pointer (from K tensor's extra field) - identifies the context
+// 2. mask pointer - identifies the specific slot/session within the context
+//
+// NEW: Use seq_id as state_key to avoid state pollution across slots
+// Each slot has a unique seq_id (slot.id), which provides proper isolation
+// NOTE: We use an offset to ensure seq_id=0 doesn't become nullptr
+static inline void * get_state_key(int32_t seq_id) {
+    // Use an offset to ensure seq_id=0 doesn't become nullptr
+    // Adding 1024 ensures all valid seq_ids (>=0) map to non-null pointers
+    return (void*)(intptr_t)(seq_id + 1024);
+}
+
+// Helper function to get llama_kv_cache pointer from K tensor's extra field
+// Handles both direct tensors and view tensors by traversing view_src chain
+// The llama_kv_cache pointer is stored in the base tensor's extra field when the KV cache is created
+static inline void * get_kv_cache_key(ggml_tensor * k) {
+    while (k != nullptr && k->view_src != nullptr) {
+        k = k->view_src;
+    }
+    return k ? k->extra : nullptr;
+}
+
 // Set flash attention runtime parameters (called after set_inputs, before prepare_varlen_buffers)
 // REFACTORED: This function now ONLY computes host data and stores it in g_varlen_host_data_map
 // It does NOT set op_params - that is done by prepare_flash_attn_varlen_buffers
@@ -872,15 +899,17 @@ static bool get_is_causal_from_mask(ggml_tensor * mask, bool has_mask) {
 // - seqlen_k_real = prev_seqlen_k_real + seqlen_q (accumulated across calls)
 // - prefill_seqlen_q is saved during prefill and used for cu_seqlens_q in decode
 //
-// Key design: Uses mask pointer as key because all 48 FA layers share the same mask tensor
+// Key design: Uses seq_id as state key to avoid state pollution across slots
+// Each slot has a unique seq_id (equal to slot.id), providing proper isolation
 static void set_flash_attn_runtime(
         ggml_tensor * attn,
         int batch,
-        int seqlen_q_hint) {
+        int seqlen_q_hint,
+        int32_t seq_id) {
     GGML_ASSERT(batch == 1 && "DL TODO: nowadays batch is always 1, figure out how to handle multiple sequences.");
     GGML_ASSERT(attn && attn->op == GGML_OP_FLASH_ATTN_EXT);
 
-    // Get mask from flash attention operation's source tensors
+    // Get mask and K from flash attention operation's source tensors
     // attn->src[0] = q, attn->src[1] = k, attn->src[2] = v, attn->src[3] = mask
     ggml_tensor * mask = attn->src[3];
     ggml_tensor * k = attn->src[1];
@@ -893,6 +922,10 @@ static void set_flash_attn_runtime(
         // Use attn tensor as the key for non-causal attention
         mask = attn;
     }
+
+    // NEW: Use seq_id as state key instead of mask/K->extra
+    // This prevents state pollution across different slots/sessions
+    void * state_key = get_state_key(seq_id);
 
     // Get KV sequence length from mask (if present) or K tensor (if no mask)
     const int64_t mask_sk = has_mask ? mask->ne[0] : k->ne[1];  // key sequence length
@@ -912,6 +945,8 @@ static void set_flash_attn_runtime(
 
     // Use seqlen_q_hint directly from Q->ne[1]
     const int seqlen_q = seqlen_q_hint;
+
+    printf("[DLFA-DEBUG] set_flash_attn_runtime ENTRY: seq_id=%d, state_key=%p, seqlen_q=%d\n", seq_id, state_key, seqlen_q);
 
     GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: seqlen_q=%d (from Q->ne[1])\n", seqlen_q);
 
@@ -951,14 +986,14 @@ static void set_flash_attn_runtime(
     {
         std::lock_guard<std::mutex> lock(g_accumulation_mutex);
 
-        // Get prev_seqlen_k_real from global map (keyed by mask pointer)
-        auto it_prev = g_prev_seqlen_k_real_map.find(mask);
+        // Get prev_seqlen_k_real from global map (keyed by K->data)
+        auto it_prev = g_prev_seqlen_k_real_map.find(state_key);
         if (it_prev != g_prev_seqlen_k_real_map.end()) {
             prev_seqlen_k_real = it_prev->second;
         }
 
-        // Get prefill_seqlen_q from global map (keyed by mask pointer)
-        auto it_prefill = g_prefill_seqlen_q_map.find(mask);
+        // Get prefill_seqlen_q from global map (keyed by K->data)
+        auto it_prefill = g_prefill_seqlen_q_map.find(state_key);
         if (it_prefill != g_prefill_seqlen_q_map.end()) {
             prefill_seqlen_q = it_prefill->second;
         }
@@ -983,10 +1018,16 @@ static void set_flash_attn_runtime(
     //   → Use seqlen_q (the prompt length)
     // - If prev_seqlen_k_real > 0 && seqlen_q > prev_seqlen_k_real: New conversation
     //   → Reset to seqlen_q (warmup→first prefill transition)
+    // - If prev_seqlen_k_real is much larger than seqlen_q (e.g., prev > 2*seqlen_q + 100):
+    //   → Likely a new short conversation after a long one, reset to seqlen_q
+    //   → This handles multi-session scenarios where slot is reused
     // - Otherwise: Normal conversation accumulation
     //   → Use accumulated value
     int seqlen_k_real;
     bool is_new_conversation = false;
+
+    printf("[DLFA-DEBUG] set_flash_attn_runtime: seqlen_q=%d, prev_seqlen_k_real=%d, accumulated=%d, inferred=%d, condition_check: prefill && prev > q+50 ? %d > %d ? %d\n",
+            seqlen_q, prev_seqlen_k_real, accumulated, inferred, seqlen_q > 1, prev_seqlen_k_real > seqlen_q + 50, seqlen_q > 1 && prev_seqlen_k_real > seqlen_q + 50);
 
     if (prev_seqlen_k_real == 0) {
         // First prefill in conversation - use seqlen_q (the prompt length)
@@ -1001,11 +1042,38 @@ static void set_flash_attn_runtime(
         is_new_conversation = true;
         GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: detected new conversation (seqlen_q=%d > prev_seqlen_k_real=%d), starting fresh\n",
                 seqlen_q, prev_seqlen_k_real);
+    } else if (false /* DISABLED: Multi-session detection causes issues with KV cache reuse
+                      The condition prev_seqlen_k_real > seqlen_q * 2 incorrectly triggers
+                      when KV cache is reused (seqlen_q is only new tokens, not total).
+                      Since we now use seq_id as state_key, each slot has isolated state. */) {
+        // DISABLED: Multi-session detection logic removed
+        // This detection was originally meant to handle multi-session scenarios where
+        // different slots share the same seq_id. However, since we now use seq_id as
+        // state_key, each slot has its own isolated state, making this detection
+        // unnecessary and harmful in KV cache reuse scenarios.
+        //
+        // Problem: In KV cache reuse, seqlen_q is only the new tokens (e.g., 14),
+        // while prev_seqlen_k_real is the actual KV cache size (e.g., 39).
+        // The condition prev > seqlen_q * 2 would incorrectly trigger, causing
+        // seqlen_k_real to reset to 14 while the actual KV cache has 39 tokens.
+        seqlen_k_real = seqlen_q;
+        is_new_conversation = true;
+        printf("[DLFA-NEW-SESSION] Disabled - this should never be printed\n");
     } else {
         // Normal conversation operation - accumulate
         seqlen_k_real = accumulated;
-        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: normal conversation, using accumulated=%d (prev=%d + seqlen_q=%d)\n",
+        printf("[DLFA-DEBUG] set_flash_attn_runtime: normal conversation, using accumulated=%d (prev=%d + seqlen_q=%d)\n",
                 accumulated, prev_seqlen_k_real, seqlen_q);
+
+        // DISABLED: KV cache cleanup detection via mask inference
+        // The callback mechanism (dlfa_kv_cache_removal_hook) already synchronizes
+        // prev_seqlen_k_real when KV cache is cleaned up. The accumulated value is
+        // already correct and should not be overridden by the inferred value from mask.
+        //
+        // Original logic (disabled):
+        // if (inferred > 0 && inferred < seqlen_k_real) {
+        //     seqlen_k_real = inferred;  // This was overriding correct values with incorrect inferred values
+        // }
     }
 
     // Log mask inference result for debugging
@@ -1030,7 +1098,7 @@ static void set_flash_attn_runtime(
     // Save seqlen_k_real for next call
     {
         std::lock_guard<std::mutex> lock(g_accumulation_mutex);
-        g_prev_seqlen_k_real_map[mask] = seqlen_k_real;
+        g_prev_seqlen_k_real_map[state_key] = seqlen_k_real;
 
         // Handle prefill_seqlen_q:
         // - If new conversation detected, reset prefill_seqlen_q
@@ -1038,21 +1106,21 @@ static void set_flash_attn_runtime(
         if (is_new_conversation) {
             // Reset prefill_seqlen_q for new conversation
             if (seqlen_q > 1) {
-                g_prefill_seqlen_q_map[mask] = seqlen_q;
-                GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: new conversation, saved prefill_seqlen_q=%d for mask=%p\n",
-                        seqlen_q, (void*)mask);
+                g_prefill_seqlen_q_map[state_key] = seqlen_q;
+                GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: new conversation, saved prefill_seqlen_q=%d for state_key=%p (mask=%p)\n",
+                        seqlen_q, state_key, (void*)mask);
             } else {
                 // Decode phase in new conversation - clear prefill_seqlen_q
-                g_prefill_seqlen_q_map.erase(mask);
+                g_prefill_seqlen_q_map.erase(state_key);
                 prefill_seqlen_q = 0;
-                GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: new conversation decode phase, cleared prefill_seqlen_q for mask=%p\n",
-                        (void*)mask);
+                GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: new conversation decode phase, cleared prefill_seqlen_q for state_key=%p (mask=%p)\n",
+                        state_key, (void*)mask);
             }
         } else if (seqlen_q > 1) {
             // Normal prefill - update prefill_seqlen_q
-            g_prefill_seqlen_q_map[mask] = seqlen_q;
-            GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: saved prefill_seqlen_q=%d for mask=%p\n",
-                    seqlen_q, (void*)mask);
+            g_prefill_seqlen_q_map[state_key] = seqlen_q;
+            GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: saved prefill_seqlen_q=%d for state_key=%p (mask=%p)\n",
+                    seqlen_q, state_key, (void*)mask);
         }
     }
 
@@ -1078,17 +1146,17 @@ static void set_flash_attn_runtime(
     }
 
     // ========== NEW: Store host data in g_varlen_host_data_map ==========
-    // This data is shared by all 48 FA layers (keyed by mask pointer)
+    // This data is shared by all 48 FA layers (keyed by K->data)
     {
         std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
 
-        // Get or create host data for this mask
+        // Get or create host data for this state_key
         flash_attn_varlen_host_data * host_data = nullptr;
-        auto it = g_varlen_host_data_map.find(mask);
+        auto it = g_varlen_host_data_map.find(state_key);
         if (it == g_varlen_host_data_map.end()) {
             host_data = new flash_attn_varlen_host_data();
-            g_varlen_host_data_map[mask] = host_data;
-            GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: created new host_data for mask=%p\n", (void*)mask);
+            g_varlen_host_data_map[state_key] = host_data;
+            GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: created new host_data for state_key=%p (mask=%p)\n", state_key, (void*)mask);
         } else {
             host_data = it->second;
         }
@@ -1125,8 +1193,8 @@ static void set_flash_attn_runtime(
             }
         }
 
-        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: stored host_data for mask=%p: seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d, cu_seqlens_q=[%d,%d], seqused_k=[%d]\n",
-                (void*)mask, seqlen_q, seqlen_q_for_cu, seqlen_k_real, bt_stride,
+        GGML_DL_FATTN_DEBUG_PRINT("set_flash_attn_runtime: stored host_data for state_key=%p (mask=%p): seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d, cu_seqlens_q=[%d,%d], seqused_k=[%d]\n",
+                state_key, (void*)mask, seqlen_q, seqlen_q_for_cu, seqlen_k_real, bt_stride,
                 host_data->cu_seqlens_q[0], host_data->cu_seqlens_q[1], host_data->seqused_k[0]);
     }
 
@@ -1141,8 +1209,8 @@ static void set_flash_attn_runtime(
     // Task 4 debug prints: set_flash_attn_runtime key variables
     GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] set_flash_attn_runtime: seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, block_table_stride=%d\n",
             seqlen_q, seqlen_q_for_cu, seqlen_k_real, bt_stride);
-    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] set_flash_attn_runtime: mask_sk=%lld, mask_sq=%lld, prev_seqlen_k_real=%d\n",
-            (long long)mask_sk, (long long)mask_sq, prev_seqlen_k_real);
+    GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] set_flash_attn_runtime: mask_sk=%lld, mask_sq=%lld, prev_seqlen_k_real=%d, state_key=%p, mask=%p\n",
+            (long long)mask_sk, (long long)mask_sq, prev_seqlen_k_real, state_key, (void*)mask);
 }
 
 static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -1176,16 +1244,18 @@ static void flash_attn_ext_dldnn_mha_varlen_forward(ggml_backend_cuda_context & 
     // debug_counter++;
     GGML_DL_FATTN_DEBUG_PRINT("[TASK4-DEBUG] varlen_forward: device=%d, dst=%p\n", id, (void*)dst);
 
-    // For test-backend-ops compatibility:
+    // For test-backend-ops compatibility and warmup phase:
     // When has_varlen_params=0, it means either:
-    // - Warmup phase (mask data not valid)
+    // - Warmup phase (K->data is nullptr or mask data not valid)
     // - set_flash_attn_runtime was not called (e.g., test-backend-ops)
     // - Tensor pointer mismatch (test framework uses different tensor instance)
     //
     // In these cases, fall back to non-varlen path which uses standard GGML tensor layout.
     // The varlen path requires paged KV cache layout which tests don't use.
+    //
+    // NOTE: This can happen in non-test environments (e.g., llama-server warmup phase)
+    // when K->data is nullptr, so we don't assert GGML_IS_TEST here.
     if (!has_varlen_params) {
-        GGML_ASSERT(GGML_IS_TEST && "only happen in ut test.");
         GGML_DL_FATTN_DEBUG_PRINT("varlen_forward: has_varlen_params=0, falling back to non-varlen dldnn path\n");
         flash_attn_ext_dldnn_mha_forward(ctx, dst);
         return;
@@ -1537,10 +1607,10 @@ bool flash_attn_dldnn_available(const ggml_tensor * dst) {
 }
 
 // Helper function to prepare device buffers for varlen forward (called early for async overlap)
-// REFACTORED: This function now reads host data from g_varlen_host_data_map[mask]
+// REFACTORED: This function now reads host data from g_varlen_host_data_map[seq_id]
 // and only handles device buffer allocation and data transfer
 // It also sets op_params (which was previously done by set_flash_attn_runtime)
-void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int32_t seq_id) {
     const int id = ctx.device;  // Use device from context, not ggml_cuda_get_device()
 
     // [MULTI-GPU-DEBUG] Task 1.2: Print at function entry (commented out after fix verified)
@@ -1550,21 +1620,32 @@ void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx
     // Ensure we're on the correct device BEFORE any CUDA operations
     ggml_cuda_set_device(id);
 
-    // Get mask from flash attention operation's source tensors
+    // Get mask and K from flash attention operation's source tensors
     ggml_tensor * mask = dst->src[3];
     if (!mask) {
         // No mask, no varlen params needed
         return;
     }
 
-    // ========== NEW: Read host data from g_varlen_host_data_map[mask] ==========
+    ggml_tensor * k = dst->src[1];
+
+    // NEW: Use seq_id as state_key (same as set_flash_attn_runtime)
+    // This ensures proper isolation across different slots/sessions
+    void * state_key = get_state_key(seq_id);
+
+    // IMPORTANT: Always initialize has_varlen_params to 0 at the start
+    // This ensures that if we return early (e.g., due to nullptr), has_varlen_params is 0
+    ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_HAS_PARAMS_I32, 0);
+
+    // ========== NEW: Read host data from g_varlen_host_data_map[state_key] ==========
     flash_attn_varlen_host_data * host_data = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
-        auto it = g_varlen_host_data_map.find(mask);
+        auto it = g_varlen_host_data_map.find(state_key);
         if (it == g_varlen_host_data_map.end() || !it->second->is_valid) {
-            // Host data not available (set_flash_attn_runtime not called yet or mask invalid)
-            GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: host_data not available for mask=%p, skipping\n", (void*)mask);
+            // Host data not available (set_flash_attn_runtime not called yet or state_key invalid)
+            // has_varlen_params is already 0, so just return
+            GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: host_data not available for seq_id=%d (state_key=%p), returning early (has_varlen_params=0 set)\n", seq_id, state_key);
             return;
         }
         host_data = it->second;
@@ -1583,8 +1664,8 @@ void flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx
     // printf("[MULTI-GPU-DEBUG] prepare_varlen_buffers: device=%d, seqlen_q=%d, seqlen_k_real=%d, cu_seqlens_q=[%d,%d]\n",
     //        id, seqlen_q, seqlen_k_real, host_data->cu_seqlens_q[0], host_data->cu_seqlens_q[1]);
 
-    GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: read from host_data - seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d\n",
-            seqlen_q, seqlen_q_for_cu, seqlen_k_real, num_blocks_per_seq);
+    GGML_DL_FATTN_DEBUG_PRINT("prepare_varlen_buffers: read from host_data - seqlen_q=%d, seqlen_q_for_cu=%d, seqlen_k_real=%d, bt_stride=%d (state_key=%p, mask=%p)\n",
+            seqlen_q, seqlen_q_for_cu, seqlen_k_real, num_blocks_per_seq, state_key, (void*)mask);
 
     // ========== NEW: Set op_params (previously done by set_flash_attn_runtime) ==========
     ggml_set_op_params_i32(dst, GGML_FLASH_ATTN_PARAM_VARLEN_SEQLEN_Q_I32, seqlen_q);
@@ -1771,14 +1852,36 @@ void flash_attn_ext_dldnn_cleanup_varlen_data() {
             delete varlen_data;
         }
     }
+
     g_varlen_data_map.clear();
+}
+
+// DLFA state cleanup function for KV cache synchronization
+// Called when llama_memory_seq_rm is invoked to clean up KV cache
+// This synchronizes DLFA's internal state with the actual KV cache size
+void flash_attn_ext_dldnn_clear_state_for_seq_id(llama_seq_id seq_id, llama_pos new_kv_size) {
+    void * state_key = get_state_key(seq_id);
+
+    std::lock_guard<std::mutex> lock(g_accumulation_mutex);
+
+    // Update g_prev_seqlen_k_real_map to the new KV cache size
+    g_prev_seqlen_k_real_map[state_key] = new_kv_size;
+
+    // Also clear prefill_seqlen_q to ensure next prefill sets it correctly
+    g_prefill_seqlen_q_map.erase(state_key);
+
+    GGML_DL_FATTN_DEBUG_PRINT("dlfa_clear_state: seq_id=%d, state_key=%p, new_kv_size=%d\n",
+            seq_id, state_key, new_kv_size);
+    printf("[DLFA-STATE-CLEANUP] Cleared state for seq_id=%d, state_key=%p, new_kv_size=%d\n",
+           seq_id, state_key, new_kv_size);
 }
 
 } // namespace ggml_dl
 
 // C linkage wrappers for proc_address registration
-extern "C" void ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst);
+// NEW: Updated to accept seq_id parameter for proper slot isolation
+extern "C" void ggml_dl_flash_attn_ext_dldnn_prepare_varlen_buffers(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int32_t seq_id) {
+    ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst, seq_id);
 }
 
 extern "C" void ggml_dl_flash_attn_ext_dldnn_cleanup_varlen_data() {
@@ -1789,51 +1892,86 @@ extern "C" void ggml_dl_flash_attn_ext_dldnn_reset_accumulation_state() {
     ggml_dl::flash_attn_ext_dldnn_reset_accumulation_state();
 }
 
-// NEW: C linkage wrapper for set_flash_attn_runtime
-// This is called once after set_inputs to compute host data (shared by all FA layers)
-extern "C" void ggml_dl_flash_attn_ext_dldnn_set_runtime(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int seqlen_q_hint) {
-    GGML_UNUSED(ctx);  // Context not needed for set_flash_attn_runtime (only computes host data)
-    set_flash_attn_runtime(dst, 1, seqlen_q_hint);
+// NEW: C linkage wrapper for clearing DLFA state for a specific sequence
+// This is called when llama_memory_seq_rm is invoked to clean up KV cache
+extern "C" void dlfa_clear_state(llama_seq_id seq_id, llama_pos new_kv_size) {
+    ggml_dl::flash_attn_ext_dldnn_clear_state_for_seq_id(seq_id, new_kv_size);
 }
 
-// NEW: C linkage wrapper for copying host data from one mask to another
-// This is used in multi-GPU mode to share host data across all masks
+// NEW: C linkage wrapper for set_flash_attn_runtime
+// This is called once after set_inputs to compute host data (shared by all FA layers)
+extern "C" void ggml_dl_flash_attn_ext_dldnn_set_runtime(ggml_backend_cuda_context & ctx, ggml_tensor * dst, int seqlen_q_hint, int32_t seq_id) {
+    GGML_UNUSED(ctx);  // Context not needed for set_flash_attn_runtime (only computes host data)
+    set_flash_attn_runtime(dst, 1, seqlen_q_hint, seq_id);
+}
+
+// Backend variant for use with ggml_backend_reg_get_proc_address
+extern "C" void flash_attn_ext_dldnn_set_runtime_backend(ggml_backend_t backend, ggml_tensor * dst, int seqlen_q_hint, int32_t seq_id) {
+    GGML_UNUSED(backend);  // Backend not needed for set_flash_attn_runtime (only computes host data)
+    set_flash_attn_runtime(dst, 1, seqlen_q_hint, seq_id);
+}
+
+// NEW: C linkage wrapper for copying host data from one key to another
+// NOTE: After changing to use K->data as the state key, this function is essentially a no-op
+// because in multi-GPU scenarios, all GPUs share the same KV cache, and therefore the same
+// K->data pointer. The host data is already shared across all GPUs through the unified key.
+// This function is kept for backward compatibility but no longer performs meaningful copying.
 extern "C" void ggml_dl_flash_attn_ext_dldnn_copy_host_data(ggml_backend_cuda_context & ctx, void * src_mask, void * dst_mask) {
     GGML_UNUSED(ctx);  // Context not needed for copying host data
 
+    // With K->data as the unified state key, src_mask and dst_mask should resolve to the same
+    // K->data pointer in multi-GPU scenarios (since KV cache is shared). This copy operation
+    // is now a no-op - both GPUs naturally access the same host data through the same key.
+    //
+    // We keep this function for backward compatibility with existing calling code, but it
+    // no longer needs to do any actual copying.
+    //
+    // Future optimization: Remove this function and its call sites once the change is verified.
+
     std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
 
-    // Find the source host data
+    // With the new K->data key scheme, src_mask and dst_mask are no longer the keys.
+    // The actual key is K->data, which is the same across all GPUs.
+    // This function is now a no-op - both "source" and "destination" resolve to the same entry.
+    //
+    // We verify that both src_mask and dst_mask exist in the map (they should map to the same
+    // K->data internally via set_flash_attn_runtime), but we don't need to copy anything.
+
     auto it_src = g_varlen_host_data_map.find(src_mask);
-    if (it_src == g_varlen_host_data_map.end() || !it_src->second->is_valid) {
-        // Source host data not found, nothing to copy
-        return;
-    }
-
-    // Get or create destination host data
-    flash_attn_varlen_host_data * dst_data = nullptr;
     auto it_dst = g_varlen_host_data_map.find(dst_mask);
-    if (it_dst == g_varlen_host_data_map.end()) {
-        dst_data = new flash_attn_varlen_host_data();
-        g_varlen_host_data_map[dst_mask] = dst_data;
+
+    if (it_src != g_varlen_host_data_map.end() && it_dst != g_varlen_host_data_map.end()) {
+        // Both entries exist - with K->data as the key, they should be the same entry or
+        // point to equivalent data. No copying needed.
+        GGML_DL_FATTN_DEBUG_PRINT("copy_host_data: no-op with K->data key scheme (src_mask=%p, dst_mask=%p)\n",
+                src_mask, dst_mask);
     } else {
-        dst_data = it_dst->second;
+        // One or both entries don't exist - this shouldn't happen with the new scheme
+        GGML_DL_FATTN_DEBUG_PRINT("copy_host_data: warning - src_mask=%p (%s), dst_mask=%p (%s)\n",
+                src_mask, it_src != g_varlen_host_data_map.end() ? "found" : "not found",
+                dst_mask, it_dst != g_varlen_host_data_map.end() ? "found" : "not found");
     }
+}
 
-    // Copy the host data
-    flash_attn_varlen_host_data * src_data = it_src->second;
-    dst_data->cu_seqlens_q = src_data->cu_seqlens_q;
-    dst_data->seqused_k = src_data->seqused_k;
-    dst_data->block_table = src_data->block_table;
-    dst_data->seqlen_q = src_data->seqlen_q;
-    dst_data->seqlen_q_for_cu = src_data->seqlen_q_for_cu;
-    dst_data->seqlen_k_real = src_data->seqlen_k_real;
-    dst_data->block_table_stride = src_data->block_table_stride;
-    dst_data->is_causal = src_data->is_causal;
-    dst_data->is_valid = src_data->is_valid;
-
-    GGML_DL_FATTN_DEBUG_PRINT("copy_host_data: copied from mask=%p to mask=%p, seqlen_k_real=%d\n",
-            src_mask, dst_mask, dst_data->seqlen_k_real);
+// Backend variant for use with ggml_backend_reg_get_proc_address
+// Note: This function is called from llama-context.cpp with (backend, node, seq_id)
+// We extract the device from the tensor's buffer backend
+extern "C" void flash_attn_ext_dldnn_prepare_varlen_buffers_backend(ggml_backend_t backend, ggml_tensor * dst, int32_t seq_id) {
+    // Get device ID from backend
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    int device = 0;  // Default to device 0
+    if (dev) {
+        // Use ggml_backend_cuda_get_device_id if available, otherwise use default
+        // For now, extract device from string name
+        const char * dev_name = ggml_backend_dev_name(dev);
+        if (dev_name && strstr(dev_name, "CUDA") != nullptr) {
+            // Parse device ID from name (format: "CUDA0", "CUDA1", etc.)
+            device = atoi(dev_name + 4);
+        }
+    }
+    // Create CUDA context with device ID
+    ggml_backend_cuda_context ctx(device);
+    ggml_dl::flash_attn_ext_dldnn_prepare_varlen_buffers(ctx, dst, seq_id);
 }
 
 #endif // GGML_USE_DLFA
