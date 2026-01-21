@@ -1,5 +1,20 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 
+# Android + DLCU multi-model compatibility check
+# When using GGML_DLCU on Android API < 28, posix_spawn is not available
+# so we use a stub implementation that disables multi-model features
+set(LLAMA_ANDROID_NO_MULTIMODEL FALSE)
+if (DEFINED ANDROID_PLATFORM)
+    # ANDROID_PLATFORM can be like "android-24" or "android-25"
+    string(REGEX REPLACE "android-" "" ANDROID_API_NUM "${ANDROID_PLATFORM}")
+    if (ANDROID_API_NUM LESS 28)
+        if (GGML_DLCU)
+            set(LLAMA_ANDROID_NO_MULTIMODEL TRUE)
+            message(STATUS "Android API ${ANDROID_API_NUM} with GGML_DLCU detected: multi-model server features disabled (requires API 28+)")
+        endif()
+    endif()
+endif()
+
 # server-context containing the core server logic, used by llama-server and CLI
 
 set(TARGET server-context)
@@ -36,9 +51,17 @@ set(TARGET_SRCS
     server.cpp
     server-http.cpp
     server-http.h
-    server-models.cpp
-    server-models.h
 )
+
+# Conditionally choose between full multi-model support and stub implementation
+if (LLAMA_ANDROID_NO_MULTIMODEL)
+    message(STATUS "Using stub implementation for server-models (Android API < 28 + GGML_DLCU)")
+    list(APPEND TARGET_SRCS server-models-stub.cpp)
+else()
+    list(APPEND TARGET_SRCS server-models.cpp)
+endif()
+
+list(APPEND TARGET_SRCS server-models.h)
 set(PUBLIC_ASSETS
     index.html.gz
     loading.html
