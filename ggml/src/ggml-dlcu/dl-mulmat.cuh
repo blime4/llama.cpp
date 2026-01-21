@@ -5,7 +5,10 @@
 #include <unordered_map>
 #include <mutex>
 
-// Macro to control dl-mulmat debug printing
+// Macro to control dl-mulmat debug printing (debug mode only)
+#ifdef NDEBUG
+#define GGML_DL_MULMAT_DEBUG_PRINT(...) ((void)0)
+#else
 #define GGML_DL_MULMAT_DEBUG_PRINT(...) do { \
     const char* env_dl_mulmat_debug = getenv("GGML_DL_MULMAT_DEBUG"); \
     if (env_dl_mulmat_debug != nullptr && strcmp(env_dl_mulmat_debug, "1") == 0) { \
@@ -13,6 +16,7 @@
         fflush(stdout); \
     } \
 } while(0)
+#endif
 
 namespace ggml_dl {
 

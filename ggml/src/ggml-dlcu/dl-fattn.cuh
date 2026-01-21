@@ -16,7 +16,10 @@
 #include "../ggml-cuda/common.cuh"
 #include <cudnn.h>
 
-// Macro to control flash attention info printing
+// Macro to control flash attention info printing (debug mode only)
+#ifdef NDEBUG
+#define GGML_DL_FATTN_DEBUG_PRINT(...) ((void)0)
+#else
 #define GGML_DL_FATTN_DEBUG_PRINT(...) do { \
     const char* env_dl_fattn_debug = getenv("GGML_DL_FATTN_DEBUG"); \
     if (env_dl_fattn_debug != nullptr && strcmp(env_dl_fattn_debug, "1") == 0) { \
@@ -24,6 +27,7 @@
         fflush(stdout); \
     } \
 } while(0)
+#endif
 
 // ============================================================================
 // Flash Attention - DLDNN Implementation
