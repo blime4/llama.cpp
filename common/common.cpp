@@ -1307,16 +1307,25 @@ common_init_result_ptr common_init_from_params(common_params & params) {
         llama_set_warmup(lctx, false);
     }
     #ifdef GGML_USE_DLFA
-    // GGML_CUDA_GRAPHS_DISABLE_WARMUP=1 disables the "Capturing cuda graphs" warmup logic
-    // This is useful for multi-GPU scenarios where the warmup can cause Device Page Fault errors
+    // GGML_CUDA_GRAPHS_DISABLE_WARMUP=0 enables the "Capturing cuda graphs" warmup logic
+    // By default, warmup is disabled to avoid Device Page Fault errors in multi-GPU scenarios
     // Note: This only disables the warmup, not CUDA graphs themselves
     const char * disable_warmup_env = getenv("GGML_CUDA_GRAPHS_DISABLE_WARMUP");
-    bool disable_cuda_graph_warmup = (disable_warmup_env != nullptr && strcmp(disable_warmup_env, "1") == 0);
+    bool disable_cuda_graph_warmup = (disable_warmup_env == nullptr || strcmp(disable_warmup_env, "0") != 0);
     // nowadays only support single GPU, force to not support CUDA graphs with warning when multi GPU
-    if (!disable_cuda_graph_warmup && params.split_mode != LLAMA_SPLIT_MODE_NONE) {
+    // check the actual number of available GPU devices (not all backend devices including CPU)
+    int gpu_count = 0;
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+        if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            gpu_count++;
+        }
+    }
+    bool is_multi_gpu = (gpu_count > 1);
+    if (!disable_cuda_graph_warmup && is_multi_gpu) {
         disable_cuda_graph_warmup = true;
-        LOG_WRN("common_init_from_params: CUDA graph warmup is not supported with multi-GPU split mode (split_mode = %d). "
-                "CUDA graphs will be disabled.\n", params.split_mode);
+        LOG_WRN("common_init_from_params: CUDA graph warmup is not supported with multi-GPU (%d GPU devices detected). "
+                "CUDA graphs will be disabled.\n", gpu_count);
     } else if (disable_cuda_graph_warmup) {
         LOG_WRN("common_init_from_params: CUDA graph warmup disabled by GGML_CUDA_GRAPHS_DISABLE_WARMUP=1\n");
     }
