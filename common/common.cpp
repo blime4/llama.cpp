@@ -1331,14 +1331,33 @@ common_init_result_ptr common_init_from_params(common_params & params) {
     }
 
     if (getenv("GGML_CUDA_DISABLE_GRAPHS") == nullptr && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && !disable_cuda_graph_warmup) {
+        // Check if model is MoE - use single warmup size for MoE models
+        // MoE models have dynamic expert routing that changes based on n_tokens,
+        // causing ffn_moe_weights node to be invalid during warmup with different sizes
+        // Solution: use only the largest size (512) for MoE models to ensure consistent graph structure
+        const bool is_moe = llama_model_n_expert(model) > 0;
+        if (is_moe) {
+            // For MoE models, use a single small warmup size to avoid memory issues
+            // TODO: CUDA graph capture with MoE models is currently unstable
+            // Using size 1 for minimal warmup until the issue is fixed
+            params.cuda_graph_capture_sizes = {1};
+            LOG_WRN("common_init_from_params: MoE model detected, using minimal CUDA graph warmup size: 1 (CUDA graph warmup for MoE is experimental)\n");
+        }
+
         if (params.cuda_graph_capture_sizes.empty()) {
             params.cuda_graph_capture_sizes = {1,64,128,192,256,320,384,448,512};
         }
-        uint32_t n_ubatch = *std::max_element(params.cuda_graph_capture_sizes.begin(), params.cuda_graph_capture_sizes.end());
-        llama_set_u_nbatch(lctx, n_ubatch);
-        LOG_WRN("common_init_from_params: Reset n_ubatch to %d\n", n_ubatch);
+        // For non-MoE models, set n_ubatch to match the max capture size
+        // For MoE models, keep the original n_ubatch value to avoid issues with context initialization
+        if (!is_moe) {
+            uint32_t n_ubatch = *std::max_element(params.cuda_graph_capture_sizes.begin(), params.cuda_graph_capture_sizes.end());
+            llama_set_u_nbatch(lctx, n_ubatch);
+            LOG_WRN("common_init_from_params: Reset n_ubatch to %d\n", n_ubatch);
+        }
         llama_set_cuda_graph_capture_sizes(lctx, params.cuda_graph_capture_sizes.data(), params.cuda_graph_capture_sizes.size());
         LOG_WRN("common_init_from_params: Capturing cuda graphs");
+        // Set warmup=true to ensure consistent graph construction during CUDA graph capture
+        llama_set_warmup(lctx, true);
         for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
             int32_t size = params.cuda_graph_capture_sizes[i];
             std::vector<llama_token> tmp(size, 0);
@@ -1359,7 +1378,15 @@ common_init_result_ptr common_init_from_params(common_params & params) {
             llama_synchronize(lctx);
             llama_perf_context_reset(lctx);
             LOG_WRN(".");
-            }
+        }
+        // CRITICAL: Clear memory after CUDA graph warmup is complete
+        // This resets the batch allocator state that was set during the last warmup iteration
+        llama_memory_clear(llama_get_memory(lctx), true);
+        // CRITICAL: Reset DLFA state after CUDA graph warmup is complete
+        // This clears g_prev_seqlen_k_real_map and g_prefill_seqlen_q_map which were accumulated during warmup
+        llama_dlfa_reset_host_data_state();
+        // Restore warmup=false after CUDA graph capture is complete
+        llama_set_warmup(lctx, false);
         LOG_WRN("\n");
     }
     #endif

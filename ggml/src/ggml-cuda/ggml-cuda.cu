@@ -3555,7 +3555,7 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
 #ifdef GGML_USE_DLCU
                 // DL-TODO: support it later.
                 if (!disable_fusion){
-                    GGML_LOG_DEBUG("DLCU NOWADAYS DO NOT SUPPORT FUSION.");
+                    GGML_LOG_DEBUG("DLCU NOWADAYS DO NOT SUPPORT FUSION.\n");
                     disable_fusion = true;
                 }
 #endif

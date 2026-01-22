@@ -1804,6 +1804,35 @@ void flash_attn_ext_dldnn_reset_accumulation_state() {
     g_prefill_seqlen_q_map.clear();
 }
 
+// Reset host data state (called during CUDA graph warmup to ensure clean state for each capture size)
+// This clears the g_varlen_host_data_map to prevent state accumulation across warmup iterations
+void flash_attn_ext_dldnn_reset_host_data_state() {
+    // Clear accumulation maps to reset prev_seqlen_k_real and prefill_seqlen_q
+    {
+        std::lock_guard<std::mutex> lock(g_accumulation_mutex);
+        g_prev_seqlen_k_real_map.clear();
+        g_prefill_seqlen_q_map.clear();
+    }
+
+    // Clear host data map to prevent memory leaks and state accumulation
+    {
+        std::lock_guard<std::mutex> lock(g_varlen_host_data_mutex);
+
+        // Delete all host data objects to prevent memory leaks
+        for (auto & pair : g_varlen_host_data_map) {
+            flash_attn_varlen_host_data * host_data = pair.second;
+            if (host_data) {
+                delete host_data;
+            }
+        }
+        g_varlen_host_data_map.clear();
+    }
+
+    // NOTE: We DO NOT clear g_varlen_data_map because it contains device_cache_map with
+    // pointers to varlen_data. Clearing it would leave dangling pointers in device_cache_map.
+    // The device_cache_map is prepared during CUDA graph warmup and reused during inference.
+}
+
 // Cleanup function to free all varlen_data and device memory
 void flash_attn_ext_dldnn_cleanup_varlen_data() {
     // Clear accumulation maps first
@@ -1881,6 +1910,12 @@ extern "C" void ggml_dl_flash_attn_ext_dldnn_cleanup_varlen_data() {
 
 extern "C" void ggml_dl_flash_attn_ext_dldnn_reset_accumulation_state() {
     ggml_dl::flash_attn_ext_dldnn_reset_accumulation_state();
+}
+
+// NEW: C linkage wrapper for resetting host data state
+// This is called during CUDA graph warmup to ensure clean state for each capture size
+extern "C" void ggml_dl_flash_attn_ext_dldnn_reset_host_data_state() {
+    ggml_dl::flash_attn_ext_dldnn_reset_host_data_state();
 }
 
 // NEW: C linkage wrapper for clearing DLFA state for a specific sequence

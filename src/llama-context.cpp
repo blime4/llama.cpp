@@ -61,10 +61,12 @@ static bool LLAMA_OPS_FUSION = []() -> bool {
 
 // Function pointer type for DLFA state cleanup function
 typedef void (*dlfa_clear_state_fn_t)(llama_seq_id seq_id, llama_pos new_kv_size);
+typedef void (*dlfa_reset_host_data_fn_t)(void);
 
 // Global state for runtime linking
 static void *g_dlcu_handle = nullptr;
 static dlfa_clear_state_fn_t g_dlfa_clear_state_func = nullptr;
+static dlfa_reset_host_data_fn_t g_dlfa_reset_host_data_func = nullptr;
 
 // KV cache removal callback for DLFA state synchronization
 // Uses runtime linking (dlopen/dlsym) to work around CUDA/C++ linking limitations
@@ -118,6 +120,13 @@ static void init_dlfa_runtime_linking() {
         dlclose(g_dlcu_handle);
         g_dlcu_handle = nullptr;
         return;
+    }
+
+    // Find the host data reset function
+    g_dlfa_reset_host_data_func = (dlfa_reset_host_data_fn_t)dlsym(g_dlcu_handle, "ggml_dl_flash_attn_ext_dldnn_reset_host_data_state");
+    if (g_dlfa_reset_host_data_func == nullptr) {
+        LLAMA_LOG_WARN("%s: Failed to find ggml_dl_flash_attn_ext_dldnn_reset_host_data_state: %s\n", __func__, dlerror());
+        // This is not a critical error - the function may not be available in older builds
     }
 
     LLAMA_LOG_INFO("%s: Successfully initialized DLFA runtime linking\n", __func__);
@@ -950,6 +959,7 @@ bool llama_context::apply_adapter_cvec(
 // This must be called after set_inputs (when mask data is available) and before prepare_flash_attn_varlen_buffers
 // NEW: Now supports multi-slot concurrent processing (multiple sequences in one ubatch)
 static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph * gf, int n_tokens, const llama_ubatch & ubatch) {
+    (void)n_tokens;  // Unused: we use ubatch.real_n_tokens instead
     const int n_nodes = ggml_graph_n_nodes(gf);
 
     // Track which mask pointers we've already processed
@@ -1021,7 +1031,11 @@ static void set_flash_attn_runtime_once(ggml_backend_sched_t sched, ggml_cgraph 
             auto fn = reinterpret_cast<set_runtime_backend_fn_t>(set_runtime_fn);
 
             // Since we now use seq_id as state_key, all masks with the same seq_id share the same state
-            fn(backend, node, n_tokens, seq_id);
+            // IMPORTANT: Use ubatch.real_n_tokens instead of n_tokens for DLFA
+            // - n_tokens may be padded to match CUDA graph capture sizes (e.g., 64 for a 5-token batch)
+            // - real_n_tokens is the actual number of tokens (e.g., 5)
+            // - DLFA needs real_n_tokens to correctly compute seqlen_k_real for KV cache management
+            fn(backend, node, ubatch.real_n_tokens, seq_id);
 
             // Mark this mask as processed
             processed_masks.insert(mask);
@@ -2927,6 +2941,20 @@ void llama_set_causal_attn(llama_context * ctx, bool causal_attn) {
 
 void llama_set_warmup(llama_context * ctx, bool warmup) {
     ctx->set_warmup(warmup);
+}
+
+void llama_dlfa_reset_host_data_state(void) {
+#ifdef GGML_USE_DLCU
+    init_dlfa_runtime_linking();
+    if (g_dlfa_reset_host_data_func != nullptr) {
+        LLAMA_LOG_INFO("%s: Calling DLFA reset host data state function\n", __func__);
+        g_dlfa_reset_host_data_func();
+    } else {
+        LLAMA_LOG_WARN("%s: DLFA reset host data state function not available\n", __func__);
+    }
+#else
+    LLAMA_LOG_DEBUG("%s: DLFA not enabled, skipping reset\n", __func__);
+#endif
 }
 
 void llama_synchronize(llama_context * ctx) {
