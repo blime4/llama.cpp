@@ -1307,11 +1307,11 @@ common_init_result_ptr common_init_from_params(common_params & params) {
         llama_set_warmup(lctx, false);
     }
     #ifdef GGML_USE_DLFA
-    // GGML_CUDA_GRAPHS_DISABLE_WARMUP=0 enables the "Capturing cuda graphs" warmup logic
-    // By default, warmup is disabled to avoid Device Page Fault errors in multi-GPU scenarios
+    // GGML_CUDA_GRAPHS_DISABLE_WARMUP=1 disables the "Capturing cuda graphs" warmup logic
+    // By default (or set to 0), warmup is enabled
     // Note: This only disables the warmup, not CUDA graphs themselves
     const char * disable_warmup_env = getenv("GGML_CUDA_GRAPHS_DISABLE_WARMUP");
-    bool disable_cuda_graph_warmup = (disable_warmup_env == nullptr || strcmp(disable_warmup_env, "0") != 0);
+    bool disable_cuda_graph_warmup = (disable_warmup_env != nullptr && strcmp(disable_warmup_env, "1") == 0);
     // nowadays only support single GPU, force to not support CUDA graphs with warning when multi GPU
     // check the actual number of available GPU devices (not all backend devices including CPU)
     int gpu_count = 0;
