@@ -189,6 +189,10 @@ prepare_build_dir() {
         fi
         echo "[INFO] Build directory: $build_dir" | tee -a "$summary_log"
     fi
+
+    # Export BUILD_DIR_BIN for test scripts to use platform-specific binaries
+    export BUILD_DIR_BIN="$build_dir_bin"
+    echo "[INFO] Exported BUILD_DIR_BIN=$BUILD_DIR_BIN for test scripts" | tee -a "$summary_log"
 }
 
 set_common_runtime_env() {

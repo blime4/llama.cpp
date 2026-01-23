@@ -15,7 +15,14 @@ set -o pipefail
 
 # 默认配置，可通过参数覆盖
 DEFAULT_MODEL_BASE_PATH="${LOCAL_MODEL_PATH:-/mars/aebox/LLM/model}"
-DEFAULT_LLAMA_COMPLETION="./build_x86_64/bin/llama-completion"
+
+# 根据平台确定构建目录，优先使用 BUILD_DIR_BIN 环境变量
+if [ -n "${BUILD_DIR_BIN:-}" ]; then
+    DEFAULT_LLAMA_COMPLETION="$BUILD_DIR_BIN/llama-completion"
+else
+    ARCH="${DOCKER_PLATFORM:-$(uname -m)}"
+    DEFAULT_LLAMA_COMPLETION="./build_${ARCH}/bin/llama-completion"
+fi
 
 # 解析命令行参数
 UPDATE_MODE=false

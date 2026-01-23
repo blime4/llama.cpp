@@ -25,7 +25,14 @@ if [ -n "${LOCAL_MODEL_PATH:-}" ]; then
 else
     DEFAULT_MODEL_PATH="/mars/aebox/LLM/model/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q5_k_m.gguf"
 fi
-DEFAULT_LLAMA_SERVER="./build_x86_64/bin/llama-server"
+
+# 根据平台确定构建目录，优先使用 BUILD_DIR_BIN 环境变量
+if [ -n "${BUILD_DIR_BIN:-}" ]; then
+    DEFAULT_LLAMA_SERVER="$BUILD_DIR_BIN/llama-server"
+else
+    ARCH="${DOCKER_PLATFORM:-$(uname -m)}"
+    DEFAULT_LLAMA_SERVER="./build_${ARCH}/bin/llama-server"
+fi
 DEFAULT_SERVER_PORT=8081
 DEFAULT_CACHE_REUSE=32    # 默认缓存重用阈值 (关键：>= 32 才能触发 cache_reuse)
 

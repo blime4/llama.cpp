@@ -17,7 +17,14 @@ export DLEOL_DISABLE_CU_MATMUL=${DLEOL_DISABLE_CU_MATMUL:-1}
 
 # 默认配置，可通过参数覆盖
 DEFAULT_MODEL_PATH="${LOCAL_MODEL_PATH:-/mars/aebox/LLM/model}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-DEFAULT_LLAMA_SERVER="./build_x86_64/bin/llama-server"
+
+# 根据平台确定构建目录，优先使用 BUILD_DIR_BIN 环境变量
+if [ -n "${BUILD_DIR_BIN:-}" ]; then
+    DEFAULT_LLAMA_SERVER="$BUILD_DIR_BIN/llama-server"
+else
+    ARCH="${DOCKER_PLATFORM:-$(uname -m)}"
+    DEFAULT_LLAMA_SERVER="./build_${ARCH}/bin/llama-server"
+fi
 DEFAULT_SERVER_PORT=8080
 
 # 解析命令行参数
