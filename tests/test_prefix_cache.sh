@@ -21,7 +21,7 @@ export DLEOL_DISABLE_CU_MATMUL=${DLEOL_DISABLE_CU_MATMUL:-1}
 # LOCAL_MODEL_PATH 通常设置为 /mars/aebox/LLM/model/
 # 如果设置了 LOCAL_MODEL_PATH，在其后追加相对路径；否则使用完整路径
 if [ -n "${LOCAL_MODEL_PATH:-}" ]; then
-    DEFAULT_MODEL_PATH="${LOCAL_MODEL_PATH}Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q5_k_m.gguf"
+    DEFAULT_MODEL_PATH="${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q5_k_m.gguf"
 else
     DEFAULT_MODEL_PATH="/mars/aebox/LLM/model/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q5_k_m.gguf"
 fi
@@ -135,9 +135,13 @@ check_dependencies() {
         return 1
     fi
 
-    if ! command -v jq >/dev/null 2>&1; then
-        log_error "jq is required but not installed"
-        return 1
+    # jq 是可选的，如果没有则使用备用方案
+    if command -v jq >/dev/null 2>&1; then
+        HAS_JQ=true
+        log_verbose "使用 jq 进行 JSON 处理"
+    else
+        HAS_JQ=false
+        log_info "jq 未安装，使用备用 JSON 处理方案"
     fi
 
     return 0
@@ -189,7 +193,35 @@ stop_server() {
 # 生成测试用的基础长文本 (~800 tokens)
 # 使用重复内容确保 token 数量可预测
 generate_base_prompt() {
-    cat <<'EOF'
+    local unique_id="${1:-default}"
+    local unique_content
+
+    case "$unique_id" in
+        "test1")
+            unique_content="EXACT MATCH TEST CASE ONE ALPHA"
+            ;;
+        "test2")
+            unique_content="GROWING PREFIX PROPER TEST CASE TWO BRAVO"
+            ;;
+        "test3")
+            unique_content="GROWING PREFIX FAILURE TEST CASE THREE CHARLIE"
+            ;;
+        "test4")
+            unique_content="CACHE PROMPT PARAM TEST CASE FOUR DELTA"
+            ;;
+        "test5")
+            unique_content="GLOBAL CACHE CROSS SLOT TEST CASE FIVE ECHO"
+            ;;
+        "test6")
+            unique_content="REPEATED REQUESTS STABILITY TEST CASE SIX FOXTROT"
+            ;;
+        *)
+            unique_content="DEFAULT BASE PROMPT CONTENT"
+            ;;
+    esac
+
+    cat <<EOF
+[TEST_ID: $unique_id] $unique_content
 The quick brown fox jumps over the lazy dog. This is a test of the emergency broadcast system.
 The quick brown fox jumps over the lazy dog. This is a test of the emergency broadcast system.
 The quick brown fox jumps over the lazy dog. This is a test of the emergency broadcast system.
@@ -282,11 +314,31 @@ send_request_measure_ttft() {
 
     log_verbose "发送请求 $request_id (slot: $slot_id, cache_prompt: $cache_prompt)..."
 
+    # JSON 字符串转义函数 (不依赖 jq)
+    json_escape() {
+        local s="$1"
+        # 转义反斜杠、双引号、控制字符
+        s="${s//\\/\\\\}"
+        s="${s//\"/\\\"}"
+        s="${s//$'\n'/\\n}"
+        s="${s//$'\r'/\\r}"
+        s="${s//$'\t'/\\t}"
+        printf '%s' "$s"
+    }
+
+    # 根据是否有 jq 选择不同的 JSON 构建方式
+    local content_json
+    if [ "$HAS_JQ" = true ]; then
+        content_json=$(echo -n "$prompt" | jq -Rs .)
+    else
+        content_json="\"$(json_escape "$prompt")\""
+    fi
+
     local request_json=$(cat <<EOF
 {
     "model": "default",
     "messages": [
-        {"role": "user", "content": $(echo -n "$prompt" | jq -Rs .)}
+        {"role": "user", "content": ${content_json}}
     ],
     "max_tokens": $MAX_TOKENS,
     "temperature": $TEMPERATURE,
@@ -316,7 +368,14 @@ EOF
     fi
 
     # 从响应中提取 TTFT
-    local ttft_ms=$(echo "$response" | jq -r '.timings.prompt_ms // empty')
+    local ttft_ms
+    if [ "$HAS_JQ" = true ]; then
+        ttft_ms=$(echo "$response" | jq -r '.timings.prompt_ms // empty')
+    else
+        # 使用 grep + sed 提取 prompt_ms (备用方案)
+        # 匹配 "prompt_ms": 数字 或 "prompt_ms":浮点数
+        ttft_ms=$(echo "$response" | grep -o '"prompt_ms":[[:space:]]*[0-9.]*' | sed 's/"prompt_ms":[[:space:]]*//')
+    fi
 
     if [ -z "$ttft_ms" ] || [ "$ttft_ms" = "null" ]; then
         ttft_ms=$((end_time - start_time))
@@ -351,17 +410,17 @@ validate_ttft_ratio() {
         ratio_percent = ratio * 100
         min_percent = min * 100
         max_percent = max * 100
-        printf "%s: TTFT1=%.3fms, TTFT2=%.3fms, 比率=%.2f%%\n", name, ttft1, ttft2, ratio_percent > "/dev/stderr"
+        printf "%s: TTFT1=%.3fms, TTFT2=%.3fms, 比率=%.2f%%\n", name, ttft1, ttft2, ratio_percent
 
         if (ratio >= min && ratio <= max) {
-            printf "PASS: 比率 %.2f%% 在范围 [%.0f%%-%.0f%%] 内\n", ratio_percent, min_percent, max_percent > "/dev/stderr"
+            printf "PASS: 比率 %.2f%% 在范围 [%.0f%%-%.0f%%] 内\n", ratio_percent, min_percent, max_percent
             exit 0
         } else {
-            printf "FAIL: 比率 %.2f%% 不在范围 [%.0f%%-%.0f%%] 内\n", ratio_percent, min_percent, max_percent > "/dev/stderr"
+            printf "FAIL: 比率 %.2f%% 不在范围 [%.0f%%-%.0f%%] 内\n", ratio_percent, min_percent, max_percent
             exit 1
         }
     }
-    ' 2>> "$LOG_FILE"
+    ' | tee -a "$LOG_FILE"
 
     local result=$?
     if [ $result -eq 0 ]; then
@@ -385,7 +444,7 @@ test_case_1_exact_match() {
     echo "预期: TTFT2 < TTFT1 * 50% (即比率在 0%-50% 之间)" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
-    local prompt=$(generate_base_prompt)
+    local prompt=$(generate_base_prompt "test1")
     local slot_id=0
 
     log_info "发送第一个请求..."
@@ -397,14 +456,16 @@ test_case_1_exact_match() {
     log_info "第二次请求 TTFT: ${ttft2}ms"
 
     echo "" | tee -a "$LOG_FILE"
-    validate_ttft_ratio \
+    if validate_ttft_ratio \
         "精确前缀匹配" \
         "$ttft1" \
         "$ttft2" \
         "0.0" \
-        "$EXACT_MATCH_THRESHOLD"
-
-    echo -e "\n测试用例 1 完成"
+        "$EXACT_MATCH_THRESHOLD"; then
+        echo -e "\n测试用例 1 [PASS]"
+    else
+        echo -e "\n测试用例 1 [FAIL]"
+    fi
 }
 
 # 测试用例2: 增长前缀 - 正确实现方式 (长扩展 >= 32 tokens)
@@ -418,7 +479,7 @@ test_case_2_growing_prefix_proper() {
     echo "预期: TTFT2 < TTFT1 * 120% (部分命中缓存，比率在 20%-120% 之间)" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
-    local base_prompt=$(generate_base_prompt)
+    local base_prompt=$(generate_base_prompt "test2")
     local long_ext=$(generate_long_extension)  # ~100 tokens，>= 32
     local slot_id=1
 
@@ -434,14 +495,16 @@ test_case_2_growing_prefix_proper() {
     echo "" | tee -a "$LOG_FILE"
     # 长扩展应该能触发 cache_reuse，但可能不是完全匹配
     # 使用 PARTIAL_MATCH_MIN 和 PARTIAL_MATCH_MAX
-    validate_ttft_ratio \
+    if validate_ttft_ratio \
         "增长前缀-正确实现" \
         "$ttft1" \
         "$ttft2" \
         "$PARTIAL_MATCH_MIN" \
-        "$PARTIAL_MATCH_MAX"
-
-    echo -e "\n测试用例 2 完成"
+        "$PARTIAL_MATCH_MAX"; then
+        echo -e "\n测试用例 2 [PASS]"
+    else
+        echo -e "\n测试用例 2 [FAIL]"
+    fi
 }
 
 # 测试用例3: 增长前缀 - 失败场景 (短扩展 < 32 tokens)
@@ -457,7 +520,7 @@ test_case_3_growing_prefix_failure() {
     echo "     ext 太短 (< n_cache_reuse=32) 无法触发 cache_reuse" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
-    local base_prompt=$(generate_base_prompt)
+    local base_prompt=$(generate_base_prompt "test3")
     local short_ext=$(generate_short_extension)  # ~5 tokens，< 32
     local slot_id=2
 
@@ -473,14 +536,16 @@ test_case_3_growing_prefix_failure() {
     echo "" | tee -a "$LOG_FILE"
     # 短扩展无法触发 cache_reuse，TTFT 应该接近第一次
     # 验证失败场景：比率应该在 90-300% 范围内（不满足 cache_reuse 阈值）
-    validate_ttft_ratio \
+    if validate_ttft_ratio \
         "增长前缀-失败场景" \
         "$ttft1" \
         "$ttft2" \
         "$NO_MATCH_MIN" \
-        "$NO_MATCH_MAX"
-
-    echo -e "\n测试用例 3 完成 (验证了短扩展无法触发 cache_reuse)"
+        "$NO_MATCH_MAX"; then
+        echo -e "\n测试用例 3 [PASS] (验证了短扩展无法触发 cache_reuse)"
+    else
+        echo -e "\n测试用例 3 [FAIL]"
+    fi
 }
 
 # 测试用例4: cache_prompt 参数测试
@@ -495,8 +560,10 @@ test_case_4_cache_prompt_param() {
     echo "  - Round 2: cache_prompt=false，预期缓存效果受限" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
-    local prompt=$(generate_base_prompt)
+    local prompt=$(generate_base_prompt "test4")
     local slot_id=3
+    local round1_pass=false
+    local round2_pass=false
 
     # Round 1: cache_prompt = true (默认)
     echo "" | tee -a "$LOG_FILE"
@@ -515,17 +582,18 @@ test_case_4_cache_prompt_param() {
     BEGIN {
         ratio = ttft2 / ttft1
         if (ratio < 0.5) {
-            printf "PASS: cache_prompt=true 工作正常 (比率=%.2f%%)\n", ratio * 100 > "/dev/stderr"
+            printf "PASS: cache_prompt=true 工作正常 (比率=%.2f%%)\n", ratio * 100
             exit 0
         } else {
-            printf "FAIL: cache_prompt=true 未生效 (比率=%.2f%%)\n", ratio * 100 > "/dev/stderr"
+            printf "FAIL: cache_prompt=true 未生效 (比率=%.2f%%)\n", ratio * 100
             exit 1
         }
     }
-    ' 2>> "$LOG_FILE"
+    ' | tee -a "$LOG_FILE"
     local result=$?
     if [ $result -eq 0 ]; then
         PASSED_TESTS=$((PASSED_TESTS + 1))
+        round1_pass=true
     else
         FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
@@ -556,22 +624,28 @@ test_case_4_cache_prompt_param() {
     BEGIN {
         ratio = ttft4 / ttft3
         if (ratio >= 0.5) {
-            printf "PASS: cache_prompt=false 限制缓存 (比率=%.2f%%)\n", ratio * 100 > "/dev/stderr"
+            printf "PASS: cache_prompt=false 限制缓存 (比率=%.2f%%)\n", ratio * 100
             exit 0
         } else {
-            printf "INFO: cache_prompt=false 时缓存仍生效 (比率=%.2f%%)，可能由于 Global Cache 或 slot cache_reuse\n", ratio * 100 > "/dev/stderr"
+            printf "INFO: cache_prompt=false 时缓存仍生效 (比率=%.2f%%)，可能由于 Global Cache 或 slot cache_reuse\n", ratio * 100
             exit 0  # 改为 INFO 而不是 FAIL，因为这是预期行为
         }
     }
-    ' 2>> "$LOG_FILE"
+    ' | tee -a "$LOG_FILE"
     result=$?
     if [ $result -eq 0 ]; then
         PASSED_TESTS=$((PASSED_TESTS + 1))
+        round2_pass=true
     else
         FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
 
-    echo -e "\n测试用例 4 完成"
+    # 判断整体测试结果
+    if [ "$round1_pass" = true ] && [ "$round2_pass" = true ]; then
+        echo -e "\n测试用例 4 [PASS]"
+    else
+        echo -e "\n测试用例 4 [FAIL]"
+    fi
 }
 
 # 测试用例5: Global Prompt Cache 跨 slot 测试
@@ -585,7 +659,7 @@ test_case_5_global_cache() {
     echo "说明: 这是观察性测试，Global Cache 受 LRU 限制" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
-    local prompt=$(generate_base_prompt)
+    local prompt=$(generate_base_prompt "test5")
 
     # 在 slot 0 上处理请求
     echo "" | tee -a "$LOG_FILE"
@@ -609,18 +683,18 @@ test_case_5_global_cache() {
     awk -v ttft1="$ttft1" -v ttft2="$ttft2" '
     BEGIN {
         ratio = ttft2 / ttft1
-        printf "Global Cache: TTFT1=%.3fms, TTFT2=%.3fms, 比率=%.2f%%\n", ttft1, ttft2, ratio * 100 > "/dev/stderr"
+        printf "Global Cache: TTFT1=%.3fms, TTFT2=%.3fms, 比率=%.2f%%\n", ttft1, ttft2, ratio * 100
         if (ratio < 0.5) {
-            printf "INFO: Global Prompt Cache 可能命中 (比率=%.2f%%)\n", ratio * 100 > "/dev/stderr"
+            printf "INFO: Global Prompt Cache 可能命中 (比率=%.2f%%)\n", ratio * 100
         } else {
-            printf "INFO: Global Prompt Cache 未命中或被 LRU 淘汰 (比率=%.2f%%)\n", ratio * 100 > "/dev/stderr"
+            printf "INFO: Global Prompt Cache 未命中或被 LRU 淘汰 (比率=%.2f%%)\n", ratio * 100
         }
         exit 0  # 这个测试是观察性的，不算失败
     }
-    ' 2>> "$LOG_FILE"
+    ' | tee -a "$LOG_FILE"
     PASSED_TESTS=$((PASSED_TESTS + 1))  # 观察性测试，总是通过
 
-    echo -e "\n测试用例 5 完成 (Global Prompt Cache 观察性测试)"
+    echo -e "\n测试用例 5 [PASS] (Global Prompt Cache 观察性测试)"
 }
 
 # 测试用例6: 重复请求测试 (验证缓存持续性)
@@ -633,7 +707,9 @@ test_case_6_repeated_requests() {
     echo "预期: 所有后续请求的 TTFT 应保持在低位 (~40-60ms)" | tee -a "$LOG_FILE"
     echo "========================================" | tee -a "$LOG_FILE"
 
-    local prompt=$(generate_base_prompt)
+    TOTAL_TESTS=$((TOTAL_TESTS + 1))
+
+    local prompt=$(generate_base_prompt "test6")
     local slot_id=0
     local num_requests=4
     declare -a ttft_values=()
@@ -674,13 +750,17 @@ test_case_6_repeated_requests() {
     # 验证 TTFT 稳定性
     if [ $(echo "$max_ttft < 100" | bc -l) -eq 1 ]; then
         echo "  [PASS] 所有 TTFT < 100ms，缓存工作正常" | tee -a "$LOG_FILE"
+        echo -e "\n测试用例 6 [PASS]"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     elif [ $(echo "$max_ttft < 200" | bc -l) -eq 1 ]; then
         echo "  [INFO] TTFT 在可接受范围 (< 200ms)" | tee -a "$LOG_FILE"
+        echo -e "\n测试用例 6 [PASS] (可接受范围)"
+        PASSED_TESTS=$((PASSED_TESTS + 1))
     else
         echo "  [WARN] 部分 TTFT 偏高 (> 200ms)，可能缓存未完全命中" | tee -a "$LOG_FILE"
+        echo -e "\n测试用例 6 [FAIL]"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
     fi
-
-    echo -e "\n测试用例 6 完成"
 }
 
 # 打印测试总结

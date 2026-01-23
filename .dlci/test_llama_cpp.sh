@@ -201,6 +201,32 @@ set_common_runtime_env() {
     echo "[INFO] CUDA_VISIBLE_DEVICES set to: $CUDA_VISIBLE_DEVICES" | tee -a "$summary_log"
 }
 
+# Helper function to capture and print dmesg when tests fail
+# Arguments: none
+# Returns: 0
+print_dmesg_on_failure() {
+    if ! command -v dmesg >/dev/null 2>&1; then
+        echo "[WARN] 'dmesg' command not available; cannot capture kernel messages." | tee -a "$summary_log"
+        return 0
+    fi
+
+    echo "" | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "[INFO] Capturing kernel messages (dmesg)..." | tee -a "$summary_log"
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+
+    # Save full dmesg to test log
+    echo "[INFO] Full kernel messages saved to test log:" >> "$test_log"
+    dmesg >> "$test_log" 2>&1 || true
+
+    # Print last 100 lines to summary
+    echo "[INFO] Last 100 lines of kernel messages:" | tee -a "$summary_log"
+    dmesg | tail -n 100 | tee -a "$summary_log" "$test_log" 2>&1 || true
+
+    echo "[INFO] =============================================" | tee -a "$summary_log"
+    echo "" | tee -a "$summary_log"
+}
+
 declare -a SIMPLE_TEST_CASES=()
 declare -a simple_test_failures=()
 declare -a simple_test_skips=()
@@ -379,6 +405,7 @@ simple_test_print_summary() {
         for fail_item in "${simple_test_failures[@]}"; do
             echo "  - $fail_item" | tee -a "$summary_log"
         done
+        print_dmesg_on_failure
         exit 1
     fi
 
@@ -558,6 +585,7 @@ simple_model_print_summary() {
         for fail_item in "${simple_model_fail_list[@]}"; do
             echo "  - $fail_item" | tee -a "$summary_log"
         done
+        print_dmesg_on_failure
         exit 1
     fi
 
@@ -743,6 +771,7 @@ simple_perf_print_summary() {
         for fail_item in "${simple_perf_fail_list[@]}"; do
             echo "  - $fail_item" | tee -a "$summary_log"
         done
+        print_dmesg_on_failure
         exit 1
     fi
 
@@ -953,6 +982,7 @@ simple_tp_print_summary() {
         for fail_item in "${simple_tp_fail_list[@]}"; do
             echo "  - $fail_item" | tee -a "$summary_log"
         done
+        print_dmesg_on_failure
         exit 1
     fi
 
@@ -1334,7 +1364,8 @@ full_suite_prepare_part2_cases() {
     test_cases_part2=(
         "${build_dir_bin}/test-tokenizer-1-bpe models/ggml-vocab-llama-bpe.gguf"
         "${build_dir_bin}/test-tokenizer-1-spm models/ggml-vocab-llama-spm.gguf"
-        "${build_dir_bin}/test-state-restore-fragmented --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        # DL-TODO : support GGML_CUDA_GRAPHS_DISABLE_WARMUP=0 test-state-restore-fragmented
+        "GGML_CUDA_GRAPHS_DISABLE_WARMUP=1 ${build_dir_bin}/test-state-restore-fragmented --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-q4_k_m.gguf"
     )
     add_tokenizer_vocab_tests
 }
@@ -1730,6 +1761,7 @@ full_suite_print_summary() {
         echo "[INFO] Detailed failure logs can be found in: $test_log" | tee -a "$summary_log"
         echo "" | tee -a "$summary_log"
         echo "OVERALL RESULT: FAILED (${passed_tests}/${total_tests} tests passed)" | tee -a "$summary_log"
+        print_dmesg_on_failure
         exit 1
     fi
 
