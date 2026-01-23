@@ -127,7 +127,12 @@ compile_and_test_llama_cpp_loongarch64:
     - export SDK_DIR="${SDK_WORKSPACE}/sdk"
     - *docker_envs
     - bash ${REPO_PATH}/.dlci/check_device_status.sh
-    - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh
+    - |
+      mkdir -p logs/compile
+      log_file="${CI_PROJECT_DIR}/logs/compile/compile_loongarch64.log"
+      echo "${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} \"\${DOCKER_ENVS[@]}\" \"${DOCKER_IMAGE_LOONGAARCH64}\" ${REPO_PATH}/.dlci/compile_llama_cpp.sh"
+      ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/compile_llama_cpp.sh > "$log_file" 2>&1 || (echo "Compilation failed, log saved to $log_file"; exit 1)
+      echo "Log saved to $log_file"
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/test_llama_cpp.sh
     - ${DOCKER_REPO_PATH}/bash.sh --env DOCKER_PLATFORM=${DOCKER_PLATFORM} "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_LOONGAARCH64}" ${REPO_PATH}/.dlci/bench_llama_cpp.sh --ci-test --binary-path build_loongarch64/bin
   artifacts:
