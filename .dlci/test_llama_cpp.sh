@@ -201,27 +201,21 @@ set_common_runtime_env() {
     echo "[INFO] CUDA_VISIBLE_DEVICES set to: $CUDA_VISIBLE_DEVICES" | tee -a "$summary_log"
 }
 
-# Helper function to capture and print dmesg when tests fail
+# Helper function to check device status when tests fail
 # Arguments: none
 # Returns: 0
 print_dmesg_on_failure() {
-    if ! command -v dmesg >/dev/null 2>&1; then
-        echo "[WARN] 'dmesg' command not available; cannot capture kernel messages." | tee -a "$summary_log"
-        return 0
-    fi
-
     echo "" | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
-    echo "[INFO] Capturing kernel messages (dmesg)..." | tee -a "$summary_log"
+    echo "[INFO] Running device status check on failure..." | tee -a "$summary_log"
     echo "[INFO] =============================================" | tee -a "$summary_log"
 
-    # Save full dmesg to test log
-    echo "[INFO] Full kernel messages saved to test log:" >> "$test_log"
-    dmesg >> "$test_log" 2>&1 || true
-
-    # Print last 100 lines to summary
-    echo "[INFO] Last 100 lines of kernel messages:" | tee -a "$summary_log"
-    dmesg | tail -n 100 | tee -a "$summary_log" "$test_log" 2>&1 || true
+    # Run device status check script
+    if [ -f "${SCRIPT_DIR}/check_device_status.sh" ]; then
+        bash "${SCRIPT_DIR}/check_device_status.sh" 2>&1 | tee -a "$summary_log" "$test_log" || true
+    else
+        echo "[WARN] Device status check script not found: ${SCRIPT_DIR}/check_device_status.sh" | tee -a "$summary_log"
+    fi
 
     echo "[INFO] =============================================" | tee -a "$summary_log"
     echo "" | tee -a "$summary_log"
