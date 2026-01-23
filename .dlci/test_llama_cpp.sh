@@ -212,7 +212,7 @@ print_dmesg_on_failure() {
 
     # Run device status check script
     if [ -f "${SCRIPT_DIR}/check_device_status.sh" ]; then
-        bash "${SCRIPT_DIR}/check_device_status.sh" 2>&1 | tee -a "$summary_log" "$test_log" || true
+        sudo bash "${SCRIPT_DIR}/check_device_status.sh" 2>&1 | tee -a "$summary_log" "$test_log" || true
     else
         echo "[WARN] Device status check script not found: ${SCRIPT_DIR}/check_device_status.sh" | tee -a "$summary_log"
     fi
@@ -1487,7 +1487,7 @@ full_suite_run_qwen_case() {
     end_time=$(date +%s)
     duration=$((end_time - start_time))
 
-    if [ $re_rene 0 ]; then
+    if [ $ret -ne 0 ]; then
         full_suite_fail_list+=("$test_name_for_summary (exit code $ret)")
         full_suite_fail_count=$((full_suite_fail_count + 1))
         test_results_names+=("$test_name_for_summary")
