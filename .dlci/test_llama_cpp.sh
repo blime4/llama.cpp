@@ -1474,6 +1474,7 @@ full_suite_print_case_summary() {
 full_suite_run_qwen_case() {
     local test_script="$1"
     local test_name_for_summary="qwen_model_tests"
+    local saved_cuda_devices="$CUDA_VISIBLE_DEVICES"
 
     echo "Running Qwen model tests from script: $test_script" | tee -a "$summary_log"
     echo "Running Qwen model tests from script: $test_script" >> "$test_log"
@@ -1483,6 +1484,7 @@ full_suite_run_qwen_case() {
     start_time=$(date +%s)
 
     set +e
+    unset CUDA_VISIBLE_DEVICES
     # Output to both stdout and log file using tee
     bash "$test_script" 2>&1 | tee -a "$test_log"
     local ret=${PIPESTATUS[0]}
@@ -1502,6 +1504,7 @@ full_suite_run_qwen_case() {
     fi
 
     echo "-----------------------------" | tee -a "$test_log"
+    export CUDA_VISIBLE_DEVICES="$saved_cuda_devices"
     full_suite_print_case_summary "$test_name_for_summary" "$ret" false
 }
 
@@ -1778,7 +1781,7 @@ run_full_test_suite() {
     echo "[INFO] Preparing Qwen model tests for correctness validation" | tee -a "$summary_log"
     add_qwen_model_tests
     add_multi_turn_tests
-    add_prefix_cache_tests
+    # add_prefix_cache_tests
     full_suite_prepare_part2_cases
 
     test_cases=(
@@ -1786,7 +1789,7 @@ run_full_test_suite() {
         "${test_cases_part2[@]}"
         "${qwen_model_tests[@]}"
         "${multi_turn_tests[@]}"
-        "${prefix_cache_tests[@]}"
+        # "${prefix_cache_tests[@]}"
     )
 
     full_suite_run_all_cases

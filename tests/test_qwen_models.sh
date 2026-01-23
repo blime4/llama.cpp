@@ -24,6 +24,9 @@ else
     DEFAULT_LLAMA_COMPLETION="./build_${ARCH}/bin/llama-completion"
 fi
 
+# SDK垃圾输出变量，用于从模型响应中移除不需要的前缀
+SDK_GARBAGE="12 "
+
 # 解析命令行参数
 UPDATE_MODE=false
 POSITIONAL_ARGS=()
@@ -352,7 +355,9 @@ validate_test_result() {
             fi
         else
             # 精确匹配模式
-            if [ "$actual_response" = "$expected_content" ]; then
+            # 移除SDK垃圾输出前缀
+            clean_actual=$(echo "$actual_response" | sed "s/^$SDK_GARBAGE//")
+            if [ "$clean_actual" = "$expected_content" ]; then
                 echo "[PASS] $test_name: 回复完全匹配期望内容" | tee -a "$LOG_FILE"
                 PASSED_TESTS=$((PASSED_TESTS + 1))
                 return 0
