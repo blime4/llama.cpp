@@ -107,7 +107,6 @@ Options:
   --repeat-test N         Repeat test execution N times and collect statistics
   --skip-device-check     Skip device card status check (use with caution)
   --no-fa                 Disable Flash Attention (do not use -fa flag)
-                          Device check uses standalone script: .dlci/check_device_status.sh
   --dlpti "OPTIONS"       Enable dlPTI profiling with specified options
                           Example: --dlpti "--activity-mask cmd,cu,curt --data-file profile.db"
                           See dlpti_tools capture --help for available options
@@ -779,7 +778,6 @@ dlpti_troubleshoot() {
     log_info "   - Ensure DL devices are available and accessible"
     log_info "   - Check if running with appropriate permissions"
     log_info "   - Verify SDK environment is properly sourced"
-    log_info "   - Try running device check: .dlci/check_device_status.sh"
     log_info "   - For permission issues, consider: sudo usermod -a -G dl \$(whoami)"
 
     # Check for LD_PRELOAD conflicts

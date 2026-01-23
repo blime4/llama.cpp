@@ -98,10 +98,10 @@ check_device_status
 # Check for denglin driver issues in dmesg
 if command -v dmesg >/dev/null 2>&1; then
     echo "[INFO] Running dmesg..." | tee -a "$summary_log"
-    dmesg 2>&1 | tail -50 >> "$test_log" || echo "[WARN] dmesg command failed or returned non-zero exit code" | tee -a "$summary_log"
+    sudo dmesg 2>&1 | tail -50 >> "$test_log" || echo "[WARN] dmesg command failed or returned non-zero exit code" | tee -a "$summary_log"
 
     # Check for denglin driver errors
-    if dmesg 2>/dev/null | tail -n 50 | grep -q "denglin.*err="; then
+    if sudo dmesg 2>/dev/null | tail -n 50 | grep -q "denglin.*err="; then
         echo "[WARN] Detected denglin driver errors in dmesg, may affect CUDA tests" | tee -a "$summary_log"
         echo "[INFO] Check detailed log for denglin driver error details: $test_log" | tee -a "$summary_log"
     fi
