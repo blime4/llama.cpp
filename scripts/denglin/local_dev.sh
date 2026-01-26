@@ -15,6 +15,7 @@ show_help() {
     echo "  -t, --sdk-tag TAG    Set SDK_TAG (default: $DEFAULT_SDK_TAG)"
     echo "  -c, --compile        Compile llama.cpp before entering docker"
     echo "  -cc, --re-compile    Re-compile (clean and build) llama.cpp before entering docker"
+    echo "  --debug              Enable debug mode (Debug build + verbose runtime output)"
     echo "  -h, --help           Show this help message"
     echo "  -p, --platform       Set platform (supported: x86_64, aarch64, loongarch64, riscv64, android, default: auto-detect)"
     echo ""
@@ -22,6 +23,8 @@ show_help() {
     echo "  $0                                    # Enter docker with default SDK_TAG"
     echo "  $0 -t V2_SOFTWARE_master_202508201444 # Specify SDK_TAG"
     echo "  $0 -c                                 # Compile first, then enter docker"
+    echo "  $0 -c --debug                         # Compile in debug mode, then enter docker"
+    echo "  $0 -cc --debug                        # Clean and compile in debug mode, then enter docker"
     echo "  $0 -p android                         # Android cross-compilation environment"
     echo "  $0 -p android -c                      # Android cross-compilation with compile"
     echo "  $0 -t V2_SOFTWARE_master_202508201444 -c # Specify SDK_TAG and compile"
@@ -31,6 +34,7 @@ show_help() {
 SDK_TAG="$DEFAULT_SDK_TAG"
 COMPILE_FIRST=false
 RE_COMPILE=false
+DEBUG_MODE=false
 # Auto-detect platform based on system architecture
 DOCKER_PLATFORM=$(uname -m)
 case "$DOCKER_PLATFORM" in
@@ -82,6 +86,10 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
             show_help
@@ -94,6 +102,7 @@ echo "=== Local Development Environment ==="
 echo "SDK_TAG: $SDK_TAG"
 echo "Compile first: $COMPILE_FIRST"
 echo "Re-compile: $RE_COMPILE"
+echo "Debug mode: $DEBUG_MODE"
 echo "DOCKER_PLATFORM: $DOCKER_PLATFORM"
 
 # Set environment variables
@@ -242,14 +251,23 @@ if [ "$COMPILE_FIRST" = true ]; then
     if [ ! -f "${DOCKER_REPO_PATH}/bash.sh" ]; then
         echo "[WARNING] Cannot find docker script: ${DOCKER_REPO_PATH}/bash.sh"
         echo "Trying to run compile script directly..."
-        DISABLE_CCACHE_ANDROID="${DISABLE_CCACHE_ANDROID:-}" bash .dlci/compile_llama_cpp.sh
+        COMPILE_FLAGS=""
+        if [ "$DEBUG_MODE" = true ]; then
+            COMPILE_FLAGS="--debug"
+        fi
+        DISABLE_CCACHE_ANDROID="${DISABLE_CCACHE_ANDROID:-}" bash .dlci/compile_llama_cpp.sh $COMPILE_FLAGS
     else
         echo "Running compilation in docker..."
-        # Pass DISABLE_CCACHE_ANDROID to docker environment
+        # Build compile flags based on debug mode
+        COMPILE_FLAGS=""
+        if [ "$DEBUG_MODE" = true ]; then
+            COMPILE_FLAGS="--debug"
+        fi
+        # Pass DISABLE_CCACHE_ANDROID and debug flags to docker environment
         if [ -n "${DISABLE_CCACHE_ANDROID}" ]; then
-            ${DOCKER_REPO_PATH}/bash.sh --env DISABLE_CCACHE_ANDROID="${DISABLE_CCACHE_ANDROID}" "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+            ${DOCKER_REPO_PATH}/bash.sh --env DISABLE_CCACHE_ANDROID="${DISABLE_CCACHE_ANDROID}" "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh $COMPILE_FLAGS
         else
-            ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh
+            ${DOCKER_REPO_PATH}/bash.sh "${DOCKER_ENVS[@]}" "${DOCKER_IMAGE_COMPILE}" ./.dlci/compile_llama_cpp.sh $COMPILE_FLAGS
         fi
     fi
     cd scripts/denglin

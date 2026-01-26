@@ -209,12 +209,35 @@ echo "[INFO] Custom bin directory '$CUSTOM_BIN_DIR' added to PATH." >> "$compile
 # --- End of improved ccache setup ---
 
 # --- Compile llama.cpp ---
+# Parse command line arguments for debug mode
+DEBUG_MODE=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 sdk=$SDK_DIR
 echo "[INFO] REPO_PATH: ${REPO_PATH}" | tee -a "$compile_log"
 cd ${REPO_PATH}
 
 ARCH=${DOCKER_PLATFORM}
 build_dir=${REPO_PATH}/build_${ARCH}
+
+# Set build type based on debug mode
+if [ "$DEBUG_MODE" = true ]; then
+    CMAKE_BUILD_TYPE="Debug"
+    echo "[INFO] Debug mode enabled - compiling with Debug build type" | tee -a "$compile_log"
+else
+    CMAKE_BUILD_TYPE="Release"
+    echo "[INFO] Release mode - compiling with Release build type" | tee -a "$compile_log"
+fi
 
 echo "[INFO] ARCH value: '$ARCH'" | tee -a "$compile_log"
 echo "[INFO] Build directory: $build_dir" | tee -a "$compile_log"
@@ -268,7 +291,7 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CUDA_GRAPHS=ON \
         -DLLAMA_CURL=OFF \
@@ -300,7 +323,7 @@ elif [ "$ARCH" = "loongarch64" ]; then
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=OFF \
         -DGGML_CUDA_GRAPHS=ON \
@@ -320,7 +343,7 @@ elif [ "$ARCH" = "android" ]; then
     echo "[INFO] Using proven local_dev.sh Android compilation method" | tee -a "$compile_log"
 
     # Use the shared Android compilation function (extracted from successful local_dev.sh)
-    if run_android_compilation "$sdk" "$REPO_PATH" "$ARCH" "$compile_log"; then
+    if run_android_compilation "$sdk" "$REPO_PATH" "$ARCH" "$compile_log" "$CMAKE_BUILD_TYPE"; then
         echo "[INFO] Android compilation completed successfully using local_dev.sh method" | tee -a "$compile_log"
         # Skip the normal ninja build since it's already done in the function
         ninja_exit_code=0
@@ -337,7 +360,7 @@ elif [ "$ARCH" = "riscv64" ]; then
     cmake_cmd="/usr/local/bin/cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=ON \
         -DGGML_CUDA_GRAPHS=ON \
@@ -368,7 +391,7 @@ else
     cmake_cmd="cmake -G Ninja -B ${build_dir} \
         -DGGML_DLCU=ON \
         -DCMAKE_VERBOSE_MAKEFILE=ON \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DGGML_BACKEND_DL=ON \
         -DGGML_CPU_ALL_VARIANTS=ON \
         -DGGML_CUDA_GRAPHS=ON \

@@ -42,6 +42,7 @@ setup_android_compile_env() {
 get_android_cmake_flags() {
     local SDK_DIR="$1"
     local build_dir="$2"
+    local CMAKE_BUILD_TYPE="${3:-Release}"  # Default to Release if not specified
 
     # Android configuration (matching local_dev.sh success pattern)
     local android_target="aarch64-linux-android"
@@ -85,7 +86,7 @@ cmake -G Ninja -B ${build_dir} \\
     -DCMAKE_EXE_LINKER_FLAGS="${android_linker_flags}" \\
     -DCMAKE_SHARED_LINKER_FLAGS="${android_linker_flags}" \\
     -DGGML_DLCU=ON \\
-    -DCMAKE_BUILD_TYPE=Release \\
+    -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \\
     -DGGML_BACKEND_DL=ON \\
     -DGGML_CPU_ALL_VARIANTS=ON \\
     -DGGML_OPENMP=OFF \\
@@ -117,6 +118,7 @@ run_android_compilation() {
     local REPO_PATH="$2"
     local arch="$3"
     local compile_log="$4"
+    local CMAKE_BUILD_TYPE="${5:-Release}"  # Default to Release if not specified
 
     echo "[INFO] Starting Android compilation with proven local_dev.sh method..." | tee -a "$compile_log"
 
@@ -148,7 +150,7 @@ run_android_compilation() {
     local build_dir="${REPO_PATH}/build_${arch}"
 
     # Generate and run CMake configuration
-    local cmake_cmd=$(get_android_cmake_flags "$SDK_DIR" "$build_dir")
+    local cmake_cmd=$(get_android_cmake_flags "$SDK_DIR" "$build_dir" "$CMAKE_BUILD_TYPE")
     echo "[INFO] CMake configuration:" | tee -a "$compile_log"
     echo "$cmake_cmd" | tee -a "$compile_log"
 

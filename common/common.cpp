@@ -1340,6 +1340,7 @@ common_init_result_ptr common_init_from_params(common_params & params) {
         LOG_WRN("common_init_from_params: Reset n_ubatch to %d\n", n_ubatch);
         llama_set_cuda_graph_capture_sizes(lctx, params.cuda_graph_capture_sizes.data(), params.cuda_graph_capture_sizes.size());
         LOG_WRN("common_init_from_params: Capturing cuda graphs");
+        // llama_set_warmup(lctx, true); // DL-TODO: check if need to warmup all experts when using cuda graph warmup.
         for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
             int32_t size = params.cuda_graph_capture_sizes[i];
             std::vector<llama_token> tmp(size, 0);

@@ -1561,7 +1561,7 @@ main() {
     local simple_perf=false
     local simple_bench=false
     local big_model=false
-    local skip_device_check=false
+    local skip_device_check=true
     local repeat_test=1
     local enable_dlpti=false
     local dlpti_options=""
