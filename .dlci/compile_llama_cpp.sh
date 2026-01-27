@@ -422,12 +422,11 @@ ccache --show-stats >> "$compile_log" 2>&1
 
 # Skip ninja build for Android (already done in shared function)
 if [ "$ARCH" != "android" ]; then
-    #cmake --build $build_dir --config Release -j 12
     cd $build_dir
 
-    echo "[INFO] Starting ninja build with 12 parallel jobs..." | tee -a "$compile_log"
+    echo "[INFO] Starting ninja build with 64 parallel jobs..." | tee -a "$compile_log"
     echo "[INFO] Compile log: $compile_log"
-    exec_with_log "ninja -v -j 12"
+    exec_with_log "ninja -v -j 64"
 
     ninja_exit_code=$?
     if [ $ninja_exit_code -ne 0 ]; then
