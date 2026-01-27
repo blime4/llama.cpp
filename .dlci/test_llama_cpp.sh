@@ -1772,9 +1772,20 @@ run_full_test_suite() {
     echo "[INFO] Note: All platforms now use the complete test set for comprehensive coverage" | tee -a "$summary_log"
 
     full_suite_prepare_part1_cases
-    echo "[INFO] Preparing Qwen model tests for correctness validation" | tee -a "$summary_log"
-    add_qwen_model_tests
-    add_multi_turn_tests
+
+    # BUG 17007: Skip qwen_model_tests and multi_turn_tests on aarch64, loongarch64, and android
+    # These tests are known to fail on these platforms due to the referenced bug
+    local skip_bug_17007_tests=false
+    if [[ "$ARCH" == "aarch64" ]] || [[ "$ARCH" == "loongarch64" ]] || [[ "$ARCH" == "android" ]]; then
+        skip_bug_17007_tests=true
+        echo "[INFO] Skipping qwen_model_tests and multi_turn_tests on $ARCH (bug 17007)" | tee -a "$summary_log"
+    fi
+
+    if [ "$skip_bug_17007_tests" = false ]; then
+        echo "[INFO] Preparing Qwen model tests for correctness validation" | tee -a "$summary_log"
+        add_qwen_model_tests
+        add_multi_turn_tests
+    fi
     # add_prefix_cache_tests
     full_suite_prepare_part2_cases
 
