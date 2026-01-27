@@ -1344,13 +1344,19 @@ full_suite_prepare_part1_cases() {
         "${build_dir_bin}/test-mtmd-c-api"
         "${build_dir_bin}/test-regex-partial"
         "${build_dir_bin}/test-sampling"
-        "${build_dir_bin}/test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf"
     )
     if [ "${ARCH}" != "loongarch64" ]; then
         echo "[INFO] Adding test-json-schema-to-grammar (not LoongArch64 platform)" | tee -a "$summary_log"
         test_cases_part1+=("${build_dir_bin}/test-json-schema-to-grammar")
     else
         echo "[INFO] Skipping test-json-schema-to-grammar on LoongArch64 platform (because the ggml-ci node lacks Python 3.8)" | tee -a "$summary_log"
+    fi
+    # BUG 17007: Skip test-thread-safety on aarch64 and loongarch64 (same reason as qwen_model_tests)
+    if [[ "$ARCH" != "aarch64" ]] && [[ "$ARCH" != "loongarch64" ]]; then
+        echo "[INFO] Adding test-thread-safety (not aarch64/loongarch64 platform)" | tee -a "$summary_log"
+        test_cases_part1+=("${build_dir_bin}/test-thread-safety --prompt 'hello, llama.cpp' --model ${LOCAL_MODEL_PATH}/Qwen2.5-1.5B-Instruct-GGUF/qwen2.5-1.5b-instruct-fp16.gguf")
+    else
+        echo "[INFO] Skipping test-thread-safety on $ARCH (bug 17007)" | tee -a "$summary_log"
     fi
 }
 
