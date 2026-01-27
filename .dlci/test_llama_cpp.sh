@@ -197,6 +197,7 @@ prepare_build_dir() {
 
 set_common_runtime_env() {
     export GGML_DEBUG=1
+    export DLCI_CACHE_DIR=/LocalRun/$(whoami)/cache/llama_cpp_ccache # bugid : 17021. Temporary solution
     export CUDA_VISIBLE_DEVICES=0
     echo "[INFO] CUDA_VISIBLE_DEVICES set to: $CUDA_VISIBLE_DEVICES" | tee -a "$summary_log"
 }
