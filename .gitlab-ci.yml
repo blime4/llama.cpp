@@ -39,7 +39,7 @@ compile_and_test_llama_cpp_x86_64:
   tags:
     - build-x86_64
   rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-(release|debug)-.*$/'
       when: on_success
     - when: on_success
   script:
@@ -65,7 +65,7 @@ compile_and_test_llama_cpp_aarch64:
   tags:
     - build-arm64
   rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-(release|debug)-.*$/'
       when: on_success
     - when: on_success
   script:
@@ -91,7 +91,7 @@ compile_and_test_llama_cpp_riscv64:
   tags:
     - build-x86_64
   rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-(release|debug)-.*$/'
       when: on_success
     - when: on_success
   script:
@@ -118,7 +118,7 @@ compile_and_test_llama_cpp_loongarch64:
   tags:
     - build-loongarch64
   rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-(release|debug)-.*$/'
       when: on_success
     - when: on_success
   script:
@@ -149,7 +149,7 @@ compile_and_test_llama_cpp_android:
   tags:
     - build-x86_64  # Android cross-compilation uses x86_64 builder
   rules:
-    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-release-.*$/'
+    - if: '$CI_COMMIT_TAG && $CI_COMMIT_TAG =~ /^dl-(release|debug)-.*$/'
       when: on_success
     - when: on_success
   script:
@@ -187,7 +187,7 @@ release_llama_cpp_x86_64:
   needs:
     - job: compile_and_test_llama_cpp_x86_64
   only:
-    - /^dl-release-.*$/
+    - /^dl-(release|debug)-.*$/
   script:
     - *load_unified_config
     - *docker_envs
@@ -204,7 +204,7 @@ release_llama_cpp_aarch64:
   needs:
     - job: compile_and_test_llama_cpp_aarch64
   only:
-    - /^dl-release-.*$/
+    - /^dl-(release|debug)-.*$/
   script:
     - *load_unified_config
     - *docker_envs
@@ -221,7 +221,7 @@ release_llama_cpp_riscv64:
   needs:
     - job: compile_and_test_llama_cpp_riscv64
   only:
-    - /^dl-release-.*$/
+    - /^dl-(release|debug)-.*$/
   script:
     - *load_unified_config
     - *docker_envs
@@ -238,7 +238,7 @@ release_llama_cpp_loongarch64:
   needs:
     - job: compile_and_test_llama_cpp_loongarch64
   only:
-    - /^dl-release-.*$/
+    - /^dl-(release|debug)-.*$/
   script:
     - *load_unified_config
     - *docker_envs
@@ -255,7 +255,7 @@ release_llama_cpp_android:
   needs:
     - job: compile_and_test_llama_cpp_android
   only:
-    - /^dl-release-.*$/
+    - /^dl-(release|debug)-.*$/
   script:
     - *load_unified_config
     - *docker_envs
