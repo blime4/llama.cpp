@@ -3,7 +3,7 @@
 #include "sumrows.cuh"
 
 template <typename T>
-static void sum_rows_cuda(const T * x, T * dst, const int ncols, const int nrows, cudaStream_t stream) {
+void sum_rows_cuda(const T * x, T * dst, const int ncols, const int nrows, cudaStream_t stream) {
     const int  id  = ggml_cuda_get_device();
     const int  nsm = ggml_cuda_info().devices[id].nsm;
     const dim3 block_nums(nrows, 1, 1);

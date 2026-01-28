@@ -106,7 +106,9 @@ static const bool GGML_IS_TEST= std::getenv("GGML_IS_TEST") != nullptr;
 #define GGML_CUDA_CC_IS_PH1(cc)      (cc >= GGML_CUDA_CC_PH1)
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11070
+#if !defined(GGML_USE_DLCU) || !defined(__loongarch64) // DL-FIXME: Remove this when bug 17026 is closed.
 #    define GGML_CUDA_USE_CUB
+#endif  // !defined(GGML_USE_DLCU) || !defined(__loongarch64)
 #endif  // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11070
 
 #ifdef __CUDA_ARCH_LIST__
