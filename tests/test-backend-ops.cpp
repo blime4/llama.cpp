@@ -8676,7 +8676,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     for (ggml_sort_order order : {GGML_SORT_ORDER_ASC, GGML_SORT_ORDER_DESC}) {
         for (uint32_t i = 4; i <= 1024*1024; i *= 2) {
-#if !defined(__loongarch64) && defined(GGML_USE_DLCU) // bugid : 17026
+#if !defined(__loongarch64) || !defined(GGML_USE_DLCU) // bugid : 17026
             test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {i-1, 1, 1, 1}));
             test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {i, 1, 1, 1}));
 #else
@@ -8690,7 +8690,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {60, 10, 10, 10}, order)); // qwen
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {1023, 2, 1, 3}, order));
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {1024, 2, 1, 3}, order));
-#if !defined(__loongarch64) && defined(GGML_USE_DLCU) // bugid : 17026
+#if !defined(__loongarch64) || !defined(GGML_USE_DLCU) // bugid : 17026
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {1025, 2, 1, 3}, order));
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {2047, 2, 1, 3}, order));
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {2048, 2, 1, 3}, order));
@@ -8880,6 +8880,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                         if (!GGML_DLFA_SUPPORT_NONZERO_LOGIT_SOFTCAP && logit_softcap > 0.0f) continue;
                                                         if (hsk == 192 && (hsv != hsk)) continue;
 #endif
+#if !defined(__loongarch64) || !defined(GGML_USE_DLCU) // bugid: 17036
                                                         test_cases.emplace_back(new test_flash_attn_ext(
                                                                     hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV));
                                                         // run fewer test cases permuted
@@ -8887,6 +8888,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                                                             test_cases.emplace_back(new test_flash_attn_ext(
                                                                         hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV, {0, 2, 1, 3}));
                                                         }
+#endif
                                                     }
                                                 }
                                             }
@@ -8902,8 +8904,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
         // Always include at least one FP16 reference test to cover CPU FP16 implementation.
+#if !defined(__loongarch64) || !defined(GGML_USE_DLCU) // bugid: 17036
         test_cases.emplace_back(new test_flash_attn_ext(
             64, 64, 4, {1, 1}, 128, 2, true, false, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, {0, 1, 2, 3}));
+#endif
 
 
     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
@@ -9153,6 +9157,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         }
     }
 
+#if !defined(__loongarch64) || !defined(GGML_USE_DLCU) // bugid: 17036
     if (GGML_DLFA_SUPPORT_QKVO_NOT_SAME_TYPE) {
     // Qwen3-VL-8B https://github.com/ggml-org/llama.cpp/issues/17012
     test_cases.emplace_back(new test_flash_attn_ext(72, 72, 16, {1, 1}, 5776, 5776, false, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16));
@@ -9165,6 +9170,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         }
     }
     }
+#endif
 
     test_cases.emplace_back(new test_conv_2d_dw({512, 512, 256, 1}, {3, 3, 1, 256}, 1, 1, 1, false));
     test_cases.emplace_back(new test_conv_2d_dw({512, 512, 256, 1}, {3, 3, 1, 256}, 1, 1, 1, true));
@@ -9209,7 +9215,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         test_cases.emplace_back(new test_sum(GGML_TYPE_F32, it));
     }
 
-#if !defined(__loongarch64) && defined(GGML_USE_DLCU) // bugid : 17026
+#if !defined(__loongarch64) || !defined(GGML_USE_DLCU) // bugid : 17026
     test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {65000, 16, 1, 1}));
 #endif
 
