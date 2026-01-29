@@ -1334,15 +1334,26 @@ common_init_result_ptr common_init_from_params(common_params & params) {
         if (params.cuda_graph_capture_sizes.empty()) {
             params.cuda_graph_capture_sizes = {1,64,128,192,256,320,384,448,512};
         }
-        // Set n_ubatch to match the max capture size for all models
-        uint32_t n_ubatch = *std::max_element(params.cuda_graph_capture_sizes.begin(), params.cuda_graph_capture_sizes.end());
+        // Get the actual n_batch from the context (may be limited by n_ctx)
+        uint32_t n_batch = llama_n_batch(lctx);
+        // Filter capture sizes to only include those that fit within n_batch
+        std::vector<uint32_t> filtered_sizes;
+        filtered_sizes.reserve(params.cuda_graph_capture_sizes.size());
+        for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
+            if ((uint32_t)params.cuda_graph_capture_sizes[i] <= n_batch) {
+                filtered_sizes.push_back(params.cuda_graph_capture_sizes[i]);
+            }
+        }
+        // Set n_ubatch to match the max capture size (now guaranteed to be <= n_batch)
+        uint32_t n_ubatch = filtered_sizes.empty() ? 1 : *std::max_element(filtered_sizes.begin(), filtered_sizes.end());
+        GGML_ASSERT(n_ubatch <= n_batch && "n_ubatch should not exceed n_batch");
         llama_set_u_nbatch(lctx, n_ubatch);
         LOG_WRN("common_init_from_params: Reset n_ubatch to %d\n", n_ubatch);
-        llama_set_cuda_graph_capture_sizes(lctx, params.cuda_graph_capture_sizes.data(), params.cuda_graph_capture_sizes.size());
+        llama_set_cuda_graph_capture_sizes(lctx, filtered_sizes.data(), filtered_sizes.size());
         LOG_WRN("common_init_from_params: Capturing cuda graphs");
         // llama_set_warmup(lctx, true); // DL-TODO: check if need to warmup all experts when using cuda graph warmup.
-        for (size_t i = 0; i < params.cuda_graph_capture_sizes.size(); ++i) {
-            int32_t size = params.cuda_graph_capture_sizes[i];
+        for (size_t i = 0; i < filtered_sizes.size(); ++i) {
+            int32_t size = filtered_sizes[i];
             std::vector<llama_token> tmp(size, 0);
             llama_token bos = llama_vocab_bos(vocab);
             if (llama_model_has_encoder(model)) {
@@ -1355,7 +1366,7 @@ common_init_result_ptr common_init_from_params(common_params & params) {
                 tmp.push_back(decoder_start_token_id);
             }
             if (llama_model_has_decoder(model)) {
-                llama_decode(lctx, llama_batch_get_one(tmp.data(), std::min(tmp.size(), (size_t) params.n_batch)));
+                llama_decode(lctx, llama_batch_get_one(tmp.data(), tmp.size()));
             }
             llama_memory_clear(llama_get_memory(lctx), true);
             llama_synchronize(lctx);
