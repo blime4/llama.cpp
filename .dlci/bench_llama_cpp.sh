@@ -177,14 +177,14 @@ echo "" | tee -a "$summary_log"
 
 # Run benchmark
 echo "[INFO] Starting llama-bench..." | tee -a "$summary_log"
-echo "[INFO] Command: CUDA_VISIBLE_DEVICES=0,1 LLAMA_SET_ROWS=1 QWEN_USE_FP16=1 ${build_dir_bin}/llama-bench -m \"$MODEL_PATH\" -ngl $GPU_LAYERS --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1" | tee -a "$summary_log"
+echo "[INFO] Command: CUDA_VISIBLE_DEVICES=0,1 QWEN_USE_FP16=1 ${build_dir_bin}/llama-bench -m \"$MODEL_PATH\" -ngl $GPU_LAYERS --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1" | tee -a "$summary_log"
 echo "" | tee -a "$summary_log"
 echo "-----------------------------" | tee -a "$bench_log"
 
 start_time=$(date +%s)
 set +e
 
-CUDA_VISIBLE_DEVICES=0,1 LLAMA_SET_ROWS=1 QWEN_USE_FP16=1 "${build_dir_bin}/llama-bench" -m "$MODEL_PATH" -ngl "$GPU_LAYERS" --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1 2>&1 | tee -a "$bench_log"
+CUDA_VISIBLE_DEVICES=0,1 QWEN_USE_FP16=1 "${build_dir_bin}/llama-bench" -m "$MODEL_PATH" -ngl "$GPU_LAYERS" --progress -fa 1 -pg 512,128 -p 0 -n 0 -r 1 2>&1 | tee -a "$bench_log"
 ret=$?
 
 set -e
