@@ -1019,10 +1019,10 @@ detect_gpu_resources() {
     local total_memory_gb=0
     local gpu_memory_list=""
 
-    # Check if nvidia-smi is available
-    if command -v nvidia-smi >/dev/null 2>&1; then
+    # Check if dlsmi is available
+    if command -v dlsmi >/dev/null 2>&1; then
         # Get number of GPUs
-        gpu_count=$(nvidia-smi --query-gpu=count --format=csv,noheader,nounits 2>/dev/null | head -1)
+        gpu_count=$(dlsmi --query-gpu=count --format=csv,noheader,nounits 2>/dev/null | head -1)
         if [ -z "$gpu_count" ] || [ "$gpu_count" = "count" ]; then
             gpu_count=0
         fi
@@ -1030,7 +1030,7 @@ detect_gpu_resources() {
         # Get memory for each GPU (in MB, then convert to GB)
         if [ "$gpu_count" -gt 0 ]; then
             local memory_values
-            memory_values=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null)
+            memory_values=$(dlsmi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null)
             local gpu_memory_array=()
             local total_memory_mb=0
             local index=0
