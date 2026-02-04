@@ -10898,3 +10898,55 @@ void ggml_compute_forward_opt_step_sgd(const ggml_compute_params * params, ggml_
             }
     }
 }
+
+void ggml_compute_forward_moe_sum(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    // [hidden_dim, n_experts_used, tokens]
+    ggml_tensor * src0 = dst->src[0];
+    const int n_expert_used = src0->ne[1];
+    GGML_ASSERT(ggml_is_contiguous(src0));
+    GGML_ASSERT(ggml_is_contiguous(dst));
+
+    memset(dst->data, 0, ggml_nbytes(dst));
+
+    ggml_tensor dst_view = {
+        /*.type         =*/ dst->type,
+        /*.buffer       =*/ dst->buffer,
+        /*.ne           =*/ { dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3] },
+        /*.nb           =*/ { dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3] },
+        /*.op           =*/ dst->op,
+        /*.op_params    =*/ { 0 },
+        /*.flags        =*/ 0,
+        /*.src          =*/ { NULL },
+        /*.view_src     =*/ { NULL },
+        /*.view_offs    =*/ 0,
+        /*.data         =*/ dst->data,
+        /*.name         =*/ { 0 },
+        /*.extra        =*/ NULL,
+        /*.padding      =*/ { 0 },
+    };
+
+    dst_view.src[1] = &dst_view;
+
+    for (int i = 0; i < n_expert_used; i++) {
+        ggml_tensor src0_view = {
+            /*.type         =*/ src0->type,
+            /*.buffer       =*/ src0->buffer,
+            /*.ne           =*/ { src0->ne[0], src0->ne[2], src0->ne[3], 1 },
+            /*.nb           =*/ { src0->nb[0], src0->nb[2], src0->nb[3], src0->nb[3] },
+            /*.op           =*/ GGML_OP_NONE,
+            /*.op_params    =*/ { 0 },
+            /*.flags        =*/ 0,
+            /*.src          =*/ { NULL },
+            /*.view_src     =*/ { NULL },
+            /*.view_offs    =*/ 0,
+            /*.data         =*/ ((uint8_t*)src0->data) + i * src0->nb[1],
+            /*.name         =*/ { 0 },
+            /*.extra        =*/ NULL,
+            /*.padding      =*/ { 0 },
+        };
+        dst_view.src[0] = &src0_view;
+        ggml_compute_forward_add(params, &dst_view);
+    }
+}

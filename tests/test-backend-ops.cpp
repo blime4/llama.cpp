@@ -6541,6 +6541,42 @@ struct test_diag : public test_case {
     }
 };
 
+// GGML_OP_MOE_SUM
+struct test_moe_sum : public test_case {
+    const ggml_type type;
+    const int64_t hidden_dim;
+    const int64_t n_expert_used;
+    const int64_t n_tokens;
+
+    std::string vars() override {
+        return VARS_TO_STR4(type, hidden_dim, n_expert_used, n_tokens);
+    }
+
+    test_moe_sum(ggml_type type = GGML_TYPE_F32,
+                 int64_t hidden_dim = 128,
+                 int64_t n_expert_used = 4,
+                 int64_t n_tokens = 32)
+        : type(type), hidden_dim(hidden_dim), n_expert_used(n_expert_used), n_tokens(n_tokens) {
+        GGML_ASSERT(n_expert_used <= 8);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        // Input: [hidden_dim, n_expert_used, n_tokens]
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, type, hidden_dim, n_expert_used, n_tokens);
+        ggml_set_name(a, "a");
+
+        ggml_tensor * out = ggml_moe_sum(ctx, a, n_expert_used);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return ggml_op_name(GGML_OP_MOE_SUM);
+    }
+};
+
 
 enum llm_norm_type {
     LLM_NORM,
@@ -8558,6 +8594,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {4,   3328, 1, 1}, {4, 3328, 1, 1})); // generate
     test_cases.emplace_back(new test_ssm_scan(GGML_TYPE_F32, 128, 64, 48, 1, 512, 1)); // prefill
     test_cases.emplace_back(new test_ssm_scan(GGML_TYPE_F32, 128, 64, 48, 1, 1,   1)); // generate
+
+    // moe_sum - Mixture of Experts sum reduction
+    for (ggml_type type : {GGML_TYPE_F32, GGML_TYPE_F16}) {
+        for (int64_t hidden_dim : {64, 128, 512}) {
+            for (int64_t n_expert_used : {2, 4, 8}) {
+                for (int64_t n_tokens : {16, 32, 128}) {
+                    test_cases.emplace_back(new test_moe_sum(type, hidden_dim, n_expert_used, n_tokens));
+                }
+            }
+        }
+    }
 
     return test_cases;
 }
