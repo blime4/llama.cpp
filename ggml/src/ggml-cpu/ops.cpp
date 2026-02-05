@@ -11009,55 +11009,109 @@ void ggml_compute_forward_opt_step_adamw(
     }
 }
 
+// Optimized MoE sum implementation - directly accumulates over expert dimension
+// Input:  [hidden_dim, n_experts_used, n_tokens]
+// Output: [hidden_dim, n_tokens]
+// Memory layout: [hidden_dim, expert, token] in row-major order
+template <typename src_t, typename dst_t>
+static void ggml_compute_forward_moe_sum_impl(const ggml_tensor * src0, ggml_tensor * dst,
+                                               int64_t ir0, int64_t ir1) {
+    constexpr auto src_to_f32 = type_conversion_table<src_t>::to_f32;
+    constexpr auto f32_to_dst = type_conversion_table<dst_t>::from_f32;
+
+    const int64_t hidden_dim = src0->ne[0];
+    const int64_t n_expert_used = src0->ne[1];
+
+    const src_t * src = (const src_t *)src0->data;
+    dst_t * dst_data = (dst_t *)dst->data;
+
+    const size_t nb_expert = src0->nb[1] / sizeof(src_t);
+    const size_t nb_token_src = src0->nb[2] / sizeof(src_t);
+    const size_t nb_token_dst = dst->nb[1] / sizeof(dst_t);
+
+    // Process tokens [ir0, ir1) assigned to this thread
+    // Initialize dst region to zero first
+    for (int64_t t = ir0; t < ir1; t++) {
+        dst_t * dst_token = dst_data + t * nb_token_dst;
+        for (int64_t h = 0; h < hidden_dim; h++) {
+            dst_token[h] = f32_to_dst(0.0f);
+        }
+    }
+
+    // Accumulate each expert's contribution
+    // Loop order: expert -> token -> hidden_dim for better cache locality
+    for (int64_t e = 0; e < n_expert_used; e++) {
+        for (int64_t t = ir0; t < ir1; t++) {
+            const src_t * src_token = src + t * nb_token_src + e * nb_expert;
+            dst_t * dst_token = dst_data + t * nb_token_dst;
+
+            for (int64_t h = 0; h < hidden_dim; h++) {
+                dst_token[h] = f32_to_dst(src_to_f32(dst_token[h]) + src_to_f32(src_token[h]));
+            }
+        }
+    }
+}
+
+// Specialized F32 implementation - no conversion needed, better cache locality
+static void ggml_compute_forward_moe_sum_f32(const ggml_tensor * src0, ggml_tensor * dst,
+                                              int64_t ir0, int64_t ir1) {
+    const int64_t hidden_dim = src0->ne[0];
+    const int64_t n_expert_used = src0->ne[1];
+
+    const float * src = (const float *)src0->data;
+    float * __restrict dst_data = (float *)dst->data;
+
+    const size_t nb_expert = src0->nb[1] / sizeof(float);
+    const size_t nb_token_src = src0->nb[2] / sizeof(float);
+    const size_t nb_token_dst = dst->nb[1] / sizeof(float);
+
+    // Initialize dst region to zero
+    for (int64_t t = ir0; t < ir1; t++) {
+        float * dst_token = dst_data + t * nb_token_dst;
+        for (int64_t h = 0; h < hidden_dim; h++) {
+            dst_token[h] = 0.0f;
+        }
+    }
+
+    // Accumulate each expert's contribution
+    // Loop order: expert -> token -> hidden_dim for better cache locality
+    for (int64_t e = 0; e < n_expert_used; e++) {
+        for (int64_t t = ir0; t < ir1; t++) {
+            const float * src_token = src + t * nb_token_src + e * nb_expert;
+            float * __restrict dst_token = dst_data + t * nb_token_dst;
+
+            // Use pointer arithmetic for better vectorization
+            const float * src_end = src_token + hidden_dim;
+            float * dst_ptr = dst_token;
+            const float * src_ptr = src_token;
+
+            while (src_ptr < src_end) {
+                *dst_ptr++ += *src_ptr++;
+            }
+        }
+    }
+}
+
 void ggml_compute_forward_moe_sum(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
-    // [hidden_dim, n_experts_used, tokens]
     ggml_tensor * src0 = dst->src[0];
-    const int n_expert_used = src0->ne[1];
+
     GGML_ASSERT(ggml_is_contiguous(src0));
     GGML_ASSERT(ggml_is_contiguous(dst));
+    GGML_ASSERT(src0->type == dst->type);
 
-    memset(dst->data, 0, ggml_nbytes(dst));
+    const auto [ir0, ir1] = get_thread_range(params, dst);
 
-    ggml_tensor dst_view = {
-        /*.type         =*/ dst->type,
-        /*.buffer       =*/ dst->buffer,
-        /*.ne           =*/ { dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3] },
-        /*.nb           =*/ { dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3] },
-        /*.op           =*/ dst->op,
-        /*.op_params    =*/ { 0 },
-        /*.flags        =*/ 0,
-        /*.src          =*/ { NULL },
-        /*.view_src     =*/ { NULL },
-        /*.view_offs    =*/ 0,
-        /*.data         =*/ dst->data,
-        /*.name         =*/ { 0 },
-        /*.extra        =*/ NULL,
-        /*.padding      =*/ { 0 },
-    };
-
-    dst_view.src[1] = &dst_view;
-
-    for (int i = 0; i < n_expert_used; i++) {
-        ggml_tensor src0_view = {
-            /*.type         =*/ src0->type,
-            /*.buffer       =*/ src0->buffer,
-            /*.ne           =*/ { src0->ne[0], src0->ne[2], src0->ne[3], 1 },
-            /*.nb           =*/ { src0->nb[0], src0->nb[2], src0->nb[3], src0->nb[3] },
-            /*.op           =*/ GGML_OP_NONE,
-            /*.op_params    =*/ { 0 },
-            /*.flags        =*/ 0,
-            /*.src          =*/ { NULL },
-            /*.view_src     =*/ { NULL },
-            /*.view_offs    =*/ 0,
-            /*.data         =*/ ((uint8_t*)src0->data) + i * src0->nb[1],
-            /*.name         =*/ { 0 },
-            /*.extra        =*/ NULL,
-            /*.padding      =*/ { 0 },
-        };
-        dst_view.src[0] = &src0_view;
-        ggml_compute_forward_add(params, &dst_view);
+    // Dispatch based on data type
+    if (src0->type == GGML_TYPE_F32) {
+        ggml_compute_forward_moe_sum_f32(src0, dst, ir0, ir1);
+    } else if (src0->type == GGML_TYPE_F16) {
+        ggml_compute_forward_moe_sum_impl<ggml_fp16_t, ggml_fp16_t>(src0, dst, ir0, ir1);
+    } else if (src0->type == GGML_TYPE_BF16) {
+        ggml_compute_forward_moe_sum_impl<ggml_bf16_t, ggml_bf16_t>(src0, dst, ir0, ir1);
+    } else {
+        GGML_ABORT("fatal error: unsupported type for moe_sum");
     }
 }
 
