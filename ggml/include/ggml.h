@@ -2484,12 +2484,10 @@ extern "C" {
             struct ggml_tensor  * b,
             struct ggml_tensor  * state);
 
-#ifdef GGML_USE_DLCU
     GGML_API struct ggml_tensor * ggml_moe_sum(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             int n_expert_used);
-#endif  // GGML_USE_DLCU
 
     /* Solves a specific equation of the form Ax=B, where A is a triangular matrix
     *  without zeroes on the diagonal (i.e. invertible).

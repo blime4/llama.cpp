@@ -11009,7 +11009,6 @@ void ggml_compute_forward_opt_step_adamw(
     }
 }
 
-#ifdef GGML_USE_DLCU
 void ggml_compute_forward_moe_sum(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
@@ -11061,7 +11060,6 @@ void ggml_compute_forward_moe_sum(
         ggml_compute_forward_add(params, &dst_view);
     }
 }
-#endif  // GGML_USE_DLCU
 
 static void ggml_compute_forward_opt_step_sgd_f32(const ggml_compute_params * params, ggml_tensor * dst) {
     const ggml_tensor * src0       = dst->src[0];

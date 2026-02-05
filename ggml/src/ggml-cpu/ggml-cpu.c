@@ -2097,12 +2097,10 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                 ggml_compute_forward_opt_step_adamw(params, tensor);
             }
             break;
-#ifdef GGML_USE_DLCU
         case GGML_OP_MOE_SUM:
             {
                 ggml_compute_forward_moe_sum(params, tensor);
             } break;
-#endif  // GGML_USE_DLCU
         case GGML_OP_OPT_STEP_SGD:
             {
                 ggml_compute_forward_opt_step_sgd(params, tensor);

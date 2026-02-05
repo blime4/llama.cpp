@@ -8,7 +8,6 @@
 
 #ifdef GGML_USE_DLCU
 #include "../ggml-dlcu/dl-mulmat.cuh"
-#include "../ggml-dlcu/dl-moesum.cuh"
 #endif
 #ifdef GGML_USE_DLFA
 #include "../ggml-dlcu/dl-fattn.cuh"
@@ -69,6 +68,7 @@ extern "C" void ggml_dl_flash_attn_ext_dldnn_copy_host_data(ggml_backend_cuda_co
 #include "ggml-cuda/sum.cuh"
 #include "ggml-cuda/sumrows.cuh"
 #include "ggml-cuda/mean.cuh"
+#include "ggml-cuda/moesum.cuh"
 #include "ggml-cuda/tsembd.cuh"
 #include "ggml-cuda/topk-moe.cuh"
 #include "ggml-cuda/unary.cuh"
@@ -2860,11 +2860,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_OPT_STEP_ADAMW:
             ggml_cuda_opt_step_adamw(ctx, dst);
             break;
-#ifdef GGML_USE_DLCU
         case GGML_OP_MOE_SUM:
             ggml_cuda_op_moe_sum(ctx, dst);
             break;
-#endif  // GGML_USE_DLCU
         case GGML_OP_OPT_STEP_SGD:
             ggml_cuda_opt_step_sgd(ctx, dst);
             break;
@@ -4915,11 +4913,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_CUMSUM:
         case GGML_OP_TRI:
         case GGML_OP_DIAG:
-            return true;
-#ifdef GGML_USE_DLCU
         case GGML_OP_MOE_SUM:
-            return true;
-#endif  // GGML_USE_DLCU
         case GGML_OP_SOLVE_TRI:
             return true;
 
