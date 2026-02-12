@@ -8565,7 +8565,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     GGML_ASSERT(neq1 == N);
 
     // dst cannot be transposed or permuted
-    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 == sizeof(float) || nb0 == sizeof(ggml_fp16_t));
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
@@ -8630,7 +8630,8 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             memset(VKQ32, 0, DV*sizeof(float));
         }
 
-        const ggml_fp16_t * mp = mask ? (ggml_fp16_t *)((char *) mask->data + iq1*mask->nb[1] + (iq2%mask->ne[2])*mask->nb[2] + (iq3%mask->ne[3])*mask->nb[3]) : NULL;
+        const char * mp_base = mask ? ((char *) mask->data + iq1*mask->nb[1] + (iq2%mask->ne[2])*mask->nb[2] + (iq3%mask->ne[3])*mask->nb[3]) : NULL;
+        const bool mask_f16 = mask && mask->type == GGML_TYPE_F16;
 
         // k indices
         const int ik3 = iq3 / rk3;
@@ -8640,15 +8641,29 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         const int iv3 = iq3 / rv3;
         const int iv2 = iq2 / rv2;
 
-        const float * pq = (const float *) ((char *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3));
-        q_to_vec_dot(pq, Q_q, DK);
+        // Q can be F32 or F16 - convert to float buffer for q_to_vec_dot
+        float * Q_f32 = (float *) params->wdata + ith*(1*DK + 2*DV + CACHE_LINE_SIZE_F32) + 2*DV;
+        if (q->type == GGML_TYPE_F16) {
+            const ggml_fp16_t * pq16 = (const ggml_fp16_t *) ((char *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3));
+            ggml_cpu_fp16_to_fp32(pq16, Q_f32, DK);
+        } else {
+            memcpy(Q_f32, (const float *) ((char *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3)), DK * sizeof(float));
+        }
+        q_to_vec_dot(Q_f32, Q_q, DK);
 
         // online softmax / attention
         // loop over n_kv and n_head_kv
         // ref: https://arxiv.org/pdf/2112.05682.pdf
 
         for (int64_t ic = ic_start; ic < ic_end; ++ic) {
-            const float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[ic]) : 0.0f;
+            float mv = 0.0f;
+            if (mp_base) {
+                if (mask_f16) {
+                    mv = slope*GGML_CPU_FP16_TO_FP32(((const ggml_fp16_t *)mp_base)[ic]);
+                } else {
+                    mv = slope*((const float *)mp_base)[ic];
+                }
+            }
             if (mv == -INFINITY) {
                 continue;
             }
@@ -8756,7 +8771,13 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             const int i3 = iq3;
 
             // permute(0, 2, 1, 3)
-            memcpy((char *) dst->data + (i3*ne2*ne1 + i2 + i1*ne1)*nb1, VKQ32, nb1);
+            char * dst_row = (char *) dst->data + (i3*ne2*ne1 + i2 + i1*ne1)*nb1;
+            if (dst->type == GGML_TYPE_F16) {
+                // Convert F32 result to F16
+                ggml_cpu_fp32_to_fp16(VKQ32, (ggml_fp16_t *) dst_row, DV);
+            } else {
+                memcpy(dst_row, VKQ32, nb1);
+            }
         }
     }
 }
@@ -8799,7 +8820,7 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
     GGML_ASSERT(neq1 == N);
 
     // dst cannot be transposed or permuted
-    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 == sizeof(float) || nb0 == sizeof(ggml_fp16_t));
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
@@ -8875,6 +8896,7 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
         // mask:   Q_TILE_SZ * KV_TILE_SZ (mask in float)
         // VKQ32:  Q_TILE_SZ * DV (FP32 output accumulator)
         // V32:    KV_TILE_SZ * DV (F32 buffer for V tile - used for f166 conversion)
+        // Q_f32:  Q_TILE_SZ * DK (F32 buffer for Q - reused from V32 space since not used simultaneously)
         float * base  = (float *) params->wdata + ith*(Q_TILE_SZ*DK + 2*Q_TILE_SZ*KV_TILE_SZ + Q_TILE_SZ*DV + KV_TILE_SZ*DV + CACHE_LINE_SIZE_F32);
 
         void  * Q_q    = base;
@@ -8882,6 +8904,7 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
         float * mask32 = KQ + Q_TILE_SZ * KV_TILE_SZ;
         float * VKQ32  = mask32 + Q_TILE_SZ * KV_TILE_SZ;
         float * V32    = VKQ32 + Q_TILE_SZ * DV;  // F32 buffer for V tile
+        float * Q_f32  = V32;  // Reuse V32 space for Q_f32 (not used simultaneously)
 
         memset(VKQ32, 0, Q_TILE_SZ * DV * sizeof(float));
         memset(mask32, 0, Q_TILE_SZ * KV_TILE_SZ * sizeof(float));
@@ -8894,14 +8917,24 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
         const int iv3 = iq3 / rv3;
         const int iv2 = iq2 / rv2;
 
+        // Q can be F32 or F16 - convert to float buffer first
+        const bool q_f16 = (q->type == GGML_TYPE_F16);
         for (int tq = 0; tq < tile_rows; tq++) {
-            const float * pq = (const float *) ((char *) q->data + ((iq1 + tq)*nbq1 + iq2*nbq2 + iq3*nbq3));
-            kv_from_float(pq, (char *)Q_q + tq * DK * kv_type_size, DK);
+            if (q_f16) {
+                const ggml_fp16_t * pq16 = (const ggml_fp16_t *) ((char *) q->data + ((iq1 + tq)*nbq1 + iq2*nbq2 + iq3*nbq3));
+                ggml_cpu_fp16_to_fp32(pq16, Q_f32 + tq * DK, DK);
+            } else {
+                memcpy(Q_f32 + tq * DK, (const float *) ((char *) q->data + ((iq1 + tq)*nbq1 + iq2*nbq2 + iq3*nbq3)), DK * sizeof(float));
+            }
+            kv_from_float(Q_f32 + tq * DK, (char *)Q_q + tq * DK * kv_type_size, DK);
         }
         // Zero-pad remaining rows
         for (int tq = tile_rows; tq < Q_TILE_SZ; tq++) {
             memset((char *)Q_q + tq * DK * kv_type_size, 0, DK * kv_type_size);
         }
+
+        // mask can be F16 or F32
+        const bool mask_f16 = mask && mask->type == GGML_TYPE_F16;
 
         for (int64_t ic = 0; ic < nek1; ic += KV_TILE_SZ) {
 
@@ -8909,9 +8942,13 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
             if (mask) {
                 bool can_skip = true;
                 for (int tq = 0; tq < tile_rows; tq++) {
-                    const ggml_fp16_t * mp_row = (const ggml_fp16_t *)((const char *) mask->data + (iq1 + tq)*mask->nb[1] + (iq2%mask->ne[2])*mask->nb[2] + (iq3%mask->ne[3])*mask->nb[3]);
+                    const char * mp_row = (const char *) mask->data + (iq1 + tq)*mask->nb[1] + (iq2%mask->ne[2])*mask->nb[2] + (iq3%mask->ne[3])*mask->nb[3];
                     for (int tk = 0; tk < KV_TILE_SZ; tk++) {
-                        mask32[tq * KV_TILE_SZ + tk] = slope * GGML_CPU_FP16_TO_FP32(mp_row[ic + tk]);
+                        if (mask_f16) {
+                            mask32[tq * KV_TILE_SZ + tk] = slope * GGML_CPU_FP16_TO_FP32(((const ggml_fp16_t *)mp_row)[ic + tk]);
+                        } else {
+                            mask32[tq * KV_TILE_SZ + tk] = slope * ((const float *)mp_row)[ic + tk];
+                        }
                         if (mask32[tq * KV_TILE_SZ + tk] != -INFINITY) {
                             can_skip = false;
                         }
@@ -9028,7 +9065,13 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
             const int i3 = iq3;
 
             // permute(0, 2, 1, 3)
-            memcpy((char *) dst->data + (i3*ne2*ne1 + i2 + i1*ne1)*nb1, VKQ32 + tq * DV, nb1);
+            char * dst_row = (char *) dst->data + (i3*ne2*ne1 + i2 + i1*ne1)*nb1;
+            if (dst->type == GGML_TYPE_F16) {
+                // Convert F32 result to F16
+                ggml_cpu_fp32_to_fp16(VKQ32 + tq * DV, (ggml_fp16_t *) dst_row, DV);
+            } else {
+                memcpy(dst_row, VKQ32 + tq * DV, nb1);
+            }
         }
 
         ir += tile_rows;
@@ -9103,7 +9146,12 @@ static void ggml_flash_attn_ext_reduce_partials(
             ggml_vec_scale_f32(DV, VKQ_final, S_inv);
         }
         // iq1=0, iq3=0 for decode
-        memcpy((char *) dst->data + (0*ne2*ne1 + q_head + 0*ne1)*nb1, VKQ_final, nb1);
+        char * dst_row = (char *) dst->data + (0*ne2*ne1 + q_head + 0*ne1)*nb1;
+        if (dst->type == GGML_TYPE_F16) {
+            ggml_cpu_fp32_to_fp16(VKQ_final, (ggml_fp16_t *) dst_row, DV);
+        } else {
+            memcpy(dst_row, VKQ_final, nb1);
+        }
     }
 }
 
@@ -9144,7 +9192,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     GGML_ASSERT(neq1 == N);
 
     // dst cannot be transposed or permuted
-    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 == sizeof(float) || nb0 == sizeof(ggml_fp16_t));
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
@@ -9155,8 +9203,9 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     // When use_ref is set, force the vec-only reference implementation (no tiling, no KV-chunking)
     const bool use_ref = params->use_ref;
 
+    const bool q_is_f32_or_f16 = (q->type == GGML_TYPE_F32 || q->type == GGML_TYPE_F16);
     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
-    const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
+    const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q_is_f32_or_f16 && nek1 >= 512;
 
     if (use_split_kv_path) {
         const int64_t chunk_size = (nek1 + nth - 1) / nth;
