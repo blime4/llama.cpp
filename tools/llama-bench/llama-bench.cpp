@@ -338,6 +338,7 @@ struct cmd_params {
     std::vector<bool>                embeddings;
     std::vector<bool>                no_op_offload;
     std::vector<bool>                no_host;
+    std::vector<llama_compute_type>  compute_type;
     ggml_numa_strategy               numa;
     int                              reps;
     ggml_sched_priority              prio;
@@ -377,6 +378,7 @@ static const cmd_params cmd_params_defaults = {
     /* embeddings           */ { false },
     /* no_op_offload        */ { false },
     /* no_host              */ { false },
+    /* compute_type         */ { LLAMA_COMPUTE_TYPE_DEFAULT },
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
     /* reps                 */ 5,
     /* prio                 */ GGML_SCHED_PRIO_NORMAL,
@@ -461,6 +463,8 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -nopo, --no-op-offload <0|1>              (default: 0)\n");
     printf("  --no-host <0|1>                           (default: %s)\n",
            join(cmd_params_defaults.no_host, ",").c_str());
+    printf("  -ct, --compute-type <f32|f16|bf16|default> (default: %s)\n",
+           llama_compute_type_name(cmd_params_defaults.compute_type.front()));
     printf("\n");
     printf(
         "Multiple values can be given for each parameter by separating them with ','\n"
@@ -804,6 +808,29 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<bool>(argv[i], split_delim);
                 params.no_host.insert(params.no_host.end(), p.begin(), p.end());
+            } else if (arg == "-ct" || arg == "--compute-type") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<std::string>(argv[i], split_delim);
+                for (const auto & ct : p) {
+                    if (ct == "f32") {
+                        params.compute_type.push_back(LLAMA_COMPUTE_TYPE_F32);
+                    } else if (ct == "f16") {
+                        params.compute_type.push_back(LLAMA_COMPUTE_TYPE_F16);
+                    } else if (ct == "bf16") {
+                        params.compute_type.push_back(LLAMA_COMPUTE_TYPE_BF16);
+                    } else if (ct == "default") {
+                        params.compute_type.push_back(LLAMA_COMPUTE_TYPE_DEFAULT);
+                    } else {
+                        invalid_param = true;
+                        break;
+                    }
+                }
+                if (invalid_param) {
+                    break;
+                }
             } else if (arg == "-ts" || arg == "--tensor-split") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1074,6 +1101,7 @@ struct cmd_params_instance {
     bool               embeddings;
     bool               no_op_offload;
     bool               no_host;
+    llama_compute_type compute_type;
 
     llama_model_params to_llama_mparams() const {
         llama_model_params mparams = llama_model_default_params();
@@ -1151,6 +1179,7 @@ struct cmd_params_instance {
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
         cparams.swa_full        = false;
+        cparams.compute_type    = compute_type;
 
         return cparams;
     }
@@ -1172,6 +1201,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & mmp : params.use_mmap)
     for (const auto & dio : params.use_direct_io)
     for (const auto & noh : params.no_host)
+    for (const auto & ct : params.compute_type)
     for (const auto & embd : params.embeddings)
     for (const auto & nopo : params.no_op_offload)
     for (const auto & nb : params.n_batch)
@@ -1216,6 +1246,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .compute_type = */ ct,
             };
             instances.push_back(instance);
         }
@@ -1251,6 +1282,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .compute_type = */ ct,
             };
             instances.push_back(instance);
         }
@@ -1286,6 +1318,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings   = */ embd,
                 /* .no_op_offload= */ nopo,
                 /* .no_host      = */ noh,
+                /* .compute_type = */ ct,
             };
             instances.push_back(instance);
         }
