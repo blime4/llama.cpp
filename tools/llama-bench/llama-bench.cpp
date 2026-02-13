@@ -1359,6 +1359,7 @@ struct test {
     bool                     embeddings;
     bool                     no_op_offload;
     bool                     no_host;
+    llama_compute_type       compute_type;
     int                      n_prompt;
     int                      n_gen;
     int                      n_depth;
@@ -1397,6 +1398,7 @@ struct test {
         embeddings     = inst.embeddings;
         no_op_offload  = inst.no_op_offload;
         no_host        = inst.no_host;
+        compute_type   = inst.compute_type;
         n_prompt       = inst.n_prompt;
         n_gen          = inst.n_gen;
         n_depth        = inst.n_depth;
@@ -1454,7 +1456,8 @@ struct test {
             "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "split_mode",
             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
             "tensor_buft_overrides",            "use_mmap",      "use_direct_io",  "embeddings",
-            "no_op_offload",  "no_host",        "n_prompt",      "n_gen",          "n_depth",
+            "no_op_offload",  "no_host",        "compute_type",  "n_prompt",       "n_gen",
+            "n_depth",
             "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
         };
         return fields;
@@ -1547,6 +1550,7 @@ struct test {
                                             std::to_string(embeddings),
                                             std::to_string(no_op_offload),
                                             std::to_string(no_host),
+                                            llama_compute_type_name(compute_type),
                                             std::to_string(n_prompt),
                                             std::to_string(n_gen),
                                             std::to_string(n_depth),
@@ -1741,6 +1745,9 @@ struct markdown_printer : public printer {
         if (field == "no_host") {
             return 4;
         }
+        if (field == "compute_type") {
+            return 7;
+        }
 
         int width = std::max((int) field.length(), 10);
 
@@ -1780,6 +1787,9 @@ struct markdown_printer : public printer {
         }
         if (field == "no_host") {
             return "noh";
+        }
+        if (field == "compute_type") {
+            return "ctype";
         }
         if (field == "devices") {
             return "dev";
@@ -1867,6 +1877,9 @@ struct markdown_printer : public printer {
         }
         if (params.no_host.size() > 1 || params.no_host != cmd_params_defaults.no_host) {
             fields.emplace_back("no_host");
+        }
+        if (params.compute_type.size() > 1 || params.compute_type != cmd_params_defaults.compute_type) {
+            fields.emplace_back("compute_type");
         }
         fields.emplace_back("test");
         fields.emplace_back("t/s");
