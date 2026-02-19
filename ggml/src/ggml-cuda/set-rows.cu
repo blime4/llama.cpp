@@ -1,5 +1,6 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
+#include <cuda_fp16.h>
 
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
@@ -319,12 +320,22 @@ void ggml_cuda_op_set_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
-    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
     GGML_ASSERT(src1->type == GGML_TYPE_I64 || src1->type == GGML_TYPE_I32);
 
-    if (src1->type == GGML_TYPE_I64) {
-        set_rows_cuda<float, int64_t>(ctx, src0, src1, dst);
+    if (src0->type == GGML_TYPE_F16) {
+        // F16 input path
+        if (src1->type == GGML_TYPE_I64) {
+            set_rows_cuda<half, int64_t>(ctx, src0, src1, dst);
+        } else {
+            set_rows_cuda<half, int32_t>(ctx, src0, src1, dst);
+        }
     } else {
-        set_rows_cuda<float, int32_t>(ctx, src0, src1, dst);
+        // F32 input path
+        if (src1->type == GGML_TYPE_I64) {
+            set_rows_cuda<float, int64_t>(ctx, src0, src1, dst);
+        } else {
+            set_rows_cuda<float, int32_t>(ctx, src0, src1, dst);
+        }
     }
 }
