@@ -219,11 +219,6 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
 
     cudaStream_t stream = ctx.stream();
 
-    // F16 input only supports F16/F32/BF16 output (quantized types require F32 input)
-    if constexpr (std::is_same<src_t, half>::value) {
-        GGML_ASSERT(dst->type == GGML_TYPE_F16 || dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_BF16);
-    }
-
     if (dst->type == GGML_TYPE_F32) {
         set_rows_cuda(
             src0_d, src1_d, (float*)dst->data,
@@ -254,68 +249,74 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
-    } else if (dst->type == GGML_TYPE_Q4_0) {
-        set_rows_cuda_quant<idx_t, block_q4_0, QK4_0, quantize_f32_q4_0_block>(
-            src0_d, src1_d, (block_q4_0*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
-    } else if (dst->type == GGML_TYPE_Q4_1) {
-        set_rows_cuda_quant<idx_t, block_q4_1, QK4_1, quantize_f32_q4_1_block>(
-            src0_d, src1_d, (block_q4_1*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
-    } else if (dst->type == GGML_TYPE_Q5_0) {
-        set_rows_cuda_quant<idx_t, block_q5_0, QK5_0, quantize_f32_q5_0_block>(
-            src0_d, src1_d, (block_q5_0*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
-    } else if (dst->type == GGML_TYPE_Q5_1) {
-        set_rows_cuda_quant<idx_t, block_q5_1, QK5_1, quantize_f32_q5_1_block>(
-            src0_d, src1_d, (block_q5_1*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
-    } else if (dst->type == GGML_TYPE_Q8_0) {
-        set_rows_cuda_quant<idx_t, block_q8_0, QK8_0, quantize_f32_q8_0_block>(
-            src0_d, src1_d, (block_q8_0*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
-    } else if (dst->type == GGML_TYPE_IQ4_NL) {
-        set_rows_cuda_quant<idx_t, block_iq4_nl, QK4_NL, quantize_f32_iq4_nl_block>(
-            src0_d, src1_d, (block_iq4_nl*)dst->data,
-            ne00, ne01, ne02, ne03,
-            ne10, ne11, ne12, ne13,
-            nb01, nb02, nb03,
-            nb10, nb11, nb12,
-            nb1, nb2, nb3,
-            stream
-        );
+    } else if constexpr (std::is_same<src_t, float>::value) {
+        // F32 input path - supports quantized output types
+        if (dst->type == GGML_TYPE_Q4_0) {
+            set_rows_cuda_quant<idx_t, block_q4_0, QK4_0, quantize_f32_q4_0_block>(
+                src0_d, src1_d, (block_q4_0*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else if (dst->type == GGML_TYPE_Q4_1) {
+            set_rows_cuda_quant<idx_t, block_q4_1, QK4_1, quantize_f32_q4_1_block>(
+                src0_d, src1_d, (block_q4_1*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else if (dst->type == GGML_TYPE_Q5_0) {
+            set_rows_cuda_quant<idx_t, block_q5_0, QK5_0, quantize_f32_q5_0_block>(
+                src0_d, src1_d, (block_q5_0*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else if (dst->type == GGML_TYPE_Q5_1) {
+            set_rows_cuda_quant<idx_t, block_q5_1, QK5_1, quantize_f32_q5_1_block>(
+                src0_d, src1_d, (block_q5_1*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else if (dst->type == GGML_TYPE_Q8_0) {
+            set_rows_cuda_quant<idx_t, block_q8_0, QK8_0, quantize_f32_q8_0_block>(
+                src0_d, src1_d, (block_q8_0*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else if (dst->type == GGML_TYPE_IQ4_NL) {
+            set_rows_cuda_quant<idx_t, block_iq4_nl, QK4_NL, quantize_f32_iq4_nl_block>(
+                src0_d, src1_d, (block_iq4_nl*)dst->data,
+                ne00, ne01, ne02, ne03,
+                ne10, ne11, ne12, ne13,
+                nb01, nb02, nb03,
+                nb10, nb11, nb12,
+                nb1, nb2, nb3,
+                stream
+            );
+        } else {
+            GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
+        }
     } else {
-        GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
+        // F16 input path - does not support quantized output types
+        GGML_ABORT("F16 input only supports F16/F32/BF16 output, got %s", ggml_type_name(dst->type));
     }
 }
 
