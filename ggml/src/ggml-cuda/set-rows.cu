@@ -219,6 +219,10 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
 
     cudaStream_t stream = ctx.stream();
 
+    // F16 input only supports F16/F32/BF16 output (quantized types require F32 input)
+    if constexpr (std::is_same<src_t, half>::value) {
+        GGML_ASSERT(dst->type == GGML_TYPE_F16 || dst->type == GGML_TYPE_F32 || dst->type == GGML_TYPE_BF16);
+    }
 
     if (dst->type == GGML_TYPE_F32) {
         set_rows_cuda(
