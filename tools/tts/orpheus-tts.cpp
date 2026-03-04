@@ -50,6 +50,16 @@ static const int SNAC_N_DECODER_LAYERS = 4;
 static const int SNAC_DECODER_RATES[] = {8, 8, 4, 2};  // snac_24khz decoder rates (from config.json)
 static const int SNAC_VQ_STRIDES[] = {8, 4, 2, 1};     // snac_24khz vq strides
 
+// Performance timing (following CSM pattern from PR #12648)
+struct orpheus_timing {
+    int64_t t_start = 0;      // Total time
+    int64_t t_prompt = 0;     // Prompt encoding time
+    int64_t t_llm = 0;        // LLM token generation time
+    int64_t t_vocoder = 0;    // SNAC vocoder decode time
+    int64_t n_toks = 0;       // Tokens generated
+    int64_t n_audio_toks = 0; // Audio tokens generated
+};
+
 struct wav_header {
     char riff[4] = {'R', 'I', 'F', 'F'};
     uint32_t chunk_size;
@@ -2522,6 +2532,10 @@ int main(int argc, char ** argv) {
     // IMPORTANT: COMMON_SAMPLER_TYPE_PENALTIES must be included for penalty_repeat to work!
     sampling_params.samplers = {COMMON_SAMPLER_TYPE_PENALTIES, COMMON_SAMPLER_TYPE_TOP_K, COMMON_SAMPLER_TYPE_TOP_P, COMMON_SAMPLER_TYPE_TEMPERATURE};
 
+    // Performance timing
+    orpheus_timing timing;
+    timing.t_start = ggml_time_ms();
+
     // Initialize sampler
     common_sampler * sampler = common_sampler_init(model, sampling_params);
 
@@ -2537,6 +2551,8 @@ int main(int argc, char ** argv) {
         batch.logits[batch.n_tokens - 1] = true;
     }
 
+    // Time prompt encoding
+    int64_t t_prompt_start = ggml_time_ms();
     if (llama_decode(ctx, batch) != 0) {
         LOG_ERR("Failed to decode prompt\n");
         llama_batch_free(batch);
@@ -2545,6 +2561,7 @@ int main(int argc, char ** argv) {
         llama_model_free(model);
         return 1;
     }
+    timing.t_prompt = ggml_time_ms() - t_prompt_start;
 
     // Generate tokens
     LOG_INF("Generating audio tokens...\n");
@@ -2552,6 +2569,8 @@ int main(int argc, char ** argv) {
     int n_pos = prompt_tokens.size();
 
     for (int i = 0; i < n_predict; i++) {
+        int64_t t_tok_start = ggml_time_ms();
+
         // Sample next token
         llama_token token = common_sampler_sample(sampler, ctx, batch.n_tokens - 1);
         common_sampler_accept(sampler, token, true);
@@ -2593,6 +2612,13 @@ int main(int argc, char ** argv) {
         if (llama_decode(ctx, batch) != 0) {
             LOG_ERR("Failed to decode token\n");
             break;
+        }
+
+        timing.t_llm += ggml_time_ms() - t_tok_start;
+        timing.n_toks++;
+
+        if (token >= AUDIO_TOKEN_START && token <= AUDIO_TOKEN_END) {
+            timing.n_audio_toks++;
         }
     }
     printf("\n");
@@ -2642,7 +2668,9 @@ int main(int argc, char ** argv) {
     printf("DEBUG: Calling decode_snac_tokens...\n");
     fflush(stdout);
     std::vector<float> pcm_samples;
+    int64_t t_vocoder_start = ggml_time_ms();
     decode_snac_tokens(snac, pyramid_tokens, pcm_samples);
+    timing.t_vocoder = ggml_time_ms() - t_vocoder_start;
     printf("DEBUG: decode_snac_tokens returned, samples=%zu\n", pcm_samples.size());
     fflush(stdout);
 
@@ -2659,6 +2687,25 @@ int main(int argc, char ** argv) {
     } else {
         LOG_WRN("No audio samples generated\n");
     }
+
+    // Performance report
+    double audio_seconds = (double)pcm_samples.size() / SNAC_SAMPLE_RATE;
+    printf("\n--- Performance ---\n");
+    printf("Prompt encode:  %lld ms (%zu tokens)\n",
+           (long long)timing.t_prompt, prompt_tokens.size());
+    printf("LLM generation: %lld ms / %lld tokens (%.2f ms/tok, %lld audio tokens)\n",
+           (long long)timing.t_llm, (long long)timing.n_toks,
+           timing.n_toks > 0 ? (double)timing.t_llm / timing.n_toks : 0.0,
+           (long long)timing.n_audio_toks);
+    if (timing.t_vocoder > 0 && audio_seconds > 0) {
+        printf("Vocoder:        %lld ms (%.2f x realtime)\n",
+               (long long)timing.t_vocoder,
+               audio_seconds / (timing.t_vocoder / 1000.0));
+    }
+    printf("Total:          %lld ms\n",
+           (long long)(ggml_time_ms() - timing.t_start));
+    printf("Audio:          %.2f seconds (%zu samples at %d Hz)\n",
+           audio_seconds, pcm_samples.size(), SNAC_SAMPLE_RATE);
 
     // Cleanup
     llama_batch_free(batch);
