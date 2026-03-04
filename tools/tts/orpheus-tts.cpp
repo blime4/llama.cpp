@@ -1958,26 +1958,42 @@ static bool load_snac_model(snac_model & model, const char * model_path) {
                         }
                     }
                     else if (tensor_rest == ".conv_t.weight") {
-                        // ConvTranspose1d weight loading
+                        // ConvTranspose1d weight loading for SNAC model
+                        // SNAC stores weights in format: [in_channels, kernel_size, out_channels]
+                        // Example: [1024, 16, 512] for in=1024, k=16, out=512
                         // GGUF stores dimensions in REVERSE order from numpy
-                        // Numpy shape [in_c, out_c, ks] -> GGUF ne[0]=ks, ne[1]=out_c, ne[2]=in_c
-                        // Raw data is in row-major order (same as numpy)
+                        // So numpy [1024, 16, 512] -> GGUF ne[]=[512, 16, 1024]
                         // Our conv_transpose1d expects: [in_channels, out_channels, kernel_size]
                         std::vector<float> raw;
                         if (copy_tensor_to_vector(tensor, raw)) {
-                            int64_t ne0 = tensor->ne[0];  // kernel_size
-                            int64_t ne1 = tensor->ne[1];  // out_channels
-                            int64_t ne2 = tensor->ne[2];  // in_channels
+                            int64_t ne0 = tensor->ne[0];  // out_channels (last numpy dim)
+                            int64_t ne1 = tensor->ne[1];  // kernel_size (middle numpy dim)
+                            int64_t ne2 = tensor->ne[2];  // in_channels (first numpy dim)
 
-                            int in_c = ne2;   // in_channels
-                            int out_c = ne1;  // out_channels
-                            int ks = ne0;     // kernel_size
+                            int in_c = ne2;   // in_channels = ne2 = 1024
+                            int out_c = ne0;  // out_channels = ne0 = 512
+                            int ks = ne1;     // kernel_size = ne1 = 16
 
-                            // Data is already in row-major order: raw[ic*out_c*ks + oc*ks + k]
-                            // Just copy directly
-                            layer.in_kernel = std::move(raw);
+                            // Data is in row-major order with SNAC format [in_c, ks, out_c]
+                            // So raw[ic * ks * out_c + k * out_c + oc]
+                            // We need to transpose to [in_c, out_c, ks] for our conv_transpose1d
+                            // Dest[ic * out_c * ks + oc * ks + k]
+                            layer.in_kernel.resize(in_c * out_c * ks);
+                            for (int ic = 0; ic < in_c; ic++) {
+                                for (int oc = 0; oc < out_c; oc++) {
+                                    for (int k = 0; k < ks; k++) {
+                                        // Source: SNAC [in, k, out] row-major
+                                        // Element (ic, k, oc) at: ic*ks*out_c + k*out_c + oc
+                                        int src_idx = ic * ks * out_c + k * out_c + oc;
+                                        // Dest: [in, out, k] row-major
+                                        // Element (ic, oc, k) at: ic*out_c*ks + oc*ks + k
+                                        int dst_idx = ic * out_c * ks + oc * ks + k;
+                                        layer.in_kernel[dst_idx] = raw[src_idx];
+                                    }
+                                }
+                            }
 
-                            LOG_WRN("DEBUG: decoder.layers.%d.conv_t.weight: GGUF dims [%lld,%lld,%lld] -> [%d,%d,%d] (in_c, out_c, ks)\n",
+                            LOG_WRN("DEBUG: decoder.layers.%d.conv_t.weight: GGUF dims [%lld,%lld,%lld] -> [%d,%d,%d] (in_c, out_c, ks), SNAC format transposed\n",
                                     layer_idx, (long long)ne0, (long long)ne1, (long long)ne2, in_c, out_c, ks);
                             tensors_loaded++;
                         }
@@ -2207,7 +2223,7 @@ static void normalize_audio(std::vector<float> & samples, float target_peak = 0.
     }
     mean /= samples.size();
 
-    if (std::abs(mean) > 0.001f) {  // Only remove if significant
+    if (std::abs(mean) > 1e-9f) {  // Always remove DC offset (snake activation adds positive bias)
         for (auto & sample : samples) {
             sample -= mean;
         }

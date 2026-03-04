@@ -22,37 +22,38 @@ This document provides comprehensive documentation of the implementation in `too
 8. [Audio Output](#audio-output)
 9. [Main Function Flow](#main-function-flow)
 10. [Usage](#usage)
+11. [Debugging](#debugging)
 
 ---
 
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Orpheus-TTS Pipeline                    │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   Text Input ──► LLM (LLaMA) ──► Audio Tokens ──► SNAC ──► WAV  │
-│                                                                 │
-│   ┌───────────┐    ┌──────────┐    ┌─────────┐    ┌─────┐      │
-│   │  Prompt   │───►│  Token   │───►│ Pyramid │───►│PCM  │      │
-│   │  Builder  │    │ Generator│    │ Structure│   │Output│     │
-│   └───────────┘    └──────────┘    └────��────┘    └─────┘      │
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐  │
-│   │                    SNAC Vocoder                         │  │
-│   │  Quantizers ──► in_conv ──► up_conv ──► Decoder ──► Out │  │
-│   │   (3 heads)    (DW Conv)  (1x1 Conv)   (4 layers)       │  │
-│   └─────────────────────────────────────────────────────────┘  │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------+
+|                         Orpheus-TTS Pipeline                     |
++-----------------------------------------------------------------+
+|                                                                 |
+|   Text Input --> LLM (LLaMA) --> Audio Tokens --> SNAC --> WAV  |
+|                                                                 |
+|   +-----------+    +----------+    +---------+    +-----+       |
+|   |  Prompt   |---|  Token   |---| Pyramid |---|PCM  |       |
+|   |  Builder  |    | Generator|    | Structure|   |Output|     |
+|   +-----------+    +----------+    +---------+    +-----+       |
+|                                                                 |
+|   +---------------------------------------------------------+   |
+|   |                    SNAC Vocoder                         |   |
+|   |  Quantizers --> in_conv --> up_conv --> Decoder --> Out |   |
+|   |   (3 heads)    (DW Conv)  (1x1 Conv)   (4 layers)       |   |
+|   +---------------------------------------------------------+   |
+|                                                                 |
++-----------------------------------------------------------------+
 ```
 
 ---
 
 ## Special Tokens
 
-### Constants Definition (Lines 27-38)
+### Constants Definition
 
 ```cpp
 static const llama_token TOKEN_BOS = 128000;
@@ -93,7 +94,7 @@ static const llama_token AUDIO_TOKEN_END = 156937;
 
 ## SNAC Vocoder Constants
 
-### Model Configuration (Lines 40-51)
+### Model Configuration
 
 ```cpp
 static const int SNAC_FRAME_SIZE = 7;                  // 7 tokens per frame
@@ -119,13 +120,13 @@ static const int SNAC_VQ_STRIDES[] = {8, 4, 2, 1};     // VQ strides for pyramid
 | Codebook Dim | 8 | Embedding dimension |
 | Quantizer Dim | 768 | Output dimension of quantizers |
 | Decoder Dim | 1024 | Decoder hidden dimension |
-| Upsample Factor | 512 | Total upsampling (8×8×4×2) |
+| Upsample Factor | 512 | Total upsampling (8x8x4x2) |
 
 ---
 
 ## Prompt Building
 
-### `build_orpheus_prompt()` (Lines 115-140)
+### `build_orpheus_prompt()`
 
 **Purpose**: Construct the prompt token sequence for Orpheus TTS.
 
@@ -171,17 +172,17 @@ SNAC uses a pyramid structure for audio tokens across 3 quantizers:
 
 ```
 Frame: [T0, T1, T2, T3, T4, T5, T6]
-        │   │   │   │   │   │   │
-        ▼   ▼   ▼   ▼   ▼   ▼   ▼
+        |   |   |   |   |   |   |
+        v   v   v   v   v   v   v
 Head:   0   1   2   2   1   2   2
 
 Token Distribution:
-- Head 0: 1 token per frame (T0) → stride 4 → 4N output
-- Head 1: 2 tokens per frame (T1, T4) → stride 2 → 4N output
-- Head 2: 4 tokens per frame (T2, T3, T5, T6) → stride 1 → 4N output
+- Head 0: 1 token per frame (T0) --> stride 4 --> 4N output
+- Head 1: 2 tokens per frame (T1, T4) --> stride 2 --> 4N output
+- Head 2: 4 tokens per frame (T2, T3, T5, T6) --> stride 1 --> 4N output
 ```
 
-### `collect_audio_tokens_pyramid()` (Lines 148-184)
+### `collect_audio_tokens_pyramid()`
 
 **Purpose**: Extract and organize audio tokens into pyramid structure.
 
@@ -224,7 +225,7 @@ for (size_t f = 0; f < n_frames; f++) {
 
 ### Activation Functions
 
-#### `snake_1d_inplace()` (Lines 192-201)
+#### `snake_1d_inplace()`
 
 **Purpose**: Apply Snake1D activation function in-place.
 
@@ -239,7 +240,7 @@ static void snake_1d_inplace(
 
 **Formula**:
 ```
-snake(x, α) = x + sin²(α * x) / α
+snake(x, alpha) = x + sin^2(alpha * x) / alpha
 ```
 
 **Implementation**:
@@ -254,9 +255,11 @@ for (int64_t i = 0; i < n; i++) {
 }
 ```
 
+**Note**: Snake activation inherently adds positive values (sin^2 is always >= 0), which can cause DC bias accumulation through the network. The model compensates during training, but residual DC may remain.
+
 ### Convolution Functions
 
-#### `conv1d_dw()` - Depthwise 1D Convolution (Lines 206-242)
+#### `conv1d_dw()` - Depthwise 1D Convolution
 
 **Purpose**: Perform depthwise 1D convolution with grouped channels.
 
@@ -274,7 +277,7 @@ static void conv1d_dw(
 
 **Key Feature**: Each input channel is convolved with its own filter (groups = channels).
 
-#### `conv1d()` - Standard 1D Convolution (Lines 284-312)
+#### `conv1d()` - Standard 1D Convolution
 
 **Purpose**: Perform standard 1D convolution.
 
@@ -289,7 +292,7 @@ static void conv1d(
 
 **Weight Layout**: `[out_channels, in_channels, kernel_size]` (row-major)
 
-#### `conv_transpose1d()` - Transposed 1D Convolution (Lines 247-279)
+#### `conv_transpose1d()` - Transposed 1D Convolution
 
 **Purpose**: Perform transposed 1D convolution (upsampling).
 
@@ -309,9 +312,19 @@ static void conv_transpose1d(
 output_len = (input_len - 1) * stride + kernel_size - 2 * padding + output_padding
 ```
 
+**Implementation Algorithm**:
+1. Insert (stride-1) zeros between input elements: `expanded[i*stride] = input[i]`
+2. Flip kernel along kernel dimension: `k_flipped = kernel_size - 1 - k`
+3. Apply regular conv1d with effective padding: `p = kernel_size - 1 - padding`
+
+**Example**: For stride=8, kernel=16, padding=4:
+- Expanded input length: (input_len - 1) * 8 + 1
+- Effective conv1d padding: p = 16 - 1 - 4 = 11
+- Output length: (input_len - 1) * 8 + 16 - 2*4 = 8*input_len
+
 ### Attention Functions
 
-#### `local_mha_forward()` - Local Multi-Head Attention (Lines 317-550)
+#### `local_mha_forward()` - Local Multi-Head Attention
 
 **Purpose**: Implement windowed self-attention with Rotary Position Embeddings (RoPE).
 
@@ -332,7 +345,7 @@ static void local_mha_forward(
 **Steps**:
 1. Save residual connection
 2. Apply LayerNorm over channel dimension
-3. QKV projection: `[T, C] @ [C, 3C] → [T, 3C]`
+3. QKV projection: `[T, C] @ [C, 3C] --> [T, 3C]`
 4. Reshape to `[heads, n_windows, window_size, dim_head]`
 5. Apply RoPE with xpos-like scaling
 6. Scaled dot-product attention per window
@@ -341,7 +354,7 @@ static void local_mha_forward(
 
 ### SNAC Structures
 
-#### `snac_residual_unit` (Lines 553-602)
+#### `snac_residual_unit`
 
 **Purpose**: Residual block with Snake activation and dilated convolution.
 
@@ -368,7 +381,7 @@ struct snac_residual_unit {
 output = Conv1x1(Snake(Conv(Snake(x)))) + x  (residual)
 ```
 
-#### `snac_decoder_layer` (Lines 605-662)
+#### `snac_decoder_layer`
 
 **Purpose**: Decoder layer with transposed convolution and residual units.
 
@@ -402,7 +415,7 @@ for unit in residual_units:
 return x
 ```
 
-#### `snac_quantizer_layer` (Lines 665-716)
+#### `snac_quantizer_layer`
 
 **Purpose**: Quantizer that converts discrete tokens to embeddings.
 
@@ -422,7 +435,7 @@ struct snac_quantizer_layer {
 1. Codebook lookup: `embedding = codebook[:, token]`
 2. Output projection: `output = Conv1D(embedding)`
 
-#### `snac_model` (Lines 719-973)
+#### `snac_model`
 
 **Purpose**: Complete SNAC vocoder model.
 
@@ -431,7 +444,7 @@ struct snac_model {
     // Input convolutions
     std::vector<float> in_conv_kernel;   // Depthwise conv
     std::vector<float> in_conv_bias;
-    std::vector<float> up_conv_kernel;   // 1x1 conv (768 → 1024)
+    std::vector<float> up_conv_kernel;   // 1x1 conv (768 --> 1024)
     std::vector<float> up_conv_bias;
 
     // Attention layer
@@ -442,7 +455,7 @@ struct snac_model {
     std::vector<float> attn_to_out_weight;
 
     // Output layer
-    std::vector<float> out_conv_kernel;  // Final conv (64 → 1)
+    std::vector<float> out_conv_kernel;  // Final conv (64 --> 1)
     std::vector<float> out_conv_bias;
     std::vector<float> snake_alpha_out;
 
@@ -461,11 +474,11 @@ struct snac_model {
 1. Quantizer forward pass for each head (codebook lookup + projection)
 2. Combine quantizer outputs using repeat_interleave with vq_strides
 3. in_conv: depthwise convolution (768 channels, kernel=7)
-4. up_conv: 1x1 convolution (768 → 1024 channels)
+4. up_conv: 1x1 convolution (768 --> 1024 channels)
 5. LocalMHA attention (window_size=32, dim_head=64)
 6. Decoder layers (4 layers with progressive upsampling)
 7. Snake activation
-8. out_conv: convolution (1024 → 1 channel, kernel=7)
+8. out_conv: convolution (1024 --> 1 channel, kernel=7)
 9. Tanh activation
 ```
 
@@ -475,31 +488,31 @@ struct snac_model {
 
 ### GGUF Format Considerations
 
-**Column-Major vs Row-Major**:
-- GGUF stores tensors in **column-major** (Fortran) order
-- C++ uses **row-major** (C) order
-- Some weights need transposition during loading
+**CRITICAL: GGUF Storage Format**
 
-**Key Formula**:
-```
-For tensor [M, N]:
-- Column-major: element (i, j) at index i + M*j
-- Row-major: element (i, j) at index i*N + j
-```
+GGUF stores tensors in **ROW-MAJOR order** (same as numpy), NOT column-major!
 
-### Weight Transpose Rules
+However, GGUF stores dimensions in **REVERSE order** from numpy:
+- Numpy shape `[a, b, c]` --> GGUF `ne[0]=c, ne[1]=b, ne[2]=a`
 
-| Tensor | GGUF Shape | Expected Shape | Transpose? | Reason |
-|--------|-----------|----------------|------------|--------|
-| `in.weight` | [7, 768] | [768, 7] | NO | Depthwise conv uses same layout |
-| `up.weight` | [768, 1024] | [1024, 768] | YES | 1x1 conv needs transpose |
-| `final.weight` | [7, 64, 1] | [64, 7] | YES | Flatten to 2D and transpose |
-| `codebook.weight` | [8, 4096] | [8, 4096] | YES | Column-major to row-major |
-| `decoder.layers.X.weight` | [out, k, in] | [in, out, k] | YES | ConvTranspose1D |
-| `*.out_weight` | [ch, ch] | [ch, ch] | YES | 1x1 conv square matrix |
-| `*.in_weight` | [7, ch] | [ch, 7] | NO | Depthwise conv |
+**The raw data bytes are in row-major order**, so for numpy array with shape `[a, b, c]`:
+- Element `[i, j, k]` is at flat index `i*b*c + j*c + k`
+- This is the same in both numpy and GGUF raw bytes!
 
-### `copy_tensor_to_vector()` (Lines 976-1053)
+### Weight Loading Rules
+
+| Tensor | Numpy Shape | GGUF ne[] | Transpose Needed? |
+|--------|------------|-----------|-------------------|
+| `in.weight` | [768, 7] | ne[0]=7, ne[1]=768 | NO (copy directly) |
+| `up.weight` | [1024, 768] | ne[0]=768, ne[1]=1024 | NO (copy directly) |
+| `decoder.out_conv.weight` | [7, 64, 1] | ne[0]=1, ne[1]=64, ne[2]=7 | NO (copy directly) |
+| `decoder.layers.X.conv_t.weight` | [in_c, out_c, ks] | ne[0]=ks, ne[1]=out_c, ne[2]=in_c | NO (copy directly) |
+| `residual_units.Y.in_conv.weight` | [ch, 7] | ne[0]=7, ne[1]=ch | NO (copy directly) |
+| `residual_units.Y.out_conv.weight` | [ch, ch] | ne[0]=ch, ne[1]=ch | NO (copy directly) |
+
+**Key insight**: All weights can be copied directly from GGUF raw bytes without transpose!
+
+### `copy_tensor_to_vector()`
 
 **Purpose**: Dequantize and copy tensor data to float vector.
 
@@ -515,7 +528,7 @@ static bool copy_tensor_to_vector(
 2. Otherwise, use ggml backend to dequantize
 3. Handle quantized formats (Q4, Q8, etc.)
 
-### `load_snac_model()` (Lines 1459-1882)
+### `load_snac_model()`
 
 **Purpose**: Load SNAC model from GGUF file.
 
@@ -534,36 +547,26 @@ static bool load_snac_model(
 1. Initialize GGUF context
 2. Read metadata (n_quantizers, decoder_dim, etc.)
 3. Detect format using `is_ttscpp_format()`
-4. Load tensors with appropriate transpose handling
+4. Load tensors with appropriate handling
 5. Fall back to random weights if no tensors found
 
-### Codebook Transpose Example (Lines 1411-1430)
+### Weight Normalization Handling
 
-```cpp
-// GGUF shape [8, 4096] = [codebook_dim, codebook_size] in column-major
-// Element (d, t) at: d + 8*t
-// Need row-major: d*4096 + t
+SNAC uses PyTorch's weight normalization which decomposes weights into:
+- `parametrizations.weight.original0` (magnitude g)
+- `parametrizations.weight.original1` (direction v)
 
-std::vector<float> raw;
-if (copy_tensor_to_vector(tensor, raw)) {
-    int64_t ne0 = tensor->ne[0];  // 8 = codebook_dim
-    int64_t ne1 = tensor->ne[1];  // 4096 = codebook_size
-    quant.codebook.resize(ne0 * ne1);
-    for (int64_t d = 0; d < ne0; d++) {
-        for (int64_t t = 0; t < ne1; t++) {
-            // Source: column-major (d, t) at d + 8*t
-            // Dest: row-major (d, t) at d*4096 + t
-            quant.codebook[d * ne1 + t] = raw[d + ne0 * t];
-        }
-    }
-}
-```
+Combination formula: `w = g * (v / ||v||)`
+
+Some models also use `_g` and `_v` suffixes directly.
+
+**Important**: Do NOT scale weights - small weights (mean~0.000003) are correct due to weight normalization.
 
 ---
 
 ## Audio Output
 
-### `normalize_audio()` (Lines 1886-1926)
+### `normalize_audio()`
 
 **Purpose**: Normalize audio samples to proper amplitude.
 
@@ -580,7 +583,9 @@ static void normalize_audio(
 - If peak > 100%: attenuate to target
 - Otherwise: leave as-is
 
-### `save_wav16()` (Lines 69-91)
+**DC Offset Removal**: After tanh activation, DC offset is removed to compensate for snake activation's inherent positive bias.
+
+### `save_wav16()`
 
 **Purpose**: Save audio samples as 16-bit WAV file.
 
@@ -611,7 +616,7 @@ struct wav_header {
 };
 ```
 
-### `decode_snac_tokens()` (Lines 1929-1953)
+### `decode_snac_tokens()`
 
 **Purpose**: Decode audio tokens to PCM samples.
 
@@ -632,42 +637,42 @@ static void decode_snac_tokens(
 
 ## Main Function Flow
 
-### `main()` (Lines 1955-2295)
+### `main()`
 
 **Flow**:
 
 ```
 1. Parse arguments
-   ├── Model path (-m)
-   ├── Vocoder path (--model-vocoder)
-   ├── Prompt text (-p)
-   ├── Output path (-o)
-   ├── Voice name (-v)
-   ├── Sampling params (--temp, --top-k, --top-p)
-   └── Test mode (--test-vocoder)
+   |-- Model path (-m)
+   |-- Vocoder path (--model-vocoder)
+   |-- Prompt text (-p)
+   |-- Output path (-o)
+   |-- Voice name (-v)
+   |-- Sampling params (--temp, --top-k, --top-p)
+   |-- Test mode (--test-vocoder)
 
 2. Handle test vocoder mode
-   └── Load SNAC, generate random tokens, decode, save
+   |-- Load SNAC, generate random tokens, decode, save
 
 3. Normal TTS mode
-   ├── Initialize llama backend
-   ├── Load LLM model
-   ├── Load SNAC vocoder
-   ├── Build prompt
-   ├── Configure sampling (temp=0.1, top_k=40, top_p=0.9, penalty_repeat=1.1)
-   └── Generate tokens
+   |-- Initialize llama backend
+   |-- Load LLM model
+   |-- Load SNAC vocoder
+   |-- Build prompt
+   |-- Configure sampling (temp=0.1, top_k=40, top_p=0.9, penalty_repeat=1.1)
+   |-- Generate tokens
 
 4. Token generation loop
-   ├── Sample next token
-   ├── Check for stop tokens
-   ├── Track audio tokens
-   └── Decode batch
+   |-- Sample next token
+   |-- Check for stop tokens
+   |-- Track audio tokens
+   |-- Decode batch
 
 5. Audio synthesis
-   ├── Collect audio tokens in pyramid structure
-   ├── Decode with SNAC
-   ├── Normalize audio
-   └── Save WAV file
+   |-- Collect audio tokens in pyramid structure
+   |-- Decode with SNAC
+   |-- Normalize audio
+   |-- Save WAV file
 
 6. Cleanup
 ```
@@ -692,38 +697,39 @@ cmake -B build -DLLAMA_CURL=OFF
 cmake --build build --target llama-orpheus-tts -j$(nproc)
 
 # Executable location: build/bin/llama-orpheus-tts
-# Alternative: build-tts/bin/llama-orpheus-tts
 ```
 
-### Model Files Location
+### Model Conversion
 
-**LLM Model (Orpheus TTS)** - Full paths from llama.cpp root:
-```
-models/orpheus-3b-llamacpp.gguf              # Orpheus LLM (converted for llama.cpp)
+**Orpheus LLM**:
+```bash
+python tools/tts/convert_hf_to_gguf_orpheus.py /path/to/orpheus-3b \
+    --outfile orpheus-3b-f16.gguf --outtype f16
 ```
 
-**SNAC Vocoder** - Full paths from llama.cpp root:
-```
-models/snac_24khz_fixed5.gguf                      # Latest fixed version (recommended)
+**SNAC Vocoder**:
+```bash
+python tools/tts/convert_hf_to_gguf_snac.py /path/to/snac_24khz \
+    --outfile snac-24khz-f16.gguf --outtype f16
 ```
 
 ### Basic Usage
 
 ```bash
-# From llama.cpp root directory
 ./build/bin/llama-orpheus-tts \
-    -m models/orpheus-3b-llamacpp.gguf \
-    --model-vocoder models/snac_24khz_fixed5.gguf \
+    -m models/orpheus-3b-f16.gguf \
+    --model-vocoder models/snac-24khz-f16.gguf \
     -p "Hello, how are you today?" \
-    -o output.wav
+    -o output.wav \
+    -t 8
 ```
 
 ### With Voice Selection
 
 ```bash
 ./build/bin/llama-orpheus-tts \
-    -m models/orpheus-3b-llamacpp.gguf \
-    --model-vocoder models/snac_24khz_fixed5.gguf \
+    -m models/orpheus-3b-f16.gguf \
+    --model-vocoder models/snac-24khz-f16.gguf \
     -p "Hello, how are you today?" \
     -v tara \
     -o output.wav
@@ -733,7 +739,7 @@ models/snac_24khz_fixed5.gguf                      # Latest fixed version (recom
 
 ```bash
 ./build/bin/llama-orpheus-tts \
-    --model-vocoder models/snac_24khz_fixed5.gguf \
+    --model-vocoder models/snac-24khz-f16.gguf \
     --test-vocoder \
     -o test.wav
 ```
@@ -742,8 +748,8 @@ models/snac_24khz_fixed5.gguf                      # Latest fixed version (recom
 
 ```bash
 ./build/bin/llama-orpheus-tts \
-    -m models/orpheus-3b-llamacpp.gguf \
-    --model-vocoder models/snac_24khz_fixed5.gguf \
+    -m models/orpheus-3b-f16.gguf \
+    --model-vocoder models/snac-24khz-f16.gguf \
     -p "This is a test of the Orpheus text to speech system." \
     -v tara \
     -o test_output.wav \
@@ -782,18 +788,49 @@ For a working vocoder:
 - `mean`: Near 0 (not 0.3+)
 - Values: Symmetric around 0
 
+**Good output indicators**:
+- `neg_ratio` should be 35-65% (values near 50% indicate symmetric waveform)
+- `0-200 Hz` energy should be <40% (higher values indicate DC bias or noise)
+- `mean` should be near 0 (values > 0.3 indicate DC bias)
+
 ### DC Bias Symptoms
 
 If output is all positive (DC bias):
-1. Check weight transpose in final layer
-2. Check codebook transpose
+1. Check weight loading - all GGUF weights should be copied directly without transpose
+2. Check codebook loading
 3. Check decoder layer ConvTranspose1D weights
+4. **Snake activation inherently adds positive values**: snake(x,alpha) = x + sin^2(alpha*x)/alpha adds positive for both positive and negative x
+5. **Solution**: Remove DC offset in normalize_audio() function
+
+### Snake Activation Behavior
+
+- Formula: `snake(x, alpha) = x + sin^2(alpha*x) / alpha`
+- Always adds positive values (sin^2 is always >= 0)
+- For negative x: makes it less negative (closer to 0)
+- For positive x: makes it more positive
+- This causes DC bias to accumulate through the network
+- Model was trained to compensate, but some residual DC remains
+- **Fix**: Remove DC offset after tanh and before normalization
+
+### Common Bug: Incorrect Column-Major Transpose
+
+A common mistake is to assume GGUF stores data in column-major order and apply transpose.
+This will corrupt the weights and produce:
+- DC-biased output (neg_ratio ~0% instead of ~50%)
+- 95%+ energy in 0-200 Hz band (should be <20%)
+- Quiet, muffled audio
+
+**Fix**: Remove all transpose operations - copy GGUF raw data directly.
 
 ### Token Repetition
 
 If audio degrades after initial speech:
 1. Check `penalty_repeat = 1.1f` is set
 2. Analyze generated tokens for repetition patterns
+
+### Frequency Distribution Note
+
+Random tokens produce low-frequency noise (95%+ energy in 0-200 Hz band). This is expected - meaningful speech requires actual LLM-generated tokens. The chatllm.cpp reference with real text shows proper distribution: ~11% in 0-200 Hz, ~51% in 200-500 Hz, ~31% in 500-1000 Hz.
 
 ---
 
@@ -807,14 +844,16 @@ If audio degrades after initial speech:
 
 ## Recent Fixes
 
-1. **DC Bias Fix**: Corrected weight transpose logic for GGUF column-major to C++ row-major conversion
+1. **DC Bias Fix**: Corrected weight loading logic - GGUF stores data in row-major order, copy directly without transpose
 2. **Amplitude Fix**: Added `normalize_audio()` for proper output amplitude
 3. **Token Loop Fix**: Added `penalty_repeat = 1.1f` to prevent LLM token repetition
-4. **ConvTranspose1D Fix (Mar 2026)**: Fixed ConvTranspose1D implementation to match chatllm.cpp's approach:
+4. **ConvTranspose1D Fix**: Fixed ConvTranspose1D implementation:
    - Insert (stride-1) zeros between input elements
    - Flip kernel along kernel dimension
    - Apply regular 1D convolution with effective padding `p = kernel_size - 1 - padding`
    - This fix resolves the buzzing/noise artifacts in the audio output
+
+---
 
 ## Commits
 
