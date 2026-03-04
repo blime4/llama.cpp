@@ -273,6 +273,11 @@ target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 # Tests: DC bias detection, frequency distribution, quality thresholds
 llama_build_and_test(test-audio-metrics.cpp LABEL "orpheus")
 
+# Orpheus acceptance tests - validates vocoder output against quality criteria
+# Acceptance criteria: neg_ratio 35-65%, dc_bias < 0.01, energy_0_200Hz < 40%
+# Usage: ./test-orpheus-acceptance [wav_file] [--all] [--synthetic] [--dc-bias] [--low-freq]
+llama_build_and_test(test-orpheus-acceptance.cpp LABEL "orpheus")
+
 # ============================================================================
 # SNAC/TTS Tests (Orpheus-TTS vocoder components)
 # ============================================================================

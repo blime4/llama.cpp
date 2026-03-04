@@ -302,7 +302,7 @@ inline bool save_wav_file(const std::string& path, const std::vector<float>& sam
     fwrite(&header, sizeof(header), 1, f);
 
     for (const auto& s : samples) {
-        int16_t pcm = static_cast<int16_t>(std::clamp(s * 32767.0, -32768.0, 32767.0));
+        int16_t pcm = static_cast<int16_t>(std::max(-32768.0, std::min(32767.0, s * 32767.0)));
         fwrite(&pcm, sizeof(pcm), 1, f);
     }
 
@@ -360,6 +360,186 @@ inline float correlation(const std::vector<float>& a, const std::vector<float>& 
 
     if (den_a == 0 || den_b == 0) return 0.0f;
     return num / std::sqrt(den_a * den_b);
+}
+
+// ============================================================================
+// Acceptance Test Helpers
+// ============================================================================
+
+// Acceptance criteria thresholds for vocoder output validation
+// These values are based on analysis of working SNAC vocoder output
+struct AcceptanceThresholds {
+    // Time domain criteria
+    float neg_ratio_min = 35.0f;        // Symmetric waveform: 35-65%
+    float neg_ratio_max = 65.0f;
+    float dc_bias_max = 0.01f;          // No DC offset: |mean| < 0.01
+    float peak_amplitude_min = 0.7f;    // Proper amplitude: 0.7-0.95
+    float peak_amplitude_max = 0.95f;
+    float std_dev_min = 0.1f;           // Reasonable variance
+
+    // Frequency domain criteria
+    float energy_0_200Hz_max = 40.0f;   // Not all low frequency: <40%
+    float energy_200_500Hz_min = 10.0f; // Speech frequency range present
+    float energy_1000Hz_plus_min = 5.0f; // High frequency content present
+};
+
+// Default acceptance thresholds
+inline AcceptanceThresholds default_acceptance_thresholds() {
+    return AcceptanceThresholds();
+}
+
+// Strict acceptance thresholds (for production quality)
+inline AcceptanceThresholds strict_acceptance_thresholds() {
+    AcceptanceThresholds t;
+    t.neg_ratio_min = 40.0f;
+    t.neg_ratio_max = 60.0f;
+    t.dc_bias_max = 0.005f;
+    t.peak_amplitude_min = 0.75f;
+    t.peak_amplitude_max = 0.9f;
+    t.std_dev_min = 0.15f;
+    t.energy_0_200Hz_max = 35.0f;
+    t.energy_200_500Hz_min = 15.0f;
+    t.energy_1000Hz_plus_min = 10.0f;
+    return t;
+}
+
+// Validate audio metrics against custom thresholds
+inline bool validate_against_thresholds(const AudioMetrics& m, const AcceptanceThresholds& t) {
+    // Check neg_ratio
+    if (m.neg_ratio < t.neg_ratio_min || m.neg_ratio > t.neg_ratio_max) {
+        return false;
+    }
+
+    // Check DC bias
+    if (std::abs(m.dc_bias) > t.dc_bias_max) {
+        return false;
+    }
+
+    // Check peak amplitude
+    if (m.peak_amplitude < t.peak_amplitude_min || m.peak_amplitude > t.peak_amplitude_max) {
+        return false;
+    }
+
+    // Check standard deviation
+    if (m.std_dev < t.std_dev_min) {
+        return false;
+    }
+
+    // Check frequency distribution
+    if (m.energy_0_200Hz > t.energy_0_200Hz_max) {
+        return false;
+    }
+
+    if (m.energy_200_500Hz < t.energy_200_500Hz_min) {
+        return false;
+    }
+
+    if (m.energy_1000Hz_plus < t.energy_1000Hz_plus_min) {
+        return false;
+    }
+
+    return true;
+}
+
+// Generate synthetic vocoder output for testing
+// This creates a complex waveform that simulates speech characteristics
+inline std::vector<float> generate_synthetic_vocoder_output(int n_samples, int sample_rate, uint64_t seed = 42) {
+    std::vector<float> samples(n_samples);
+    std::mt19937 rng(seed);
+
+    for (int i = 0; i < n_samples; i++) {
+        float t = static_cast<float>(i) / sample_rate;
+
+        // Fundamental frequency (~150 Hz for male speech)
+        float fundamental = std::sin(2.0f * (float)M_PI * 150.0f * t);
+
+        // Harmonics
+        float h2 = 0.5f * std::sin(2.0f * (float)M_PI * 300.0f * t);
+        float h3 = 0.3f * std::sin(2.0f * (float)M_PI * 450.0f * t);
+        float h4 = 0.2f * std::sin(2.0f * (float)M_PI * 600.0f * t);
+
+        // Formant-like resonance
+        float formant = 0.4f * std::sin(2.0f * (float)M_PI * 800.0f * t);
+
+        // Add some noise for naturalness
+        std::uniform_real_distribution<float> noise_dist(-0.05f, 0.05f);
+        float noise = noise_dist(rng);
+
+        // Amplitude modulation (like syllables)
+        float envelope = 0.7f + 0.3f * std::sin(2.0f * (float)M_PI * 3.0f * t);
+
+        // Combine and scale to typical vocoder output range
+        samples[i] = 0.8f * envelope * (fundamental + h2 + h3 + h4 + formant + noise);
+    }
+
+    return samples;
+}
+
+// Generate golden test token sequences for SNAC vocoder
+// These are deterministic sequences that can be used to test the vocoder pipeline
+struct GoldenTokenSequence {
+    std::string name;
+    std::vector<std::vector<int>> tokens;
+    std::string description;
+};
+
+inline std::vector<GoldenTokenSequence> get_golden_token_sequences(int n_frames) {
+    std::vector<GoldenTokenSequence> sequences;
+
+    // Sequence 1: All zeros (silence)
+    {
+        GoldenTokenSequence seq;
+        seq.name = "silence";
+        seq.description = "All zero tokens - should produce silence or near-silence";
+        seq.tokens = generate_zeros_tokens(n_frames);
+        sequences.push_back(seq);
+    }
+
+    // Sequence 2: Deterministic random
+    {
+        GoldenTokenSequence seq;
+        seq.name = "deterministic_random";
+        seq.description = "Deterministic random tokens - should produce audio with expected characteristics";
+        seq.tokens = generate_deterministic_tokens(n_frames, 42);
+        sequences.push_back(seq);
+    }
+
+    // Sequence 3: Sequential
+    {
+        GoldenTokenSequence seq;
+        seq.name = "sequential";
+        seq.description = "Sequential tokens (0,1,2,...) - tests codebook coverage";
+        seq.tokens = generate_sequential_tokens(n_frames);
+        sequences.push_back(seq);
+    }
+
+    // Sequence 4: Mid-range values (typical for speech)
+    {
+        GoldenTokenSequence seq;
+        seq.name = "mid_range";
+        seq.description = "Mid-range token values (1000-3000) - typical for speech tokens";
+        seq.tokens.resize(3);
+        std::mt19937 rng(12345);
+        std::uniform_int_distribution<int> dist(1000, 3000);
+        for (int f = 0; f < n_frames; f++) {
+            for (int j = 0; j < 4; j++) seq.tokens[0].push_back(dist(rng));
+            for (int j = 0; j < 2; j++) seq.tokens[1].push_back(dist(rng));
+            seq.tokens[2].push_back(dist(rng));
+        }
+        sequences.push_back(seq);
+    }
+
+    return sequences;
+}
+
+// Print a summary of golden token sequences
+inline void print_golden_sequences_info(const std::vector<GoldenTokenSequence>& sequences) {
+    printf("=== Golden Token Sequences ===\n");
+    for (const auto& seq : sequences) {
+        printf("  %s: %s\n", seq.name.c_str(), seq.description.c_str());
+        printf("    head0: %zu tokens, head1: %zu tokens, head2: %zu tokens\n",
+               seq.tokens[0].size(), seq.tokens[1].size(), seq.tokens[2].size());
+    }
 }
 
 }  // namespace orpheus_test

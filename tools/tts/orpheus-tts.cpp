@@ -1208,6 +1208,20 @@ struct snac_model {
                     output.size(), mn, mx, sum / output.size(), 100.0 * neg_count / output.size());
         }
 
+        // Remove DC offset before tanh (snake activation accumulates positive bias)
+        float pre_tanh_mean = 0.0f;
+        for (const auto & v : output) {
+            pre_tanh_mean += v;
+        }
+        pre_tanh_mean /= output.size();
+
+        if (std::abs(pre_tanh_mean) > 1e-9f) {
+            for (auto & v : output) {
+                v -= pre_tanh_mean;
+            }
+            LOG_INF("%s: Removed pre-tanh DC offset (mean was %.6f)\n", __func__, pre_tanh_mean);
+        }
+
         // Tanh
         for (auto & v : output) {
             v = std::tanh(v);
