@@ -102,9 +102,9 @@ static void print_usage(int, char ** argv) {
     LOG("  -v, --voice NAME      voice/speaker name (optional)\n");
     LOG("  -t, --threads N       number of threads (default: auto)\n");
     LOG("  -n, --n-predict N     max tokens to generate (default: 2048)\n");
-    LOG("  --temp N              temperature (default: 0.1)\n");
-    LOG("  --top-k N             top-k sampling (default: 40)\n");
-    LOG("  --top-p N             top-p sampling (default: 0.9)\n");
+    LOG("  --temp N              temperature (default: 0.9, from Sesame CSM)\n");
+    LOG("  --top-k N             top-k sampling (default: 50, from Sesame CSM)\n");
+    LOG("  --top-p N             top-p sampling (default: 0.95)\n");
     LOG("\nexample:\n");
     LOG("  %s -m orpheus-3b-f16.gguf --model-vocoder snac-24khz-f16.gguf \\\n", argv[0]);
     LOG("      -p \"Hello, how are you?\" -o greeting.wav\n");
@@ -2335,9 +2335,11 @@ int main(int argc, char ** argv) {
     std::string voice_name;
     int n_threads = -1;
     int n_predict = 2048;
-    float temp = 0.1f;
-    int top_k = 40;
-    float top_p = 0.9f;
+    // Sampling parameters from Sesame CSM reference implementation
+    // https://github.com/SesameAILabs/csm/blob/master/generator.py
+    float temp = 0.9f;   // Higher temperature for more natural speech
+    int top_k = 50;      // Top-k sampling to prevent infinite loops
+    float top_p = 0.95f; // Nucleus sampling threshold
     bool test_vocoder = false;
     int test_frames = 10;  // Number of frames for vocoder test
 
