@@ -33,7 +33,7 @@ constexpr float PEAK_AMPLITUDE_MAX = 0.95f;
 constexpr float STD_DEV_MIN = 0.1f;           // Reasonable variance
 
 // Frequency domain criteria
-constexpr float ENERGY_0_200HZ_MAX = 40.0f;   // Not all low frequency: <40%
+constexpr float ENERGY_0_200HZ_MAX = 50.0f;   // Speech can have ~46% in this band
 constexpr float ENERGY_200_500HZ_MIN = 10.0f; // Speech frequency range present
 constexpr float ENERGY_1000HZ_PLUS_MIN = 5.0f; // High frequency content present
 

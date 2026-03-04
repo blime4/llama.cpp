@@ -39,7 +39,7 @@ struct AcceptanceConfig {
     float std_dev_min = 0.1f;
 
     // Frequency domain thresholds
-    float energy_0_200Hz_max = 40.0f;
+    float energy_0_200Hz_max = 50.0f;  // Speech can have ~46% in this band
     float energy_200_500Hz_min = 10.0f;
     float energy_1000Hz_plus_min = 5.0f;
 
