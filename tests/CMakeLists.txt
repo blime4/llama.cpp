@@ -266,6 +266,14 @@ llama_build_and_test(test-alloc.cpp)
 target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
 # ============================================================================
+# Orpheus-TTS Audio Quality Tests
+# ============================================================================
+
+# Audio metrics test - validates audio quality measurement functions
+# Tests: DC bias detection, frequency distribution, quality thresholds
+llama_build_and_test(test-audio-metrics.cpp LABEL "orpheus")
+
+# ============================================================================
 # SNAC/TTS Tests (Orpheus-TTS vocoder components)
 # ============================================================================
 
@@ -276,7 +284,7 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(snac/test-snake.cpp
                          ${PROJECT_SOURCE_DIR}/src/tts/snac-snake.cpp
                          LABEL "snac")
-    target_include_directories(test-snake PRIVATE ${PROJECT_SOURCE_DIR}/src/tts)
+    target_include_directories(test-snake PRIVATE ${PROJECT_SOURCE_DIR}/src/tts ${PROJECT_SOURCE_DIR}/tests)
 
     # ResidualUnit component test - part of SNAC decoder
     # Reference: chatllm.cpp/models/orpheus.cpp - ResidualUnit implementation
