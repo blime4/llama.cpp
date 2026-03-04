@@ -255,7 +255,25 @@ static void conv1d_dw(
 // 2. Flip kernel along kernel dimension
 // 3. Apply regular 1D convolution
 // Weight layout: [in_channels, out_channels, kernel_size]
-static void conv_transpose1d(
+//
+// CRITICAL: Why we use a custom implementation instead of ggml_conv_transpose_1d:
+// The ggml native function has hardcoded assertions that prevent its use in SNAC:
+//   - GGML_ASSERT(p0 == 0)  // padding must be 0
+//   - GGML_ASSERT(d0 == 1)  // dilation must be 1
+//
+// However, SNAC decoder layers require different padding values:
+//   - Layer 0-1: stride=8, kernel=16, padding=4
+//   - Layer 2:   stride=4, kernel=8,  padding=2
+//   - Layer 3:   stride=2, kernel=4,  padding=1
+//
+// Using padding=0 when SNAC expects padding=4/2/1 would produce:
+//   - Incorrect output lengths
+//   - Edge artifacts and audio distortion
+//   - Failure to match the original PyTorch SNAC model behavior
+//
+// Therefore, this custom implementation is necessary to support the padding
+// values required by SNAC.
+static void snac_conv_transpose1d(
     const float * input, const float * kernel, const float * bias,
     float * output,
     int64_t input_len, int64_t in_channels, int64_t out_channels,
@@ -704,7 +722,7 @@ struct snac_decoder_layer {
                     in_bias[0], in_bias[100], in_bias[200]);
         }
 
-        conv_transpose1d(cur.data(), in_kernel.data(), in_bias.data(),
+        snac_conv_transpose1d(cur.data(), in_kernel.data(), in_bias.data(),
                         temp.data(), input_len, in_channels, out_channels,
                         kernel_size, stride, padding, out_padding);
 
@@ -1963,7 +1981,7 @@ static bool load_snac_model(snac_model & model, const char * model_path) {
                         // Example: [1024, 16, 512] for in=1024, k=16, out=512
                         // GGUF stores dimensions in REVERSE order from numpy
                         // So numpy [1024, 16, 512] -> GGUF ne[]=[512, 16, 1024]
-                        // Our conv_transpose1d expects: [in_channels, out_channels, kernel_size]
+                        // Our snac_conv_transpose1d expects: [in_channels, out_channels, kernel_size]
                         std::vector<float> raw;
                         if (copy_tensor_to_vector(tensor, raw)) {
                             int64_t ne0 = tensor->ne[0];  // out_channels (last numpy dim)
@@ -1976,7 +1994,7 @@ static bool load_snac_model(snac_model & model, const char * model_path) {
 
                             // Data is in row-major order with SNAC format [in_c, ks, out_c]
                             // So raw[ic * ks * out_c + k * out_c + oc]
-                            // We need to transpose to [in_c, out_c, ks] for our conv_transpose1d
+                            // We need to transpose to [in_c, out_c, ks] for our snac_conv_transpose1d
                             // Dest[ic * out_c * ks + oc * ks + k]
                             layer.in_kernel.resize(in_c * out_c * ks);
                             for (int ic = 0; ic < in_c; ic++) {
