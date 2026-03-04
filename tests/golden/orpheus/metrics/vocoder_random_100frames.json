@@ -1,0 +1,38 @@
+{
+  "name": "vocoder_random_100frames",
+  "description": "Golden reference for SNAC vocoder with random tokens",
+  "test_type": "vocoder_only",
+  "input": {
+    "token_type": "random",
+    "n_frames": 100,
+    "seed": null
+  },
+  "expected_metrics": {
+    "neg_ratio": {
+      "min": 35.0,
+      "max": 65.0,
+      "description": "Percentage of negative samples (symmetric waveform)"
+    },
+    "dc_bias": {
+      "min": -0.01,
+      "max": 0.01,
+      "description": "DC offset after tanh and normalization"
+    },
+    "peak_amplitude": {
+      "min": 0.1,
+      "max": 1.0,
+      "description": "Peak signal level"
+    },
+    "energy_0_200Hz": {
+      "max": 40.0,
+      "description": "Low frequency energy should not dominate"
+    }
+  },
+  "notes": [
+    "Random tokens produce low-frequency noise (expected behavior)",
+    "For meaningful audio, use LLM-generated tokens",
+    "This test validates vocoder produces valid audio output",
+    "Audio duration: 100 frames * 7 tokens/frame = 700 tokens",
+    "Audio samples: 100 * 512 = 51200 samples = 2.13 seconds"
+  ]
+}

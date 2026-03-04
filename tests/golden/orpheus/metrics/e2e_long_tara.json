@@ -1,0 +1,27 @@
+{
+  "name": "e2e_long_tara",
+  "description": "End-to-end TTS golden reference - voice: tara, longer text",
+  "test_type": "e2e_tts",
+  "input": {
+    "text": "This is a longer test of the Orpheus text to speech system to validate continuous generation quality.",
+    "voice": "tara",
+    "temperature": 0.1,
+    "max_tokens": 4096
+  },
+  "output": {
+    "audio_file": "audio/e2e_long_tara.wav",
+    "duration_s": 3.93,
+    "sample_count": 94208,
+    "sample_rate": 24000
+  },
+  "audio_metrics": {
+    "expected_neg_ratio_range": [35.0, 65.0],
+    "expected_dc_bias_max": 0.01,
+    "expected_peak_range": [0.5, 1.0]
+  },
+  "notes": [
+    "Longer text tests continuous generation",
+    "Validates multi-sentence synthesis",
+    "Quality should be verified by listening"
+  ]
+}

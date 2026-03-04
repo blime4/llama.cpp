@@ -1,0 +1,29 @@
+{
+  "name": "e2e_hello_leah",
+  "description": "End-to-end TTS golden reference - voice: leah",
+  "test_type": "e2e_tts",
+  "input": {
+    "text": "Hello, how are you today?",
+    "voice": "leah",
+    "temperature": 0.1,
+    "max_tokens": 2048
+  },
+  "output": {
+    "audio_file": "audio/e2e_hello_leah.wav",
+    "duration_s": 2.65,
+    "sample_count": 63488,
+    "sample_rate": 24000
+  },
+  "audio_metrics": {
+    "neg_ratio": 41.77,
+    "dc_bias_pre_norm": 0.003644,
+    "peak_pre_norm": 0.076031,
+    "normalization_factor": 12.49
+  },
+  "notes": [
+    "This is an end-to-end TTS test using the Orpheus LLM",
+    "Audio is generated from text, not random tokens",
+    "DC offset is removed and audio is normalized",
+    "Quality should be verified by listening"
+  ]
+}
