@@ -62,9 +62,10 @@ struct llama_model_loader {
     static const int TENSOR_DUPLICATED   = 1 << 1;
     static const int TENSOR_SKIP         = 1 << 2;
 
-    int n_kv      = 0;
-    int n_tensors = 0;
-    int n_created = 0;
+    int n_kv       = 0;
+    int n_tensors  = 0;
+    int n_created  = 0;
+    int n_external = 0;  // tensors that are loaded externally (e.g., SNAC vocoder for TTS models)
 
     uint64_t n_elements = 0;
     size_t   n_bytes    = 0;

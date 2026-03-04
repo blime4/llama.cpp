@@ -643,6 +643,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     switch (arch) {
         case LLM_ARCH_LLAMA:
         case LLM_ARCH_LLAMA_EMBED:
+        case LLM_ARCH_ORPHEUS:
             {
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
 
@@ -2973,6 +2974,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
             case LLM_ARCH_GRANITE_MOE:
             case LLM_ARCH_MISTRAL3:
             case LLM_ARCH_LLAMA_EMBED:
+            case LLM_ARCH_ORPHEUS:
                 {
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
 
@@ -8314,6 +8316,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
 
     switch (arch) {
         case LLM_ARCH_LLAMA:
+        case LLM_ARCH_ORPHEUS:
             {
                 llm = std::make_unique<llm_build_llama<false>>(*this, params);
             } break;
@@ -8987,6 +8990,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_LLAMA_EMBED:
         case LLM_ARCH_MAINCODER:
         case LLM_ARCH_GLM_DSA:
+        case LLM_ARCH_ORPHEUS:
             return LLAMA_ROPE_TYPE_NORM;
 
         // the pairs of head values are offset by n_rot/2

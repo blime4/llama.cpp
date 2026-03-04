@@ -890,8 +890,18 @@ struct ggml_tensor * llama_model_loader::create_tensor_as_view(struct ggml_conte
 }
 
 void llama_model_loader::done_getting_tensors() const {
-    if (n_created != n_tensors) {
-        throw std::runtime_error(format("%s: wrong number of tensors; expected %d, got %d", __func__, n_tensors, n_created));
+    // Count SNAC tensors (prefixed with "snac.") as external for TTS models
+    int n_snac = 0;
+    for (const auto & it : weights_map) {
+        if (it.first.find("snac.") == 0) {
+            n_snac++;
+        }
+    }
+
+    // Allow external tensors (like SNAC vocoder for TTS models)
+    const int n_expected = n_tensors - n_snac;
+    if (n_created != n_expected) {
+        throw std::runtime_error(format("%s: wrong number of tensors; expected %d, got %d", __func__, n_expected, n_created));
     }
 }
 
