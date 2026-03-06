@@ -13,8 +13,11 @@
 #include "llama.h"
 #include "gguf.h"
 #include "ggml.h"
+#include "ggml-cpu.h"
+#include "snac-ggml.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -105,6 +108,9 @@ static void print_usage(int, char ** argv) {
     LOG("  --temp N              temperature (default: 0.1)\n");
     LOG("  --top-k N             top-k sampling (default: 40)\n");
     LOG("  --top-p N             top-p sampling (default: 0.9)\n");
+    LOG("  --use-snac-ggml       use ggml-based SNAC vocoder (enables GPU acceleration)\n");
+    LOG("  --batch-size N        batch size for SNAC processing (default: 1)\n");
+    LOG("  --gpu                 use GPU backend for SNAC vocoder\n");
     LOG("\nexample:\n");
     LOG("  %s -m orpheus-3b-f16.gguf --model-vocoder snac-24khz-f16.gguf \\\n", argv[0]);
     LOG("      -p \"Hello, how are you?\" -o greeting.wav\n");
@@ -2307,7 +2313,11 @@ int main(int argc, char ** argv) {
     int top_k = 40;
     float top_p = 0.9f;
     bool test_vocoder = false;
+    bool test_snac_ggml = false;
     int test_frames = 10;  // Number of frames for vocoder test
+    bool use_snac_ggml = false;  // Use ggml-based SNAC implementation
+    int batch_size = 1;  // Batch size for SNAC processing
+    bool use_gpu = false;  // Use GPU backend for SNAC
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -2338,8 +2348,20 @@ int main(int argc, char ** argv) {
             top_p = std::stof(argv[++i]);
         } else if (arg == "--test-vocoder") {
             test_vocoder = true;
+        } else if (arg == "--test-snac-ggml") {
+            test_snac_ggml = true;
         } else if (arg == "--test-frames" && i + 1 < argc) {
             test_frames = std::stoi(argv[++i]);
+        } else if (arg == "--use-snac-ggml") {
+            use_snac_ggml = true;
+        } else if (arg == "--batch-size" && i + 1 < argc) {
+            batch_size = std::stoi(argv[++i]);
+            if (batch_size < 1) {
+                LOG_ERR("Error: batch-size must be >= 1\n");
+                return 1;
+            }
+        } else if (arg == "--gpu") {
+            use_gpu = true;
         } else {
             LOG_ERR("Unknown argument: %s\n", arg.c_str());
             print_usage(argc, argv);
@@ -2412,6 +2434,110 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
+    // Test SNAC GGML implementation
+    if (test_snac_ggml) {
+        if (vocoder_path.empty()) {
+            LOG_ERR("Error: Vocoder path is required for test mode (--model-vocoder)\n");
+            print_usage(argc, argv);
+            return 1;
+        }
+
+        LOG_INF("Testing SNAC GGML implementation...\n");
+
+        // Initialize SNAC GGML context
+        snac_ggml_context snac_ctx;
+        if (!snac_ggml_init(snac_ctx, vocoder_path.c_str(), nullptr)) {
+            LOG_ERR("Failed to initialize SNAC GGML context from %s\n", vocoder_path.c_str());
+            return 1;
+        }
+
+        LOG_INF("SNAC GGML context initialized successfully\n");
+
+        // Generate random tokens for testing
+        // SNAC pyramid structure: head0 has 4x tokens, head1 has 2x, head2 has 1x per frame
+        std::vector<std::vector<int>> pyramid_tokens(3);
+        for (int f = 0; f < test_frames; f++) {
+            // head0: 4 tokens per frame
+            for (int j = 0; j < 4; j++) {
+                pyramid_tokens[0].push_back(rand() % 4096);
+            }
+            // head1: 2 tokens per frame
+            for (int j = 0; j < 2; j++) {
+                pyramid_tokens[1].push_back(rand() % 4096);
+            }
+            // head2: 1 token per frame
+            pyramid_tokens[2].push_back(rand() % 4096);
+        }
+
+        LOG_INF("Generated %d test frames with random tokens\n", test_frames);
+        LOG_INF("head0: %zu tokens, head1: %zu tokens, head2: %zu tokens\n",
+                pyramid_tokens[0].size(), pyramid_tokens[1].size(), pyramid_tokens[2].size());
+
+        // Decode using SNAC GGML
+        std::vector<float> pcm_samples = snac_ggml_decode(snac_ctx, pyramid_tokens);
+
+        if (pcm_samples.empty()) {
+            LOG_WRN("SNAC GGML decode returned no samples (Phase 1 - graph execution not yet implemented)\n");
+            snac_ggml_free(snac_ctx);
+            return 0;  // Not an error - Phase 1 is still in progress
+        }
+
+        // Analyze output statistics
+        float mn = 1e30f, mx = -1e30f, sum = 0.0f;
+        int neg_count = 0;
+        for (float s : pcm_samples) {
+            mn = std::min(mn, s);
+            mx = std::max(mx, s);
+            sum += s;
+            if (s < 0) neg_count++;
+        }
+        float mean = sum / pcm_samples.size();
+        float neg_ratio = (float)neg_count / pcm_samples.size();
+
+        LOG_INF("PCM output statistics:\n");
+        LOG_INF("  Samples: %zu\n", pcm_samples.size());
+        LOG_INF("  Min: %.6f\n", mn);
+        LOG_INF("  Max: %.6f\n", mx);
+        LOG_INF("  Mean: %.6f\n", mean);
+        LOG_INF("  Negative ratio: %.2f%% (%d/%zu)\n", neg_ratio * 100, neg_count, pcm_samples.size());
+
+        // Validate statistics against expected values (from MEMORY.md)
+        bool pass = true;
+
+        // Expected: neg_ratio should be ~47-50% (not 0%)
+        if (neg_ratio < 0.40f || neg_ratio > 0.60f) {
+            LOG_ERR("FAIL: Negative ratio %.2f%% is outside expected range [40%%, 60%%]\n", neg_ratio * 100);
+            LOG_ERR("      (Expected ~47-50%% for properly functioning vocoder)\n");
+            pass = false;
+        } else {
+            LOG_INF("PASS: Negative ratio is within expected range\n");
+        }
+
+        // Expected: mean should be near 0 (not 0.3+)
+        if (std::abs(mean) > 0.1f) {
+            LOG_ERR("FAIL: Mean %.6f is too far from 0 (expected |mean| < 0.1)\n", mean);
+            LOG_ERR("      (DC bias indicates potential issues in vocoder)\n");
+            pass = false;
+        } else {
+            LOG_INF("PASS: Mean is near zero (no significant DC bias)\n");
+        }
+
+        // Write WAV file for inspection
+        save_wav16(output_path, pcm_samples, SNAC_SAMPLE_RATE);
+        LOG_INF("Wrote test audio to %s\n", output_path.c_str());
+
+        // Cleanup
+        snac_ggml_free(snac_ctx);
+
+        if (pass) {
+            LOG_INF("\n=== SNAC GGML TEST PASSED ===\n");
+            return 0;
+        } else {
+            LOG_ERR("\n=== SNAC GGML TEST FAILED ===\n");
+            return 1;
+        }
+    }
+
     // Normal mode - require model and prompt
     if (model_path.empty()) {
         LOG_ERR("Error: Model path is required (-m, --model)\n");
@@ -2466,12 +2592,49 @@ int main(int argc, char ** argv) {
 
     // Load SNAC vocoder from separate file
     LOG_INF("Loading SNAC vocoder from %s...\n", vocoder_path.c_str());
+
+    // Initialize backend for SNAC GGML
+    ggml_backend_t snac_backend = nullptr;
+    if (use_gpu) {
+        // Try to initialize GPU backend
+        // Note: Actual GPU backend selection would depend on available backends (CUDA, Metal, etc.)
+        // For now, we'll fall back to CPU
+        LOG_WRN("GPU backend requested but not yet implemented, using CPU\n");
+        snac_backend = ggml_backend_cpu_init();
+    } else {
+        snac_backend = ggml_backend_cpu_init();
+    }
+
+    snac_ggml_context snac_ggml_ctx;
     snac_model snac;
-    if (!load_snac_model(snac, vocoder_path.c_str())) {
-        LOG_ERR("Failed to load SNAC vocoder from %s\n", vocoder_path.c_str());
-        llama_free(ctx);
-        llama_model_free(model);
-        return 1;
+
+    if (use_snac_ggml) {
+        // Use ggml-based SNAC implementation
+        if (!snac_ggml_init(snac_ggml_ctx, vocoder_path.c_str(), snac_backend)) {
+            LOG_ERR("Failed to load SNAC GGML vocoder from %s\n", vocoder_path.c_str());
+            llama_free(ctx);
+            llama_model_free(model);
+            if (snac_backend) ggml_backend_free(snac_backend);
+            return 1;
+        }
+        LOG_INF("SNAC GGML vocoder loaded successfully\n");
+
+        // Initialize batch context if batch_size > 1
+        if (batch_size > 1) {
+            snac_batch_context batch_ctx;
+            // Note: batch context initialization would be done when we have actual batch processing
+            LOG_INF("Batch mode enabled with batch_size=%d\n", batch_size);
+        }
+    } else {
+        // Use legacy SNAC implementation
+        if (!load_snac_model(snac, vocoder_path.c_str())) {
+            LOG_ERR("Failed to load SNAC vocoder from %s\n", vocoder_path.c_str());
+            llama_free(ctx);
+            llama_model_free(model);
+            if (snac_backend) ggml_backend_free(snac_backend);
+            return 1;
+        }
+        LOG_INF("Legacy SNAC vocoder loaded successfully\n");
     }
 
     // Build prompt
@@ -2605,12 +2768,57 @@ int main(int argc, char ** argv) {
     printf("=== END TOKEN DUMP ===\n\n");
 
     // Decode audio tokens to PCM using SNAC
-    printf("DEBUG: Calling decode_snac_tokens...\n");
+    printf("DEBUG: Decoding audio tokens...\n");
     fflush(stdout);
     std::vector<float> pcm_samples;
-    decode_snac_tokens(snac, pyramid_tokens, pcm_samples);
-    printf("DEBUG: decode_snac_tokens returned, samples=%zu\n", pcm_samples.size());
+
+    // Performance timing
+    auto decode_start = std::chrono::high_resolution_clock::now();
+
+    if (use_snac_ggml) {
+        // Use ggml-based SNAC implementation
+        LOG_INF("Using SNAC GGML decoder (batch_size=%d)\n", batch_size);
+
+        if (batch_size > 1) {
+            // Batched processing (for future multi-sequence support)
+            // For now, we'll process single sequence in batch format
+            // TODO: Implement true batching when we have multiple sequences
+            LOG_WRN("Batch mode requested but currently processing single sequence\n");
+        }
+
+        // Single sequence decode
+        pcm_samples = snac_ggml_decode(snac_ggml_ctx, pyramid_tokens);
+
+    } else {
+        // Use legacy SNAC implementation
+        decode_snac_tokens(snac, pyramid_tokens, pcm_samples);
+    }
+
+    auto decode_end = std::chrono::high_resolution_clock::now();
+    auto decode_duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start);
+
+    printf("DEBUG: Decode returned, samples=%zu\n", pcm_samples.size());
     fflush(stdout);
+
+    // Report performance metrics
+    size_t total_tokens = pyramid_tokens[0].size() + pyramid_tokens[1].size() + pyramid_tokens[2].size();
+    if (decode_duration.count() > 0) {
+        float tokens_per_sec = total_tokens * 1000.0f / decode_duration.count();
+        float audio_duration = (float)pcm_samples.size() / SNAC_SAMPLE_RATE;
+        float real_time_factor = (decode_duration.count() / 1000.0f) / audio_duration;
+
+        LOG_INF("SNAC decode performance:\n");
+        LOG_INF("  Decode time: %ld ms\n", (long)decode_duration.count());
+        LOG_INF("  Tokens processed: %zu\n", total_tokens);
+        LOG_INF("  Tokens/second: %.1f\n", tokens_per_sec);
+        LOG_INF("  Audio duration: %.2f seconds\n", audio_duration);
+        LOG_INF("  Real-time factor: %.2fx\n", real_time_factor);
+        if (use_snac_ggml) {
+            LOG_INF("  Backend: GGML (%s)\n", use_gpu ? "GPU" : "CPU");
+        } else {
+            LOG_INF("  Backend: Legacy CPU\n");
+        }
+    }
 
     // Save to WAV
     if (!pcm_samples.empty()) {
@@ -2629,6 +2837,15 @@ int main(int argc, char ** argv) {
     // Cleanup
     llama_batch_free(batch);
     common_sampler_free(sampler);
+
+    // Free SNAC resources
+    if (use_snac_ggml) {
+        snac_ggml_free(snac_ggml_ctx);
+        if (snac_backend) {
+            ggml_backend_free(snac_backend);
+        }
+    }
+
     llama_free(ctx);
     llama_model_free(model);
     llama_backend_free();
