@@ -692,3 +692,465 @@ std::vector<float> snac_ggml_decode(
 
     return result;
 }
+
+// ============================================================================
+// Phase 2: Batched Processing Implementation
+// ============================================================================
+
+// Build batched computation graph
+// Handles multiple sequences in a single graph with batch dimension
+static struct ggml_tensor * snac_build_batch_graph(
+    struct ggml_context * ctx,
+    const struct snac_ggml_weights & w,
+    int64_t batch_size,
+    int64_t head0_len,
+    int64_t head1_len,
+    int64_t head2_len)
+{
+    struct ggml_tensor * cur = nullptr;
+
+    // Step 1: Create batched input tensors for each quantizer head
+    // Tokens for head 0: [batch_size, head0_len]
+    struct ggml_tensor * tokens0 = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, head0_len, batch_size);
+    ggml_set_name(tokens0, "batch_tokens_head0");
+
+    // Tokens for head 1: [batch_size, head1_len]
+    struct ggml_tensor * tokens1 = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, head1_len, batch_size);
+    ggml_set_name(tokens1, "batch_tokens_head1");
+
+    // Tokens for head 2: [batch_size, head2_len]
+    struct ggml_tensor * tokens2 = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, head2_len, batch_size);
+    ggml_set_name(tokens2, "batch_tokens_head2");
+
+    // Step 2: Quantizer forward for each head (batched)
+    std::vector<struct ggml_tensor *> head_embeddings(3);
+
+    // Head 0 quantizer lookup
+    // tokens0: [head0_len, batch_size]
+    // For batched get_rows, we need to handle each batch element
+    // GGML's ggml_get_rows doesn't support batch dimension directly
+    // We'll process each head separately and concatenate
+
+    // For now, process sequences sequentially within the graph
+    // This is a stepping stone - full parallel batch processing would require
+    // either custom ops or restructuring the computation
+
+    // Embedding lookup for head 0
+    // Flatten batch dimension, lookup, then reshape
+    struct ggml_tensor * tokens0_flat = ggml_view_1d(ctx, tokens0, batch_size * head0_len, 0);
+    struct ggml_tensor * emb0_flat = ggml_get_rows(ctx, w.quant_codebook[0], tokens0_flat);
+    // emb0_flat: [codebook_dim, batch_size * head0_len] = [8, batch_size * head0_len]
+    // Transpose to [batch_size * head0_len, codebook_dim]
+    emb0_flat = ggml_cont(ctx, ggml_transpose(ctx, emb0_flat));
+    // Reshape to [batch_size, head0_len, codebook_dim]
+    head_embeddings[0] = ggml_reshape_3d(ctx, emb0_flat, SNAC_GGML_CODEBOOK_DIM, head0_len, batch_size);
+
+    // Apply projection for head 0
+    // Project from codebook_dim (8) to quantizer_dim (768)
+    // Use 1x1 conv: reshape to [batch_size, codebook_dim, head0_len]
+    struct ggml_tensor * h0_transposed = ggml_permute(ctx, head_embeddings[0], 1, 2, 0, 3);
+    // Now [codebook_dim, head0_len, batch_size]
+    struct ggml_tensor * kernel0 = ggml_reshape_3d(ctx, w.quant_out_proj[0],
+                                                    SNAC_GGML_QUANTIZER_DIM, SNAC_GGML_CODEBOOK_DIM, 1);
+    struct ggml_tensor * proj0 = ggml_conv_1d(ctx, kernel0, h0_transposed, 1, 0, 1);
+    if (w.quant_out_bias[0]) {
+        proj0 = ggml_add(ctx, proj0, w.quant_out_bias[0]);
+    }
+    // proj0: [quantizer_dim, head0_len, batch_size] -> permute back
+    head_embeddings[0] = ggml_permute(ctx, proj0, 1, 0, 2, 3);
+    // Now [head0_len, quantizer_dim, batch_size]
+
+    // Similar for head 1
+    if (head1_len > 0) {
+        struct ggml_tensor * tokens1_flat = ggml_view_1d(ctx, tokens1, batch_size * head1_len, 0);
+        struct ggml_tensor * emb1_flat = ggml_get_rows(ctx, w.quant_codebook[1], tokens1_flat);
+        emb1_flat = ggml_cont(ctx, ggml_transpose(ctx, emb1_flat));
+        head_embeddings[1] = ggml_reshape_3d(ctx, emb1_flat, SNAC_GGML_CODEBOOK_DIM, head1_len, batch_size);
+
+        struct ggml_tensor * h1_transposed = ggml_permute(ctx, head_embeddings[1], 1, 2, 0, 3);
+        struct ggml_tensor * kernel1 = ggml_reshape_3d(ctx, w.quant_out_proj[1],
+                                                        SNAC_GGML_QUANTIZER_DIM, SNAC_GGML_CODEBOOK_DIM, 1);
+        struct ggml_tensor * proj1 = ggml_conv_1d(ctx, kernel1, h1_transposed, 1, 0, 1);
+        if (w.quant_out_bias[1]) {
+            proj1 = ggml_add(ctx, proj1, w.quant_out_bias[1]);
+        }
+        head_embeddings[1] = ggml_permute(ctx, proj1, 1, 0, 2, 3);
+    }
+
+    // Similar for head 2
+    if (head2_len > 0) {
+        struct ggml_tensor * tokens2_flat = ggml_view_1d(ctx, tokens2, batch_size * head2_len, 0);
+        struct ggml_tensor * emb2_flat = ggml_get_rows(ctx, w.quant_codebook[2], tokens2_flat);
+        emb2_flat = ggml_cont(ctx, ggml_transpose(ctx, emb2_flat));
+        head_embeddings[2] = ggml_reshape_3d(ctx, emb2_flat, SNAC_GGML_CODEBOOK_DIM, head2_len, batch_size);
+
+        struct ggml_tensor * h2_transposed = ggml_permute(ctx, head_embeddings[2], 1, 2, 0, 3);
+        struct ggml_tensor * kernel2 = ggml_reshape_3d(ctx, w.quant_out_proj[2],
+                                                        SNAC_GGML_QUANTIZER_DIM, SNAC_GGML_CODEBOOK_DIM, 1);
+        struct ggml_tensor * proj2 = ggml_conv_1d(ctx, kernel2, h2_transposed, 1, 0, 1);
+        if (w.quant_out_bias[2]) {
+            proj2 = ggml_add(ctx, proj2, w.quant_out_bias[2]);
+        }
+        head_embeddings[2] = ggml_permute(ctx, proj2, 1, 0, 2, 3);
+    }
+
+    // Step 3: Combine embeddings with pyramid structure
+    // For simplicity in Phase 2, we assume all sequences have same length
+    // and combine embeddings additively
+
+    // The pyramid structure means:
+    // - head0 contributes to all positions
+    // - head1 contributes to positions 1, 3, 5, ... (every 2nd)
+    // - head2 contributes to positions 3, 7, 11, ... (every 4th starting at 3)
+
+    // For initial implementation, we'll do a simplified combination:
+    // Just add head embeddings (this won't produce correct audio but validates batch flow)
+
+    // Start with head0 embeddings
+    cur = head_embeddings[0];
+    // cur: [head0_len, quantizer_dim, batch_size]
+
+    // TODO: Implement proper repeat_interleave for pyramid structure
+    // For now, just add if dimensions match (they won't in real usage)
+    // This is a placeholder for the actual pyramid combination logic
+
+    // Step 4: Input convolution (depthwise) - batched
+    // Reshape cur to [T, C, batch] -> conv expects [C, T, batch]
+    cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [quantizer_dim, head0_len, batch_size]
+
+    // Apply depthwise conv
+    cur = ggml_conv_1d_dw(ctx, w.in_conv_kernel, cur, 1, 3, 1);
+    if (w.in_conv_bias) {
+        cur = ggml_add(ctx, cur, w.in_conv_bias);
+    }
+
+    // Step 5: Up convolution (1x1 conv) - project to decoder_dim
+    cur = ggml_conv_1d(ctx, w.up_conv_kernel, cur, 1, 0, 1);
+    if (w.up_conv_bias) {
+        cur = ggml_add(ctx, cur, w.up_conv_bias);
+    }
+    // cur: [decoder_dim, head0_len, batch_size]
+
+    // Step 6: Decoder layers - each with ConvTranspose1D
+    int layer_channels[4] = {1024, 512, 256, 128};
+    int out_channels[4] = {512, 256, 128, 64};
+    int decoder_rates[4] = {8, 8, 4, 2};
+    int kernel_sizes[4] = {16, 16, 8, 4};
+
+    int64_t cur_len = head0_len;
+
+    for (int l = 0; l < SNAC_GGML_N_DECODER_LAYERS; l++) {
+        if (!w.layer_kernel[l]) continue;
+
+        int in_ch = layer_channels[l];
+        int out_ch = out_channels[l];
+        int stride = decoder_rates[l];
+        int ks = kernel_sizes[l];
+        int padding = (stride + 1) / 2;
+
+        // Calculate output length
+        int output_padding = stride % 2;
+        int64_t output_len = (cur_len - 1) * stride + ks - 2 * padding + output_padding;
+
+        // Permute cur to [T, C, batch] for snake activation
+        cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [cur_len, in_ch, batch_size]
+
+        // Snake activation
+        cur = snac_snake_forward_2d_ggml(ctx, cur, w.layer_alpha[l], cur_len, in_ch);
+
+        // Permute back to [C, T, batch] for conv_transpose
+        cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [in_ch, cur_len, batch_size]
+
+        // ConvTranspose1D
+        cur = ggml_conv_transpose_1d(ctx, w.layer_kernel[l], cur, stride, padding, 1);
+
+        // Add bias
+        if (w.layer_bias[l]) {
+            cur = ggml_add(ctx, cur, w.layer_bias[l]);
+        }
+
+        // Permute for residual units
+        cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [output_len, out_ch, batch_size]
+
+        // Residual units (simplified for batched version)
+        for (int u = 0; u < 3; u++) {
+            if (!w.residual_in_alpha[l][u]) continue;
+
+            struct ggml_tensor * residual = cur;
+            int channels = out_ch;
+            int unit_kernel_size = 7;
+            int dilation = (int)std::pow(3, u);
+            int unit_padding = ((unit_kernel_size - 1) * dilation) / 2;
+
+            // Snake in
+            cur = snac_snake_forward_2d_ggml(ctx, cur, w.residual_in_alpha[l][u], output_len, channels);
+
+            // Permute for depthwise conv
+            cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
+
+            // Depthwise conv in
+            if (w.residual_in_kernel[l][u]) {
+                cur = ggml_conv_1d_dw(ctx, w.residual_in_kernel[l][u], cur, 1, unit_padding, dilation);
+                if (w.residual_in_bias[l][u]) {
+                    cur = ggml_add(ctx, cur, w.residual_in_bias[l][u]);
+                }
+            }
+
+            // Permute back
+            cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
+
+            // Snake out
+            cur = snac_snake_forward_2d_ggml(ctx, cur, w.residual_out_alpha[l][u], output_len, channels);
+
+            // Permute for 1x1 conv
+            cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
+
+            // 1x1 conv out
+            if (w.residual_out_kernel[l][u]) {
+                cur = ggml_conv_1d(ctx, w.residual_out_kernel[l][u], cur, 1, 0, 1);
+                if (w.residual_out_bias[l][u]) {
+                    cur = ggml_add(ctx, cur, w.residual_out_bias[l][u]);
+                }
+            }
+
+            // Permute back
+            cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
+
+            // Residual connection
+            cur = ggml_add(ctx, cur, residual);
+        }
+
+        cur_len = output_len;
+
+        // Permute back for next layer
+        cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [out_ch, cur_len, batch_size]
+    }
+
+    // Step 7: Output layer
+    // Permute to [T, C, batch]
+    cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
+
+    // Snake activation
+    cur = snac_snake_forward_2d_ggml(ctx, cur, w.snake_alpha_out, cur_len, 64);
+
+    // Permute back to [C, T, batch]
+    cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
+
+    // Output convolution
+    cur = ggml_conv_1d(ctx, w.out_conv_kernel, cur, 1, 3, 1);
+    if (w.out_conv_bias) {
+        cur = ggml_add(ctx, cur, w.out_conv_bias);
+    }
+
+    // Tanh activation
+    cur = ggml_tanh(ctx, cur);
+
+    // Final shape: [1, output_samples, batch_size]
+    return cur;
+}
+
+// Initialize batch context
+bool snac_batch_init(
+    struct snac_ggml_context & model_ctx,
+    struct snac_batch_context & batch_ctx,
+    int max_batch_size,
+    int max_tokens)
+{
+    if (!model_ctx.loaded) {
+        LOG_ERR("%s: Model context not loaded\n", __func__);
+        return false;
+    }
+
+    // Create graph context
+    struct ggml_init_params params = {
+        /*.mem_size   =*/ 512*1024*1024,  // 512MB for batched graph
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+    batch_ctx.ctx = ggml_init(params);
+    if (!batch_ctx.ctx) {
+        LOG_ERR("%s: Failed to create graph context\n", __func__);
+        return false;
+    }
+
+    batch_ctx.backend = model_ctx.backend;
+    batch_ctx.max_batch_size = max_batch_size;
+    batch_ctx.max_tokens = max_tokens;
+
+    // Create allocator
+    batch_ctx.allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(batch_ctx.backend));
+    if (!batch_ctx.allocr) {
+        LOG_ERR("%s: Failed to create allocator\n", __func__);
+        ggml_free(batch_ctx.ctx);
+        batch_ctx.ctx = nullptr;
+        return false;
+    }
+
+    batch_ctx.initialized = true;
+    LOG_INF("%s: Batch context initialized (max_batch=%d, max_tokens=%d)\n",
+            __func__, max_batch_size, max_tokens);
+
+    return true;
+}
+
+// Free batch context
+void snac_batch_free(struct snac_batch_context & batch_ctx)
+{
+    if (batch_ctx.allocr) {
+        ggml_gallocr_free(batch_ctx.allocr);
+        batch_ctx.allocr = nullptr;
+    }
+
+    if (batch_ctx.ctx) {
+        ggml_free(batch_ctx.ctx);
+        batch_ctx.ctx = nullptr;
+    }
+
+    batch_ctx.initialized = false;
+}
+
+// Batch decode implementation
+std::vector<std::vector<float>> snac_batch_decode(
+    struct snac_ggml_context & model_ctx,
+    struct snac_batch_context & batch_ctx,
+    const std::vector<snac_batch_input> & batches)
+{
+    if (!model_ctx.loaded || !batch_ctx.initialized) {
+        LOG_ERR("%s: Contexts not initialized\n", __func__);
+        return {};
+    }
+
+    if (batches.empty()) {
+        return {};
+    }
+
+    std::vector<std::vector<float>> results;
+
+    // Process each batch
+    for (const auto & batch : batches) {
+        if (batch.n_seqs <= 0) continue;
+
+        // Build graph for this batch
+        struct ggml_tensor * output = snac_build_batch_graph(
+            batch_ctx.ctx, model_ctx.weights,
+            batch.n_seqs,
+            batch.head0_len, batch.head1_len, batch.head2_len);
+
+        if (!output) {
+            LOG_ERR("%s: Failed to build batch graph\n", __func__);
+            continue;
+        }
+
+        struct ggml_cgraph * gf = ggml_new_graph(batch_ctx.ctx);
+        ggml_build_forward_expand(gf, output);
+
+        // Allocate graph
+        if (!ggml_gallocr_alloc_graph(batch_ctx.allocr, gf)) {
+            LOG_ERR("%s: Failed to allocate batch graph\n", __func__);
+            continue;
+        }
+
+        // Set input tokens
+        struct ggml_tensor * tokens0 = ggml_get_tensor(batch_ctx.ctx, "batch_tokens_head0");
+        struct ggml_tensor * tokens1 = ggml_get_tensor(batch_ctx.ctx, "batch_tokens_head1");
+        struct ggml_tensor * tokens2 = ggml_get_tensor(batch_ctx.ctx, "batch_tokens_head2");
+
+        if (tokens0 && batch.tokens_head0) {
+            ggml_backend_tensor_set(tokens0, batch.tokens_head0, 0,
+                                    batch.n_seqs * batch.head0_len * sizeof(int32_t));
+        }
+        if (tokens1 && batch.tokens_head1) {
+            ggml_backend_tensor_set(tokens1, batch.tokens_head1, 0,
+                                    batch.n_seqs * batch.head1_len * sizeof(int32_t));
+        }
+        if (tokens2 && batch.tokens_head2) {
+            ggml_backend_tensor_set(tokens2, batch.tokens_head2, 0,
+                                    batch.n_seqs * batch.head2_len * sizeof(int32_t));
+        }
+
+        // Execute graph
+        if (ggml_backend_is_cpu(batch_ctx.backend)) {
+            ggml_backend_cpu_set_n_threads(batch_ctx.backend, 4);
+        }
+
+        ggml_status status = ggml_backend_graph_compute(batch_ctx.backend, gf);
+        if (status != GGML_STATUS_SUCCESS) {
+            LOG_ERR("%s: Batch graph computation failed\n", __func__);
+            continue;
+        }
+
+        // Extract output for each sequence
+        // Output shape: [1, output_samples, batch_size]
+        int64_t samples_per_seq = output->ne[1];
+        std::vector<float> batch_output(batch.n_seqs * samples_per_seq);
+        ggml_backend_tensor_get(output, batch_output.data(), 0, batch_output.size() * sizeof(float));
+
+        // De-interleave: split batch output into individual sequences
+        for (int s = 0; s < batch.n_seqs; s++) {
+            std::vector<float> seq_output(samples_per_seq);
+            for (int64_t i = 0; i < samples_per_seq; i++) {
+                seq_output[i] = batch_output[s * samples_per_seq + i];
+            }
+            results.push_back(std::move(seq_output));
+        }
+    }
+
+    return results;
+}
+
+// Convenience function for pyramid token format
+std::vector<std::vector<float>> snac_batch_decode_pyramid(
+    struct snac_ggml_context & model_ctx,
+    struct snac_batch_context & batch_ctx,
+    const std::vector<std::vector<std::vector<int>>> & pyramid_tokens_batch)
+{
+    if (pyramid_tokens_batch.empty()) {
+        return {};
+    }
+
+    // Find max lengths for padding
+    int64_t max_head0 = 0, max_head1 = 0, max_head2 = 0;
+    for (const auto & pyramid : pyramid_tokens_batch) {
+        if (pyramid.size() >= 1) max_head0 = std::max(max_head0, (int64_t)pyramid[0].size());
+        if (pyramid.size() >= 2) max_head1 = std::max(max_head1, (int64_t)pyramid[1].size());
+        if (pyramid.size() >= 3) max_head2 = std::max(max_head2, (int64_t)pyramid[2].size());
+    }
+
+    // Create batch input with padding
+    snac_batch_input batch;
+    batch.n_seqs = pyramid_tokens_batch.size();
+    batch.head0_len = max_head0;
+    batch.head1_len = max_head1;
+    batch.head2_len = max_head2;
+
+    // Allocate padded token arrays
+    std::vector<int32_t> tokens0(batch.n_seqs * max_head0, 0);
+    std::vector<int32_t> tokens1(batch.n_seqs * max_head1, 0);
+    std::vector<int32_t> tokens2(batch.n_seqs * max_head2, 0);
+
+    // Copy tokens with padding
+    for (size_t s = 0; s < pyramid_tokens_batch.size(); s++) {
+        const auto & pyramid = pyramid_tokens_batch[s];
+
+        if (pyramid.size() >= 1 && !pyramid[0].empty()) {
+            std::copy(pyramid[0].begin(), pyramid[0].end(),
+                      tokens0.begin() + s * max_head0);
+        }
+        if (pyramid.size() >= 2 && !pyramid[1].empty()) {
+            std::copy(pyramid[1].begin(), pyramid[1].end(),
+                      tokens1.begin() + s * max_head1);
+        }
+        if (pyramid.size() >= 3 && !pyramid[2].empty()) {
+            std::copy(pyramid[2].begin(), pyramid[2].end(),
+                      tokens2.begin() + s * max_head2);
+        }
+    }
+
+    batch.tokens_head0 = tokens0.data();
+    batch.tokens_head1 = tokens1.data();
+    batch.tokens_head2 = tokens2.data();
+
+    // Process as single batch
+    std::vector<snac_batch_input> batches = {batch};
+    return snac_batch_decode(model_ctx, batch_ctx, batches);
+}
