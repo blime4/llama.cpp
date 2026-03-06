@@ -5,17 +5,25 @@
 ### Goal
 Convert the current SNAC vocoder implementation from manual tensor operations to ggml graph-based computation, enabling batched processing for improved performance in the orpheus-tts system.
 
-### Current State
-- Location: `tools/tts/orpheus-tts.cpp`
-- Implementation: Manual tensor operations with custom allocators
-- Processing: Single-token-at-a-time decoding
-- Performance: Limited by sequential processing overhead
+### Current State (Updated: 2026-03-06)
+- **Location:** `tools/tts/orpheus-tts.cpp`, `tools/tts/snac-ggml.h`, `tools/tts/snac-ggml.cpp`
+- **Legacy Implementation:** Manual tensor operations with custom allocators (WORKING but SLOW)
+- **GGML Implementation:** Phase 1-3 complete, tensor loading not yet functional
+- **Performance:** Legacy CPU = 92.71x real-time (6.2 min for 4s audio)
+- **Test Status:** ✅ End-to-end TTS working with Orpheus LLM model
 
 ### Target State
 - Implementation: ggml compute graph with cplan scheduling
 - Processing: Batched decoding (configurable batch size)
-- Performance: Optimized parallel processing with ggml scheduling
+- Performance: GPU-accelerated, <1x real-time
 - Maintainability: Clean separation between graph building and execution
+
+### Commits Made
+| Commit | Phase | Description |
+|--------|-------|-------------|
+| `f16f2027a` | Phase 1 | ggml-based SNAC vocoder (single sequence) |
+| `35277241d` | Phase 2 | Batched processing structures |
+| `75eef107e` | Phase 3 | Integration with orpheus-tts |
 
 ---
 
@@ -491,3 +499,97 @@ ggml_tensor* snake1(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha) {
 | Date | Author | Description |
 |------|--------|-------------|
 | 2026-03-06 | Team | Initial plan creation |
+
+---
+
+## Current Progress Summary (2026-03-06)
+
+### What's Working ✅
+1. **End-to-End TTS Pipeline**
+   - Orpheus LLM generates audio tokens from text
+   - Legacy CPU SNAC vocoder decodes tokens to audio
+   - Output: Valid WAV files with proper normalization
+
+2. **Test Audio Generated**
+   - File: `test_output/orpheus_speech_test.wav`
+   - Text: "Hello, this is a test of the Orpheus text to speech system."
+   - Duration: 4.01 seconds
+
+3. **Phase 1-3 Code Structure**
+   - `snac-ggml.h`: API definitions, batched structures
+   - `snac-ggml.cpp`: Graph building, snake activation, decoder layers
+   - `orpheus-tts.cpp`: Integration with `--use-snac-ggml` flag
+
+### What's Not Working ❌
+1. **GGML SNAC Tensor Loading**
+   - `snac_ggml_init` returns 0 tensors loaded
+   - GGUF tensor name mapping incomplete
+
+2. **GGML Graph Execution**
+   - Graph builds but weights not loaded
+   - Cannot test GPU acceleration yet
+
+### Performance Baseline (Legacy CPU)
+| Metric | Value |
+|--------|-------|
+| Decode time | 371,835 ms (6.2 min) |
+| Audio duration | 4.01 seconds |
+| Real-time factor | 92.71x slower than real-time |
+
+### Target Performance (GGML GPU)
+| Metric | Target |
+|--------|-------|
+| Decode time | <100 ms |
+| Real-time factor | <0.025x (faster than real-time) |
+
+---
+
+## Next Steps for GPU Server
+
+### Priority 1: Fix GGML Tensor Loading
+- Map GGUF tensor names to expected structure
+
+### Priority 2: Verify Graph Execution
+1. Load SNAC model with correct tensor mapping
+2. Build computation graph
+3. Execute on CPU backend first
+4. Compare output with legacy implementation
+
+### Priority 3: Enable GPU Backend
+1. Test with CUDA backend
+2. Test with Metal backend (macOS)
+3. Benchmark performance improvement
+
+### Priority 4: Batch Processing
+1. Test batched decode with multiple sequences
+2. Verify variable-length padding
+3. Measure throughput improvement
+
+---
+
+## Files Summary
+
+### Files Modified/Created
+| File | Lines | Purpose |
+|------|-------|---------|
+| `tools/tts/snac-ggml.h` | 100 | Header with API and structures |
+| `tools/tts/snac-ggml.cpp` | 694 | GGML SNAC implementation |
+| `tools/tts/orpheus-tts.cpp` | +225 | Integration with --use-snac-ggml flag |
+| `tools/tts/CMakeLists.txt` | +2 | Build configuration |
+
+### Generated Test Files
+| File | Size | Description |
+|------|------|-------------|
+| `test_output/orpheus_speech_test.wav` | 189 KB | Meaningful speech (4.01s) |
+| `test_output/snac_vocoder_50frames.wav` | 51 KB | SNAC vocoder test |
+| `test_output/snac_test_vocoder_long.wav` | 51 KB | Long vocoder test |
+
+---
+
+## Commits Made
+
+| Commit | Phase | Description |
+|--------|-------|-------------|
+| `f16f2027a` | Phase 1 | feat(tts): add ggml-based SNAC vocoder implementation |
+| `35277241d` | Phase 2 | feat(tts): add batched processing for SNAC vocoder |
+| `75eef107e` | Phase 3 | feat(tts): integrate ggml SNAC with orpheus-tts |
