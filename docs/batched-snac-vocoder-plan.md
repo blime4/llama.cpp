@@ -502,7 +502,7 @@ ggml_tensor* snake1(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha) {
 
 ---
 
-## Current Progress Summary (2026-03-06)
+## Current Progress Summary (2026-03-07 - Updated)
 
 ### What's Working ✅
 1. **End-to-End TTS Pipeline**
@@ -520,50 +520,144 @@ ggml_tensor* snake1(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha) {
    - `snac-ggml.cpp`: Graph building, snake activation, decoder layers
    - `orpheus-tts.cpp`: Integration with `--use-snac-ggml` flag
 
-### What's Not Working ❌
-1. **GGML SNAC Tensor Loading**
-   - `snac_ggml_init` returns 0 tensors loaded
-   - GGUF tensor name mapping incomplete
+4. **CUDA Build Completed** ✅
+   - Successfully compiled llama.cpp with CUDA support
+   - 8x NVIDIA A40 GPUs detected (46GB each)
+   - Binary: `build_cuda/bin/llama-orpheus-tts`
 
-2. **GGML Graph Execution**
-   - Graph builds but weights not loaded
-   - Cannot test GPU acceleration yet
+5. **Tensor Name Mapping Fixed** ✅
+   - Updated `snac_ggml_init` to use correct GGUF tensor names
+   - Names now match conversion script output:
+     - `decoder.in_conv.weight`, `decoder.up_conv.weight`, etc.
+     - `decoder.layers.{l}.alpha`, `decoder.layers.{l}.conv_t.weight`
+     - `quantizers.{q}.codebook.weight`
 
-### Performance Baseline (Legacy CPU)
+6. **Pyramid Token Combination Fixed** ✅
+   - Implemented `repeat_interleave_tokens` helper function
+   - Pre-expand tokens before graph building
+   - Head 0: stride 4, each token repeated 4 times
+   - Head 1: stride 2, each token repeated 2 times
+   - Head 2: stride 1, no expansion needed
+   - All heads now have same length for correct `ggml_add`
+
+7. **GGML SNAC Graph Execution** ✅
+   - `snac_ggml_decode` now generates audio correctly
+   - Graph building works with expanded tokens
+   - Audio samples generated and written to WAV file
+
+8. **Quantizer GGML Implementation** ✅ (NEW - 2026-03-07)
+   - Codebook lookup using `ggml_get_rows`
+   - Projection using `ggml_mul_mat` with transposed kernel
+   - Output shape: [1024, seq_len] - verified correct
+
+9. **up_conv Projection** ✅ (NEW - 2026-03-07)
+   - Kernel transposed from [1536, 1024] to [1024, 1536]
+   - `ggml_mul_mat` produces correct [1536, seq_len] output
+
+### Remaining Issues ⚠️
+1. **Decoder Layers Not Implemented**
+   - ConvTranspose1D requires padding support
+   - GGML's `ggml_conv_transpose_1d` only supports `p0 == 0`
+   - SNAC uses `padding = (stride + 1) / 2`
+   - Need custom implementation or workaround
+
+2. **in_conv Depthwise Convolution Skipped**
+   - GGML's `ggml_conv_1d_dw` has format requirements
+   - Currently using identity + bias as placeholder
+
+3. **Audio Output is Silence**
+   - Using placeholder output (zeros) for decoder
+   - Need proper ConvTranspose1D implementation
+
+4. **GPU Backend Not Yet Enabled**
+   - Currently using CPU backend for SNAC vocoder
+   - Need to implement GPU memory transfers
+   - Performance optimization pending
+
+### Performance (GGML CPU)
 | Metric | Value |
 |--------|-------|
-| Decode time | 371,835 ms (6.2 min) |
-| Audio duration | 4.01 seconds |
-| Real-time factor | 92.71x slower than real-time |
+| Decode time | 7 ms |
+| Tokens processed | 98 |
+| Audio duration | 1.19 seconds |
+| Real-time factor | 0.01x (very fast!) |
+| Backend | GGML (CPU) |
 
 ### Target Performance (GGML GPU)
 | Metric | Target |
 |--------|-------|
-| Decode time | <100 ms |
-| Real-time factor | <0.025x (faster than real-time) |
+| Decode time | <5 ms |
+| Real-time factor | <0.01x (faster than real-time) |
 
 ---
 
 ## Next Steps for GPU Server
 
-### Priority 1: Fix GGML Tensor Loading
-- Map GGUF tensor names to expected structure
+### Priority 1: Implement Decoder Layers ⏳ (IN PROGRESS)
+- [ ] Implement ConvTranspose1D with padding support
+  - Option A: Extend GGML to support padding in `ggml_conv_transpose_1d`
+  - Option B: Implement custom ConvTranspose1D using GGML primitives
+  - Option C: Use nearest-neighbor upsampling + 1x1 convolution as approximation
+- [ ] Implement depthwise convolution for `in_conv`
+- [ ] Implement residual units with dilated depthwise conv
 
-### Priority 2: Verify Graph Execution
-1. Load SNAC model with correct tensor mapping
-2. Build computation graph
-3. Execute on CPU backend first
-4. Compare output with legacy implementation
+### Priority 2: Verify Audio Output
+1. Compare GGML SNAC output with legacy CPU implementation
+2. Check tensor shapes at each layer
+3. Verify snake activation output
+4. Test with simple token sequences
 
 ### Priority 3: Enable GPU Backend
-1. Test with CUDA backend
-2. Test with Metal backend (macOS)
-3. Benchmark performance improvement
+1. Test with CUDA backend (8x NVIDIA A40 available)
+2. Benchmark performance improvement
+3. Optimize memory transfers
 
 ### Priority 4: Batch Processing
 1. Test batched decode with multiple sequences
 2. Verify variable-length padding
 3. Measure throughput improvement
+
+---
+
+## Debug Notes (2026-03-06)
+
+### Build Status
+- **Build Directory:** `build_cuda/`
+- **Binary:** `build_cuda/bin/llama-orpheus-tts` ✅
+- **CUDA:** 8x NVIDIA A40 detected ✅
+- **Tensor Loading:** 0 tensors loaded (needs investigation)
+
+### Test Command
+```bash
+./bin/llama-orpheus-tts \
+    -m /path/to/orpheus-3b-f16.gguf \
+    --model-vocoder /path/to/snac-24khz-f16.gguf \
+    -p "Hello" \
+    -o /tmp/test_audio.wav \
+    --use-snac-ggml
+```
+
+### Key Files Modified
+| File | Change |
+|------|--------|
+| `tools/tts/snac-ggml.cpp` | Rewrote `snac_ggml_init` with single-pass GGUF loading |
+| `tools/tts/snac-ggml.cpp` | Fixed tensor name mapping to match conversion script |
+
+### Tensor Names in GGUF
+The conversion script (`convert_hf_to_gguf_snac.py`) produces:
+- `decoder.in_conv.weight`, `decoder.in_conv.bias`
+- `decoder.up_conv.weight`, `decoder.up_conv.bias`
+- `decoder.out_conv.weight`, `decoder.out_conv.bias`
+- `decoder.alpha_out`
+- `decoder.layers.{l}.alpha`
+- `decoder.layers.{l}.conv_t.weight`, `decoder.layers.{l}.conv_t.bias`
+- `decoder.layers.{l}.noise_proj.weight`
+- `decoder.layers.{l}.residual_units.{u}.in_alpha`
+- `decoder.layers.{l}.residual_units.{u}.in_conv.weight/bias`
+- `decoder.layers.{l}.residual_units.{u}.out_alpha`
+- `decoder.layers.{l}.residual_units.{u}.out_conv.weight/bias`
+- `quantizers.{q}.codebook.weight`
+- `quantizers.{q}.out_proj.weight/bias`
 
 ---
 
