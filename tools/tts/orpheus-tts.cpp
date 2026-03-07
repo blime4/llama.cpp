@@ -14,6 +14,7 @@
 #include "gguf.h"
 #include "ggml.h"
 #include "ggml-cpu.h"
+#include "ggml-cuda.h"
 #include "snac-ggml.h"
 
 #include <algorithm>
@@ -1972,31 +1973,23 @@ static bool load_snac_model(snac_model & model, const char * model_path) {
                         // Our conv_transpose1d expects: [in_channels, out_channels, kernel_size]
                         std::vector<float> raw;
                         if (copy_tensor_to_vector(tensor, raw)) {
-                            int64_t ne0 = tensor->ne[0];  // out_channels (last numpy dim)
-                            int64_t ne1 = tensor->ne[1];  // kernel_size (middle numpy dim)
-                            int64_t ne2 = tensor->ne[2];  // in_channels (first numpy dim)
+                            int64_t ne0 = tensor->ne[0];  // in_channels (first dim)
+                            int64_t ne1 = tensor->ne[1];  // out_channels (second dim)
+                            int64_t ne2 = tensor->ne[2];  // kernel_size (third dim)
 
-                            int in_c = ne2;   // in_channels = ne2 = 1024
-                            int out_c = ne0;  // out_channels = ne0 = 512
-                            int ks = ne1;     // kernel_size = ne1 = 16
+                            int in_c = ne0;   // in_channels = ne0
+                            int out_c = ne1;  // out_channels = ne1
+                            int ks = ne2;     // kernel_size = ne2
 
-                            // Data is in row-major order with SNAC format [in_c, ks, out_c]
-                            // So raw[ic * ks * out_c + k * out_c + oc]
-                            // We need to transpose to [in_c, out_c, ks] for our conv_transpose1d
-                            // Dest[ic * out_c * ks + oc * ks + k]
+                            layer.kernel_size = ks;  // Use actual kernel size from tensor
+                            layer.padding = (ks - stride) / 2;  // Recalculate padding
+
+                            // GGUF stores data in row-major order [in_c, out_c, ks]
+                            // This is the same format our conv_transpose1d expects!
+                            // No transpose needed, just copy directly
                             layer.in_kernel.resize(in_c * out_c * ks);
-                            for (int ic = 0; ic < in_c; ic++) {
-                                for (int oc = 0; oc < out_c; oc++) {
-                                    for (int k = 0; k < ks; k++) {
-                                        // Source: SNAC [in, k, out] row-major
-                                        // Element (ic, k, oc) at: ic*ks*out_c + k*out_c + oc
-                                        int src_idx = ic * ks * out_c + k * out_c + oc;
-                                        // Dest: [in, out, k] row-major
-                                        // Element (ic, oc, k) at: ic*out_c*ks + oc*ks + k
-                                        int dst_idx = ic * out_c * ks + oc * ks + k;
-                                        layer.in_kernel[dst_idx] = raw[src_idx];
-                                    }
-                                }
+                            for (int i = 0; i < in_c * out_c * ks; i++) {
+                                layer.in_kernel[i] = raw[i];
                             }
 
                             LOG_WRN("DEBUG: decoder.layers.%d.conv_t.weight: GGUF dims [%lld,%lld,%lld] -> [%d,%d,%d] (in_c, out_c, ks), SNAC format transposed\n",
@@ -2596,11 +2589,15 @@ int main(int argc, char ** argv) {
     // Initialize backend for SNAC GGML
     ggml_backend_t snac_backend = nullptr;
     if (use_gpu) {
-        // Try to initialize GPU backend
-        // Note: Actual GPU backend selection would depend on available backends (CUDA, Metal, etc.)
-        // For now, we'll fall back to CPU
-        LOG_WRN("GPU backend requested but not yet implemented, using CPU\n");
-        snac_backend = ggml_backend_cpu_init();
+        // Try to initialize CUDA backend
+        // First try device 0 (primary GPU)
+        snac_backend = ggml_backend_cuda_init(0);
+        if (snac_backend) {
+            LOG_INF("SNAC vocoder using CUDA GPU backend (device 0)\n");
+        } else {
+            LOG_WRN("CUDA backend initialization failed, falling back to CPU\n");
+            snac_backend = ggml_backend_cpu_init();
+        }
     } else {
         snac_backend = ggml_backend_cpu_init();
     }
