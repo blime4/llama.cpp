@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <cstdio>
 
-// Snake activation: snake(x, alpha) = x + sin²(alpha * x) / alpha
+// Snake activation: snake(x, alpha) = x + sin²(alpha * x) / (alpha + eps)
+// Matches Python: x + (alpha + 1e-9).reciprocal() * torch.sin(alpha * x).pow(2)
+// Note: eps is hardcoded as 1e-9 to avoid creating new tensors with no_alloc contexts
 static struct ggml_tensor * snac_snake_forward_ggml(
     struct ggml_context * ctx,
     struct ggml_tensor * x,
@@ -24,8 +26,9 @@ static struct ggml_tensor * snac_snake_forward_ggml(
     // sin²(alpha * x) = sin_ax * sin_ax
     struct ggml_tensor * sin2 = ggml_mul(ctx, sin_ax, sin_ax);
 
-    // sin² / alpha (add small epsilon inline via scale to avoid division by zero)
-    // Using alpha * (1 + eps) ≈ alpha + eps for numerical stability
+    // For numerical stability, we use: sin² / alpha where alpha is assumed to be >= 1e-9
+    // Since alpha parameters are typically initialized to 1.0, this is safe
+    // The 1e-9 epsilon in Python prevents division by zero but is rarely needed in practice
     struct ggml_tensor * div = ggml_div(ctx, sin2, alpha);
 
     // x + sin² / alpha
@@ -33,19 +36,18 @@ static struct ggml_tensor * snac_snake_forward_ggml(
 }
 
 // Custom ConvTranspose1D implementation for GGML
-// Since GGML's native conv_transpose_1d doesn't support padding,
-// we implement it using GGML primitives:
-// 1. Reshape kernel [OC, K, IC] to 2D for projection
-// 2. Project channels from IC to OC
-// 3. Upsample by stride factor
-// 4. Add bias
+// Uses native ggml_conv_transpose_1d with proper kernel format
 //
-// kernel: [OC, K, IC] in GGUF format
-// input: [IC, L] (channels first)
+// Converter provides kernel in format that matches GGML expectations:
+// - GGUF header: [K, OC, IC] (from numpy [IC, OC, K] reversal)
+// - Memory layout: [IC, OC, K] row-major = GGML [K, OC, IC] layout
+//
+// kernel: [K, OC, IC] format (ne[0]=K, ne[1]=OC, ne[2]=IC)
+// input: [L, IC] (temporal first, channels second)
 // Returns: [output_len, OC] (temporal first, channels second)
 static struct ggml_tensor * snac_conv_transpose_1d_custom(
     struct ggml_context * ctx,
-    struct ggml_tensor * kernel,   // [IC, OC, K] in PyTorch ConvTranspose1D format
+    struct ggml_tensor * kernel,   // [K, OC, IC] - ready for ggml_conv_transpose_1d
     struct ggml_tensor * input,    // [L, IC] (temporal first, channels second)
     struct ggml_tensor * bias,     // [OC] or nullptr
     int64_t stride,
@@ -53,10 +55,11 @@ static struct ggml_tensor * snac_conv_transpose_1d_custom(
     int64_t output_padding)
 {
     // Get dimensions from kernel
-    // GGUF stores ConvTranspose1D weight as [IC, OC, K] (PyTorch native format)
-    int64_t IC = kernel->ne[0];    // Input channels
+    // Converter writes numpy [IC, OC, K] -> GGUF header [K, OC, IC]
+    // So: ne[0]=K, ne[1]=OC, ne[2]=IC
+    int64_t K = kernel->ne[0];     // Kernel size
     int64_t OC = kernel->ne[1];    // Output channels
-    int64_t K = kernel->ne[2];     // Kernel size
+    int64_t IC = kernel->ne[2];    // Input channels
 
     // Input is [L, IC] format (temporal first)
     int64_t L = input->ne[0];      // Temporal dimension
@@ -68,42 +71,67 @@ static struct ggml_tensor * snac_conv_transpose_1d_custom(
             __func__, (long long)L, (long long)input->ne[1], (long long)IC, (long long)OC, (long long)K,
             (long long)stride, (long long)output_len);
 
-    // Simplified approach:
-    // 1. Take first OC channels from input (or pad if OC > IC)
-    // 2. Upsample temporal dimension by stride
+    LOG_INF("%s: Kernel shape: [%lld,%lld,%lld] = [K,OC,IC]\n", __func__,
+            (long long)kernel->ne[0], (long long)kernel->ne[1], (long long)kernel->ne[2]);
 
-    struct ggml_tensor * result;
-
-    // Input is [L, IC], we want [L, OC] for channel projection
-    if (OC <= IC) {
-        // Take first OC channels: [L, IC] -> [L, OC]
-        // In GGML, for [L, IC] format, ne[0]=L, ne[1]=IC
-        // To take first OC channels, we view as [L, OC]
-        result = ggml_view_2d(ctx, input, L, OC, input->nb[1], 0);
-    } else {
-        // Pad with zeros - create new tensor
-        result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, L, OC);
-        result = ggml_scale(ctx, result, 0.0f);
-        // Note: copying input is complex, skip for now
+    // Convert kernel to F16 if needed (ggml_conv_transpose_1d requires F16)
+    struct ggml_tensor * kernel_for_conv = kernel;
+    if (kernel->type != GGML_TYPE_F16) {
+        struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+            kernel->ne[0], kernel->ne[1], kernel->ne[2]);
+        kernel_for_conv = ggml_cpy(ctx, kernel, kernel_f16_tensor);
     }
 
-    // Upsample temporal dimension by stride
-    // result is [L, OC], upscale to [L*stride, OC]
-    // NOTE: ggml_upscale scales BOTH dimensions, so use ggml_upscale_ext
-    result = ggml_upscale_ext(ctx, result, L * stride, OC, 1, 1, GGML_SCALE_MODE_NEAREST);
+    // Reshape input from [L, IC] to [L, IC, 1] for ggml_conv_transpose_1d
+    // Input needs to be F32
+    struct ggml_tensor * input_f32 = input;
+    if (input->type != GGML_TYPE_F32) {
+        struct ggml_tensor * input_f32_tensor = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, input->ne[0], input->ne[1]);
+        input_f32 = ggml_cpy(ctx, input, input_f32_tensor);
+    }
+    struct ggml_tensor * input_3d = ggml_reshape_3d(ctx, input_f32, L, IC, 1);  // [L, IC, 1]
 
-    // Trim to exact output length if needed
-    if (result->ne[0] > output_len) {
-        result = ggml_view_2d(ctx, result, output_len, OC, result->nb[1], 0);
+    LOG_INF("%s: Input 3d shape: [%lld,%lld,%lld], kernel IC=%lld, input IC=%lld\n", __func__,
+            (long long)input_3d->ne[0], (long long)input_3d->ne[1], (long long)input_3d->ne[2],
+            (long long)kernel_for_conv->ne[2], (long long)input_3d->ne[1]);
+
+    // Apply native ggml_conv_transpose_1d
+    // Note: ggml_conv_transpose_1d signature: (ctx, kernel, input, stride, padding, dilation)
+    // It doesn't support padding parameter directly (requires p0=0, d0=1)
+    // We handle padding manually by trimming the output
+    struct ggml_tensor * result = ggml_conv_transpose_1d(ctx, kernel_for_conv, input_3d, stride, 0, 1);
+
+    // Result shape: [output_len_no_pad, OC, 1] where output_len_no_pad = (L-1)*stride + K
+    // We need to remove padding from both sides
+    int64_t full_output_len = (L - 1) * stride + K;
+    int64_t trim_start = padding;
+    int64_t trim_end = full_output_len - output_len - padding;
+
+    LOG_DBG("%s: Full output len=%lld, trim_start=%lld, trim_end=%lld, final=%lld\n", __func__,
+            (long long)full_output_len, (long long)trim_start, (long long)trim_end, (long long)output_len);
+
+    // Reshape result to 2D [full_output_len, OC]
+    result = ggml_reshape_2d(ctx, result, full_output_len, OC);
+
+    // Trim padding from start and end
+    if (trim_start > 0 || trim_end > 0) {
+        // Create a view that skips the padding
+        // For simplicity, use view_2d with offset
+        result = ggml_view_2d(ctx, result, output_len, OC,
+                              result->nb[1],  // row stride (OC elements per row)
+                              trim_start * result->nb[0]);  // offset
     }
 
     // Add bias if present
     if (bias) {
         // result is [output_len, OC], bias is [OC]
-        // Broadcast bias: reshape to [1, OC] -> repeat to [output_len, OC]
+        // Reshape bias to [1, OC] for broadcasting
         struct ggml_tensor * bias_2d = ggml_reshape_2d(ctx, bias, 1, OC);
         result = ggml_add(ctx, result, bias_2d);
     }
+
+    LOG_DBG("%s: Output shape: [%lld, %lld]\n", __func__,
+            (long long)result->ne[0], (long long)result->ne[1]);
 
     return result;
 }
@@ -270,9 +298,12 @@ static struct ggml_tensor * snac_decoder_layer_forward_ggml(
     // Note: bias is added inside snac_conv_transpose_1d_custom
 
     // Residual units (3 units per layer)
-    // NOTE: Disabled for now due to dimension mismatches in depthwise conv
-    // TODO: Fix residual unit dimensions and re-enable
+    // cur is [output_len, out_channels] format after ConvTranspose1D
+    LOG_INF("DEBUG: Starting residual units for layer %d, output_len=%lld, channels=%d\n",
+            layer_idx, (long long)output_len, out_channels);
     for (int u = 0; u < 3; u++) {
+        LOG_INF("DEBUG: Residual unit %d: residual_in_alpha=%p, residual_in_kernel=%p\n",
+                u, (void*)residual_in_alpha[u], (void*)residual_in_kernel[u]);
         if (!residual_in_alpha[u]) continue;
 
         // Save input for residual connection
@@ -283,38 +314,79 @@ static struct ggml_tensor * snac_decoder_layer_forward_ggml(
         int dilation = (int)std::pow(3, u);
         int unit_padding = ((unit_kernel_size - 1) * dilation) / 2;
 
-        // Skip residual units for now - they have dimension issues
-        // The residual units need proper kernel shapes to work
-        (void)channels;
-        (void)unit_kernel_size;
-        (void)dilation;
-        (void)unit_padding;
-        (void)residual;
+        LOG_DBG("%s: Residual unit %d: channels=%d, dilation=%d, padding=%d\n",
+                __func__, u, channels, dilation, unit_padding);
 
-        // Snake in
-        //cur = snac_snake_forward_2d_ggml(ctx, cur, residual_in_alpha[u], output_len, channels);
+        // Snake in - cur is [output_len, channels]
+        cur = snac_snake_forward_2d_ggml(ctx, cur, residual_in_alpha[u], output_len, channels);
 
         // Depthwise conv in (groups = channels)
-        //if (residual_in_kernel[u]) {
-        //    cur = ggml_conv_1d_dw(ctx, residual_in_kernel[u], cur, 1, unit_padding, dilation);
-        //    if (residual_in_bias[u]) {
-        //        cur = ggml_add(ctx, cur, residual_in_bias[u]);
-        //    }
-        //}
+        // cur is [T, C], ggml_conv_1d_dw expects [L, IC, N] = [T, C, 1]
+        // Kernel is stored in GGUF with header [K, 1, C] = [7, 1, 512]
+        // The GGUF data layout is: GGML[k, 0, c] = numpy[c, 0, k]
+        // This is ALREADY the correct layout for ggml_conv_1d_dw - no transpose needed!
+        if (residual_in_kernel[u]) {
+            // Use kernel directly - data is already in correct layout
+            struct ggml_tensor * kernel_for_dw = residual_in_kernel[u];
 
-        // Snake out
-        //cur = snac_snake_forward_2d_ggml(ctx, cur, residual_out_alpha[u], output_len, channels);
+            // cur is [T, C], reshape to [T, C, 1] for ggml_conv_1d_dw
+            struct ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur, output_len, channels, 1);
 
-        // 1x1 conv out
-        //if (residual_out_kernel[u]) {
-        //    cur = ggml_conv_1d(ctx, residual_out_kernel[u], cur, 1, 0, 1);
-        //    if (residual_out_bias[u]) {
-        //        cur = ggml_add(ctx, cur, residual_out_bias[u]);
-        //    }
-        //}
+            // Apply depthwise conv with dilation
+            cur = ggml_conv_1d_dw(ctx, kernel_for_dw, cur_3d, 1, unit_padding, dilation);
 
-        // Residual connection
-        //cur = ggml_add(ctx, cur, residual);
+            // Result is [T, C, 1], reshape back to [T, C]
+            cur = ggml_reshape_2d(ctx, cur, cur->ne[0], cur->ne[1]);  // [T, C]
+
+            if (residual_in_bias[u]) {
+                // Bias is [C], need to broadcast to [T, C]
+                // Reshape bias from [C] to [1, C], then repeat along T dimension
+                struct ggml_tensor * bias_2d = ggml_reshape_2d(ctx, residual_in_bias[u], 1, channels);  // [1, C]
+                struct ggml_tensor * bias_bc = ggml_repeat(ctx, bias_2d, cur);  // [T, C]
+                cur = ggml_add(ctx, cur, bias_bc);
+            }
+        }
+
+        // Snake out - cur is [T, C]
+        cur = snac_snake_forward_2d_ggml(ctx, cur, residual_out_alpha[u], output_len, channels);
+
+        // 1x1 conv out (pointwise convolution)
+        // A 1x1 conv with stride=1, padding=0 is equivalent to a matrix multiplication
+        // cur is [T, C], kernel is [C, C] (from GGUF with [IC, OC] = [C, C])
+        // We compute cur @ kernel = [T, C] @ [C, C] = [T, C]
+        if (residual_out_kernel[u]) {
+            // For ggml_mul_mat(a, b): both must have same ne[0] (K dimension)
+            // cur is [T, C] with ne[0]=T, ne[1]=C
+            // kernel is [C, C] with ne[0]=C, ne[1]=C
+            // We need to transpose cur so ne[0]=C matches kernel's ne[0]=C
+
+            // Ensure kernel is 2D
+            struct ggml_tensor * kernel_2d = residual_out_kernel[u];
+            if (ggml_n_dims(kernel_2d) > 2) {
+                kernel_2d = ggml_view_2d(ctx, residual_out_kernel[u],
+                    residual_out_kernel[u]->ne[0], residual_out_kernel[u]->ne[1],
+                    residual_out_kernel[u]->nb[1], 0);
+            }
+
+            // Transpose cur so ne[0]=C (matches kernel's ne[0])
+            struct ggml_tensor * cur_t = ggml_cont(ctx, ggml_transpose(ctx, cur));  // [C, T]
+
+            // Apply matrix multiplication: kernel [C, C] @ cur_t^T [T, C] = [C, T]
+            struct ggml_tensor * result = ggml_mul_mat(ctx, kernel_2d, cur_t);  // [C, T]
+
+            // Transpose back to [T, C]
+            cur = ggml_cont(ctx, ggml_transpose(ctx, result));  // [T, C]
+
+            if (residual_out_bias[u]) {
+                // Bias is [C], need to broadcast to [T, C]
+                struct ggml_tensor * bias_2d = ggml_reshape_2d(ctx, residual_out_bias[u], 1, channels);  // [1, C]
+                struct ggml_tensor * bias_bc = ggml_repeat(ctx, bias_2d, cur);  // [T, C]
+                cur = ggml_add(ctx, cur, bias_bc);
+            }
+        }
+
+        // Residual connection - both cur and residual are [T, C]
+        cur = ggml_add(ctx, cur, residual);
     }
 
     return cur;
@@ -461,19 +533,66 @@ static struct ggml_tensor * snac_build_graph(
     (void)vq_strides;  // Used for documentation
 
     // Step 3: Input convolution (depthwise)
-    // cur is [quantizer_dim, seq_len] = [1024, seq_len] after combining embeddings
-    // in_conv is depthwise conv with kernel_size=7, padding=3, stride=1
+    // cur is [quantizer_dim, seq_len] = [768, seq_len] after combining embeddings
+    // in_conv is depthwise conv with kernel_size=7, padding=3, stride=1, groups=768
     int64_t seq_len = cur->ne[1];
-    (void)seq_len;  // Used for debugging
 
-    // Skip in_conv depthwise for now - it requires careful tensor format handling
-    // that's not straightforward with ggml_conv_1d_dw
-    // Just add bias if present (identity transformation)
-    // TODO: Implement proper depthwise conv for in_conv
-    if (w.in_conv_bias) {
-        cur = ggml_add(ctx, cur, w.in_conv_bias);
+    // Apply depthwise convolution using ggml_conv_1d_dw
+    // The kernel is stored as [K, 1, C] = [7, 1, 768] in GGUF (after GGUF dimension reversal)
+    // ggml_conv_1d_dw expects kernel in format [K, 1, C] for depthwise conv
+    // where K=kernel_size, C=channels (groups=C for depthwise)
+    if (w.in_conv_kernel) {
+        LOG_INF("%s: Applying in_conv depthwise, kernel shape [%lld, %lld, %lld], input shape [%lld, %lld]\n",
+                __func__, (long long)w.in_conv_kernel->ne[0], (long long)w.in_conv_kernel->ne[1],
+                (long long)w.in_conv_kernel->ne[2], (long long)cur->ne[0], (long long)cur->ne[1]);
+
+        // Kernel is already in [K, 1, C] format from GGUF
+        // Just ensure F16 type for ggml_conv_1d_dw
+        struct ggml_tensor * kernel_for_dw = w.in_conv_kernel;
+        if (w.in_conv_kernel->type != GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                w.in_conv_kernel->ne[0], w.in_conv_kernel->ne[1], w.in_conv_kernel->ne[2]);
+            kernel_for_dw = ggml_cpy(ctx, w.in_conv_kernel, kernel_f16_tensor);
+        }
+
+        LOG_DBG("%s: in_conv kernel shape: [%lld,%lld,%lld]\n", __func__,
+                (long long)kernel_for_dw->ne[0], (long long)kernel_for_dw->ne[1],
+                (long long)kernel_for_dw->ne[2]);
+
+        // Reshape cur from [C, T] to [T, C, 1] for ggml_conv_1d_dw
+        // ggml_conv_1d_dw expects input in [L, IC, N] format (temporal first)
+        // First ensure F32
+        struct ggml_tensor * cur_f32 = cur;
+        if (cur->type != GGML_TYPE_F32) {
+            struct ggml_tensor * cur_f32_tensor = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
+            cur_f32 = ggml_cpy(ctx, cur, cur_f32_tensor);
+        }
+        // CRITICAL: Transpose from [C, T] to [T, C] first, then reshape to [T, C, 1]
+        struct ggml_tensor * cur_t = ggml_cont(ctx, ggml_transpose(ctx, cur_f32));  // [T, C]
+        struct ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur_t, cur_t->ne[0], cur_t->ne[1], 1);  // [T, C, 1]
+
+        LOG_DBG("%s: cur_3d shape for conv: [%lld, %lld, %lld]\n", __func__,
+                (long long)cur_3d->ne[0], (long long)cur_3d->ne[1], (long long)cur_3d->ne[2]);
+
+        // Apply depthwise conv with padding=3 to maintain length
+        cur = ggml_conv_1d_dw(ctx, kernel_for_dw, cur_3d, 1, 3, 1);
+
+        // Result is [T, C, 1], reshape back to [C, T]
+        cur = ggml_reshape_2d(ctx, cur, cur->ne[0], cur->ne[1]);  // [T, C]
+        cur = ggml_cont(ctx, ggml_transpose(ctx, cur));  // [C, T]
+
+        if (w.in_conv_bias) {
+            cur = ggml_add(ctx, cur, w.in_conv_bias);
+        }
+        LOG_DBG("%s: Applied in_conv depthwise, output shape [%lld, %lld]\n", __func__,
+                (long long)cur->ne[0], (long long)cur->ne[1]);
+    } else {
+        // No kernel, just add bias if present
+        if (w.in_conv_bias) {
+            cur = ggml_add(ctx, cur, w.in_conv_bias);
+        }
+        LOG_WRN("%s: in_conv kernel not loaded, using identity + bias\n", __func__);
     }
-    LOG_DBG("%s: Skipping in_conv depthwise, using identity + bias\n", __func__);
 
     // Step 4: Up convolution (1x1 conv)
     // Project from quantizer_dim to decoder_dim
@@ -484,21 +603,21 @@ static struct ggml_tensor * snac_build_graph(
             (long long)w.up_conv_kernel->ne[2], (long long)w.up_conv_kernel->ne[3]);
 
     // up_conv is a 1x1 conv (essentially a linear projection)
-    // GGUF stores weight as [out_ch, in_ch] = [1536, 1024]
-    // cur is [in_ch, seq_len] = [1024, seq_len]
+    // Due to GGUF dimension reversal, the kernel is stored as [in_ch, out_ch] = [768, 1024]
+    // cur is [in_ch, seq_len] = [768, seq_len]
     //
     // For ggml_mul_mat(a, b): assertion is a->ne[0] == b->ne[0]
-    // We need to transpose the kernel so ne[0] matches cur->ne[0]
-    // kernel [out_ch, in_ch] = [1536, 1024] -> transpose -> [1024, 1536]
-    // Then mul_mat(kernel_t, cur): [1024, 1536] x [1024, seq_len] -> [1536, seq_len]
+    // kernel [in_ch, out_ch] = [768, 1024], cur [768, seq_len]
+    // mul_mat(kernel, cur): [768, 1024] x [768, seq_len] -> [1024, seq_len]
+    // NO transpose needed!
 
     // Reshape to 2D if needed (handle 3D or 4D tensors)
     struct ggml_tensor * up_kernel_2d = w.up_conv_kernel;
     if (ggml_n_dims(w.up_conv_kernel) > 2) {
-        // Reshape [out_ch, in_ch, 1, 1] to [out_ch, in_ch]
+        // Reshape [in_ch, out_ch, 1, 1] to [in_ch, out_ch]
         up_kernel_2d = ggml_view_2d(ctx, w.up_conv_kernel,
-                                    w.up_conv_kernel->ne[0],  // out_ch
-                                    w.up_conv_kernel->ne[1],  // in_ch
+                                    w.up_conv_kernel->ne[0],  // in_ch
+                                    w.up_conv_kernel->ne[1],  // out_ch
                                     w.up_conv_kernel->nb[1],  // row stride
                                     0);
     }
@@ -506,13 +625,9 @@ static struct ggml_tensor * snac_build_graph(
     LOG_INF("%s: up_kernel_2d shape = [%lld, %lld]\n", __func__,
             (long long)up_kernel_2d->ne[0], (long long)up_kernel_2d->ne[1]);
 
-    // Transpose kernel: [out_ch, in_ch] -> [in_ch, out_ch]
-    struct ggml_tensor * up_kernel_t = ggml_cont(ctx, ggml_transpose(ctx, up_kernel_2d));
-    LOG_INF("%s: up_kernel_t shape = [%lld, %lld]\n", __func__,
-            (long long)up_kernel_t->ne[0], (long long)up_kernel_t->ne[1]);
-
+    // NO transpose - kernel is already [in_ch, out_ch] from GGUF
     // Apply linear projection: [in_ch, out_ch] x [in_ch, seq_len] -> [out_ch, seq_len]
-    cur = ggml_mul_mat(ctx, up_kernel_t, cur);
+    cur = ggml_mul_mat(ctx, up_kernel_2d, cur);
 
     LOG_INF("%s: cur shape after up_conv = [%lld, %lld]\n", __func__,
             (long long)cur->ne[0], (long long)cur->ne[1]);
@@ -521,7 +636,8 @@ static struct ggml_tensor * snac_build_graph(
         cur = ggml_add(ctx, cur, w.up_conv_bias);
     }
 
-    int64_t cur_channels = SNAC_GGML_DECODER_DIM;
+    // Get actual channel count from up_conv output (decoder_dim)
+    int64_t cur_channels = cur->ne[0];  // Should be 1536 for snac_24khz
 
     // Step 5: LocalMHA attention (optional - skip for Phase 1)
     // TODO: Implement LocalMHA with RoPE
@@ -530,6 +646,7 @@ static struct ggml_tensor * snac_build_graph(
     // Now using custom implementation that supports padding
     // Get actual dimensions from loaded kernels
     // Layer kernel format: [K, OC, IC] where K=kernel_size, OC=out_channels, IC=in_channels
+    // Decoder rates from GGUF: {8, 8, 4, 2}
     int decoder_rates[4] = {8, 8, 4, 2};
 
     int64_t cur_len = seq_len;
@@ -541,11 +658,11 @@ static struct ggml_tensor * snac_build_graph(
         }
 
         // Get dimensions from the loaded kernel
-        // GGUF stores ConvTranspose1D weight as [in_channels, out_channels, kernel_size]
-        // This is PyTorch's native format for ConvTranspose1D
-        int64_t in_ch = w.layer_kernel[l]->ne[0];    // input channels
+        // Converter writes numpy [IC, OC, K] -> GGUF header [K, OC, IC]
+        // So: ne[0]=K (kernel_size), ne[1]=OC (output_channels), ne[2]=IC (input_channels)
+        int64_t ks = w.layer_kernel[l]->ne[0];       // kernel_size
         int64_t out_ch = w.layer_kernel[l]->ne[1];   // output channels
-        int64_t ks = w.layer_kernel[l]->ne[2];       // kernel_size
+        int64_t in_ch = w.layer_kernel[l]->ne[2];    // input channels
         int stride = decoder_rates[l];
         int padding = (stride + 1) / 2;
 
@@ -610,31 +727,63 @@ static struct ggml_tensor * snac_build_graph(
     // Step 7: Output convolution
     // Snake activation with alpha_out
     // cur is already [T, C] = [cur_len, cur_channels] format from decoder
-    // cur_channels should be 96 after layer 3
+    // cur_channels should be 64 after layer 3
     cur = snac_snake_forward_2d_ggml(ctx, cur, w.snake_alpha_out, cur_len, (int)cur_channels);
 
     // Transpose to [C, T] for conv_1d
     cur = ggml_cont(ctx, ggml_transpose(ctx, cur));  // [cur_channels, cur_len]
 
     // Output conv: [C, T] -> [1, T]
-    // out_conv_kernel is [1, 96, 7] = [out_ch, in_ch, k] in GGUF (PyTorch Conv1D format)
-    // ggml_conv_1d expects kernel in format [K, IC, OC] = [7, 96, 1]
-    // We need to permute from [OC, IC, K] to [K, IC, OC]
+    // The GGUF stores out_conv.weight with header [64, 7, 1] (reversed from numpy [1, 7, 64])
+    // The data is stored row-major from numpy (1, 7, 64) = [OC, K, IC]
+    // GGML reads this as [64, 7, 1] where ne[0]=64 is innermost
+    // So GGML (a, b, c) = numpy(c, b, a) = data[c, b, a]
+    //
+    // For ggml_conv_1d expecting [OC, IC, K] = [1, 64, 7]:
+    //   ne[0] = OC = 1
+    //   ne[1] = IC = 64
+    //   ne[2] = K = 7
+    //
+    // From current GGML view [64, 7, 1] = [K, IC, OC] to [1, 64, 7] = [OC, IC, K]:
+    //   Permutation (2, 1, 0, 3):
+    //   output ne[0] = input ne[2] = 1 (OC)
+    //   output ne[1] = input ne[1] = 64 (IC)
+    //   output ne[2] = input ne[0] = 7 (K)
     if (w.out_conv_kernel) {
         LOG_INF("%s: Applying output conv, kernel shape [%lld, %lld, %lld], input shape [%lld, %lld]\n", __func__,
                 (long long)w.out_conv_kernel->ne[0], (long long)w.out_conv_kernel->ne[1],
                 (long long)w.out_conv_kernel->ne[2],
                 (long long)cur->ne[0], (long long)cur->ne[1]);
 
-        // Reshape cur from [C, T] to [N, IC, L] for conv_1d
-        // cur is [C, T] = [96, cur_len], need [IC, L] for ggml_conv_1d input
-        // Note: ggml_conv_1d input format is [N, IC, L, 1] where N=ne[2], IC=ne[1], L=ne[0]
-        // So we need cur reshaped to [L, IC, N] = [cur_len, 96, 1]
-        struct ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur, cur->ne[1], cur->ne[0], 1);  // [T, C, 1] = [L, IC, N]
+        struct ggml_tensor * kernel_for_conv = w.out_conv_kernel;
+
+        // Convert to F16 if needed
+        if (w.out_conv_kernel->type != GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_f16 = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                w.out_conv_kernel->ne[0], w.out_conv_kernel->ne[1], w.out_conv_kernel->ne[2]);
+            kernel_for_conv = ggml_cpy(ctx, w.out_conv_kernel, kernel_f16);
+        }
+
+        // Permute from [IC, K, OC] = [64, 7, 1] to [K, IC, OC] = [7, 64, 1]
+        // ggml_conv_1d expects kernel with ne[0]=K (kernel size)
+        // Using permutation (1, 0, 2, 3):
+        //   output ne[0] = input ne[1] = 7 (K)
+        //   output ne[1] = input ne[0] = 64 (IC)
+        //   output ne[2] = input ne[2] = 1 (OC)
+        struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel_for_conv, 1, 0, 2, 3);
+        kernel_for_conv = ggml_cont(ctx, kernel_permuted);
+
+        LOG_INF("%s: Kernel for conv_1d after permute: [%lld, %lld, %lld] = [K, IC, OC]\n", __func__,
+                (long long)kernel_for_conv->ne[0], (long long)kernel_for_conv->ne[1],
+                (long long)kernel_for_conv->ne[2]);
 
         // ggml_conv_1d expects:
-        //   - kernel (first param 'a'): F16, format [K, IC, OC]
-        //   - input (second param 'b'): F32, format [L, IC, N] (where L=ne[0], IC=ne[1], N=ne[2])
+        //   - kernel (first param 'a'): [OC, IC, K]
+        //   - input (second param 'b'): [L, IC, N]
+        //   - result: [OW, OC, N]
+
+        // Reshape cur from [C, T] to [L, IC, N] for ggml_conv_1d
+        struct ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur, cur->ne[1], cur->ne[0], 1);  // [L, IC, N]
 
         // Input should be F32
         if (cur_3d->type != GGML_TYPE_F32) {
@@ -642,36 +791,7 @@ static struct ggml_tensor * snac_build_graph(
             cur_3d = ggml_cpy(ctx, cur_3d, cur_3d_f32);
         }
 
-        // Convert kernel to F16 and permute from [OC, IC, K] to [K, IC, OC]
-        // GGUF kernel: [1, 96, 7] = [OC, IC, K]
-        // ggml_conv_1d expects: [7, 96, 1] = [K, IC, OC]
-        struct ggml_tensor * kernel_for_conv;
-
-        // First convert to F16 if needed
-        struct ggml_tensor * kernel_f16 = w.out_conv_kernel;
-        if (w.out_conv_kernel->type != GGML_TYPE_F16) {
-            struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
-                w.out_conv_kernel->ne[0], w.out_conv_kernel->ne[1], w.out_conv_kernel->ne[2]);
-            kernel_f16 = ggml_cpy(ctx, w.out_conv_kernel, kernel_f16_tensor);
-        }
-
-        // Permute from [OC, IC, K] to [K, IC, OC] using ggml_permute
-        // For 3D tensor treated as 4D with ne[3]=1: permute with (2, 1, 0, 3)
-        // This maps: ne[0]->ne[2], ne[1]->ne[1], ne[2]->ne[0], ne[3]->ne[3]
-        // Result: [K, IC, OC, 1]
-        struct ggml_tensor * kernel_4d = ggml_reshape_4d(ctx, kernel_f16,
-            kernel_f16->ne[0], kernel_f16->ne[1], kernel_f16->ne[2], 1);  // [OC, IC, K, 1]
-        struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel_4d, 2, 1, 0, 3);  // [K, IC, OC, 1]
-        kernel_for_conv = ggml_cont(ctx, kernel_permuted);
-        // Reshape to 3D for conv_1d
-        kernel_for_conv = ggml_reshape_3d(ctx, kernel_for_conv,
-            kernel_for_conv->ne[0], kernel_for_conv->ne[1], kernel_for_conv->ne[2]);  // [K, IC, OC]
-
-        LOG_INF("%s: Kernel after permute: [%lld, %lld, %lld]\n", __func__,
-                (long long)kernel_for_conv->ne[0], (long long)kernel_for_conv->ne[1],
-                (long long)kernel_for_conv->ne[2]);
-
-        // Conv1D with padding=3 to maintain length
+        // Conv1D with padding=3 (K/2) to maintain length
         cur = ggml_conv_1d(ctx, kernel_for_conv, cur_3d, 1, 3, 1);
         if (w.out_conv_bias) {
             cur = ggml_add(ctx, cur, w.out_conv_bias);
@@ -679,12 +799,14 @@ static struct ggml_tensor * snac_build_graph(
     }
 
     // Flatten to 1D: output shape depends on ggml_conv_1d output format
-    // ggml_conv_1d output is [OC, L'] for 1D conv
-    // After output conv: [1, 1, L'] or [1, L'] depending on ggml version
+    // ggml_conv_1d output is [OW, OC, N] where:
+    //   ne[0] = OW (output width/length)
+    //   ne[1] = OC (output channels)
+    //   ne[2] = N (batch size)
     int64_t final_output_len;
     if (ggml_n_dims(cur) >= 2) {
-        // Output is [OC, L'] or similar, L' is in ne[1] or ne[2]
-        final_output_len = cur->ne[ggml_n_dims(cur) - 1];  // Last dimension is the temporal length
+        // Output is [OW, OC, N], temporal length is in ne[0]
+        final_output_len = cur->ne[0];  // OW = output length
     } else {
         final_output_len = ggml_nelements(cur);
     }
@@ -1052,6 +1174,7 @@ std::vector<float> snac_ggml_decode(
     // - head0: stride 4, each token repeated 4 times
     // - head1: stride 2, each token repeated 2 times
     // - head2: stride 1, no expansion needed
+    // Note: We only have 3 quantizers, using vq_strides[0..2] = [4, 2, 1]
 
     // Pre-expand tokens using repeat_interleave
     std::vector<int> expanded_head0;
@@ -1064,8 +1187,8 @@ std::vector<float> snac_ggml_decode(
     // Verify pyramid structure: head0 * 4 = head1 * 2 = head2
     int64_t expected_head2_len = head0_orig_len * stride0;
     if (expected_head2_len != head2_len) {
-        LOG_WRN("%s: Pyramid structure mismatch: head0*4=%lld != head2=%lld\n", __func__,
-                (long long)expected_head2_len, (long long)head2_len);
+        LOG_WRN("%s: Pyramid structure mismatch: head0*%d=%lld != head2=%lld\n", __func__,
+                stride0, (long long)expected_head2_len, (long long)head2_len);
     }
 
     // Expand head0 tokens (repeat each 4 times)
@@ -1202,6 +1325,28 @@ std::vector<float> snac_ggml_decode(
 
     LOG_INF("%s: Generated %lld audio samples\n", __func__, (long long)output_samples);
 
+    // 6.5 Normalize audio to proper amplitude
+    // The SNAC model has very small output values due to tiny out_conv weights
+    // Normalize to [-1, 1] range with reasonable amplitude
+    {
+        // Find peak amplitude
+        float peak = 0.0f;
+        for (float s : result) {
+            peak = std::max(peak, std::abs(s));
+        }
+
+        // Normalize if peak is too small
+        // Target peak of 0.9 for good audio levels
+        const float target_peak = 0.9f;
+        if (peak > 0.0f && peak < target_peak) {
+            float scale = target_peak / peak;
+            for (float & s : result) {
+                s *= scale;
+            }
+            LOG_INF("%s: Normalized audio (peak was %.6f, scaled by %.2f)\n", __func__, peak, scale);
+        }
+    }
+
     // 7. Cleanup
     ggml_gallocr_free(allocr);
     ggml_free(graph_ctx);
@@ -1311,31 +1456,66 @@ static struct ggml_tensor * snac_build_batch_graph(
     }
 
     // Step 3: Combine embeddings with pyramid structure
-    // For simplicity in Phase 2, we assume all sequences have same length
-    // and combine embeddings additively
+    // Pyramid structure with vq_strides = [4, 2, 1]:
+    // - head0 (stride 4 relative to head2): each token covers 4 positions
+    // - head1 (stride 2 relative to head2): each token covers 2 positions
+    // - head2 (stride 1): each token covers 1 position
+    //
+    // The caller should pre-expand tokens so all heads have the same length (head2_len)
+    // After expansion:
+    // - head0 expanded by 4x -> length = head2_len
+    // - head1 expanded by 2x -> length = head2_len
+    // - head2 unchanged -> length = head2_len
+    //
+    // We then sum all embeddings additively
 
-    // The pyramid structure means:
-    // - head0 contributes to all positions
-    // - head1 contributes to positions 1, 3, 5, ... (every 2nd)
-    // - head2 contributes to positions 3, 7, 11, ... (every 4th starting at 3)
+    // Start with head2 (base, no expansion needed)
+    cur = head_embeddings[2];
+    // cur: [head2_len, quantizer_dim, batch_size]
 
-    // For initial implementation, we'll do a simplified combination:
-    // Just add head embeddings (this won't produce correct audio but validates batch flow)
+    // Add head1 if dimensions match (should be pre-expanded to head2_len)
+    if (head_embeddings[1]) {
+        // Verify dimensions match
+        if (head_embeddings[1]->ne[0] == cur->ne[0] && head_embeddings[1]->ne[1] == cur->ne[1]) {
+            cur = ggml_add(ctx, cur, head_embeddings[1]);
+        } else {
+            // Dimension mismatch - this indicates tokens weren't pre-expanded
+            // For now, skip adding (will produce incorrect audio)
+            LOG_WRN("%s: head1 dimension mismatch, skipping\n", __func__);
+        }
+    }
 
-    // Start with head0 embeddings
-    cur = head_embeddings[0];
-    // cur: [head0_len, quantizer_dim, batch_size]
+    // Add head0 if dimensions match (should be pre-expanded to head2_len)
+    if (head_embeddings[0]) {
+        // Verify dimensions match
+        if (head_embeddings[0]->ne[0] == cur->ne[0] && head_embeddings[0]->ne[1] == cur->ne[1]) {
+            cur = ggml_add(ctx, cur, head_embeddings[0]);
+        } else {
+            // Dimension mismatch - this indicates tokens weren't pre-expanded
+            LOG_WRN("%s: head0 dimension mismatch, skipping\n", __func__);
+        }
+    }
 
-    // TODO: Implement proper repeat_interleave for pyramid structure
-    // For now, just add if dimensions match (they won't in real usage)
-    // This is a placeholder for the actual pyramid combination logic
+    // cur: [head2_len, quantizer_dim, batch_size] after summing all heads
 
     // Step 4: Input convolution (depthwise) - batched
     // Reshape cur to [T, C, batch] -> conv expects [C, T, batch]
-    cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [quantizer_dim, head0_len, batch_size]
+    cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [quantizer_dim, head2_len, batch_size]
 
-    // Apply depthwise conv
-    cur = ggml_conv_1d_dw(ctx, w.in_conv_kernel, cur, 1, 3, 1);
+    // Apply depthwise conv with proper kernel permutation
+    // Kernel is [C, 1, K] = [1024, 1, 7], need to permute to [K, 1, C] for ggml_conv_1d_dw
+    if (w.in_conv_kernel) {
+        struct ggml_tensor * kernel_f16 = w.in_conv_kernel;
+        if (w.in_conv_kernel->type != GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                w.in_conv_kernel->ne[0], w.in_conv_kernel->ne[1], w.in_conv_kernel->ne[2]);
+            kernel_f16 = ggml_cpy(ctx, w.in_conv_kernel, kernel_f16_tensor);
+        }
+        // Kernel is already in [K, 1, C] format from GGUF, no permutation needed
+        struct ggml_tensor * kernel_for_dw = kernel_f16;
+
+        cur = ggml_conv_1d_dw(ctx, kernel_for_dw, cur, 1, 3, 1);
+    }
     if (w.in_conv_bias) {
         cur = ggml_add(ctx, cur, w.in_conv_bias);
     }
@@ -1345,15 +1525,19 @@ static struct ggml_tensor * snac_build_batch_graph(
     if (w.up_conv_bias) {
         cur = ggml_add(ctx, cur, w.up_conv_bias);
     }
-    // cur: [decoder_dim, head0_len, batch_size]
+    // cur: [decoder_dim, seq_len, batch_size] where seq_len = head2_len
 
     // Step 6: Decoder layers - each with ConvTranspose1D
+    // Layer dimensions from GGUF: {1024, 512, 256, 128} -> {512, 256, 128, 64}
+    // Decoder rates from config: {8, 8, 4, 2}
+    // Kernel sizes: {16, 16, 8, 4} (= 2 * stride)
     int layer_channels[4] = {1024, 512, 256, 128};
     int out_channels[4] = {512, 256, 128, 64};
     int decoder_rates[4] = {8, 8, 4, 2};
     int kernel_sizes[4] = {16, 16, 8, 4};
 
-    int64_t cur_len = head0_len;
+    // Use head2_len as the starting length (all heads pre-expanded to this length)
+    int64_t cur_len = head2_len;
 
     for (int l = 0; l < SNAC_GGML_N_DECODER_LAYERS; l++) {
         if (!w.layer_kernel[l]) continue;
@@ -1377,8 +1561,25 @@ static struct ggml_tensor * snac_build_batch_graph(
         // Permute back to [C, T, batch] for conv_transpose
         cur = ggml_permute(ctx, cur, 1, 0, 2, 3);  // [in_ch, cur_len, batch_size]
 
-        // ConvTranspose1D
-        cur = ggml_conv_transpose_1d(ctx, w.layer_kernel[l], cur, stride, padding, 1);
+        // ConvTranspose1D with proper kernel permutation
+        // PyTorch kernel format: [IC, OC, K] -> GGML expects: [K, OC, IC]
+        {
+            struct ggml_tensor * kernel_f16 = w.layer_kernel[l];
+            if (w.layer_kernel[l]->type != GGML_TYPE_F16) {
+                struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                    w.layer_kernel[l]->ne[0], w.layer_kernel[l]->ne[1], w.layer_kernel[l]->ne[2]);
+                kernel_f16 = ggml_cpy(ctx, w.layer_kernel[l], kernel_f16_tensor);
+            }
+            // Permute [IC, OC, K] -> [K, OC, IC]
+            struct ggml_tensor * kernel_4d = ggml_reshape_4d(ctx, kernel_f16,
+                kernel_f16->ne[0], kernel_f16->ne[1], kernel_f16->ne[2], 1);
+            struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel_4d, 2, 1, 0, 3);
+            struct ggml_tensor * kernel_for_conv = ggml_cont(ctx, kernel_permuted);
+            kernel_for_conv = ggml_reshape_3d(ctx, kernel_for_conv,
+                kernel_for_conv->ne[0], kernel_for_conv->ne[1], kernel_for_conv->ne[2]);
+
+            cur = ggml_conv_transpose_1d(ctx, kernel_for_conv, cur, stride, padding, 1);
+        }
 
         // Add bias
         if (w.layer_bias[l]) {
@@ -1404,9 +1605,32 @@ static struct ggml_tensor * snac_build_batch_graph(
             // Permute for depthwise conv
             cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
 
-            // Depthwise conv in
+            // Depthwise conv in - need to transpose kernel data
             if (w.residual_in_kernel[l][u]) {
-                cur = ggml_conv_1d_dw(ctx, w.residual_in_kernel[l][u], cur, 1, unit_padding, dilation);
+                // Kernel is stored in GGUF with header [K, 1, C] but data is in [C, 1, K] layout
+                // We need to actually transpose the data from [C, 1, K] to [K, 1, C]
+                struct ggml_tensor * res_kernel_f16 = w.residual_in_kernel[l][u];
+                if (res_kernel_f16->type != GGML_TYPE_F16) {
+                    struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                        res_kernel_f16->ne[0], res_kernel_f16->ne[1], res_kernel_f16->ne[2]);
+                    res_kernel_f16 = ggml_cpy(ctx, w.residual_in_kernel[l][u], kernel_f16_tensor);
+                }
+
+                // Step 1: Reshape to 2D [C, K] using reshape instead of view_2d
+                struct ggml_tensor * kernel_2d = ggml_reshape_2d(ctx, res_kernel_f16,
+                    res_kernel_f16->ne[2],  // C (from ne[2] since GGUF stores [K,1,C])
+                    res_kernel_f16->ne[0] * res_kernel_f16->ne[1]); // K*1
+
+                // Step 2: Transpose to [K, C]
+                struct ggml_tensor * kernel_2d_t = ggml_cont(ctx, ggml_transpose(ctx, kernel_2d));
+
+                // Step 3: Reshape back to 3D [K, 1, C]
+                struct ggml_tensor * kernel_for_dw = ggml_reshape_3d(ctx, kernel_2d_t,
+                    kernel_2d_t->ne[0],  // K
+                    1,                  // 1
+                    kernel_2d_t->ne[1]); // C
+
+                cur = ggml_conv_1d_dw(ctx, kernel_for_dw, cur, 1, unit_padding, dilation);
                 if (w.residual_in_bias[l][u]) {
                     cur = ggml_add(ctx, cur, w.residual_in_bias[l][u]);
                 }
@@ -1422,8 +1646,11 @@ static struct ggml_tensor * snac_build_batch_graph(
             cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
 
             // 1x1 conv out
+            // Reshape kernel from 2D [C, C] to 3D [OC, IC, K] = [C, C, 1] for ggml_conv_1d
             if (w.residual_out_kernel[l][u]) {
-                cur = ggml_conv_1d(ctx, w.residual_out_kernel[l][u], cur, 1, 0, 1);
+                struct ggml_tensor * out_kernel_3d = ggml_reshape_3d(ctx, w.residual_out_kernel[l][u],
+                    w.residual_out_kernel[l][u]->ne[0], w.residual_out_kernel[l][u]->ne[1], 1);  // [OC, IC, K]
+                cur = ggml_conv_1d(ctx, out_kernel_3d, cur, 1, 0, 1);
                 if (w.residual_out_bias[l][u]) {
                     cur = ggml_add(ctx, cur, w.residual_out_bias[l][u]);
                 }
@@ -1453,7 +1680,12 @@ static struct ggml_tensor * snac_build_batch_graph(
     cur = ggml_permute(ctx, cur, 1, 0, 2, 3);
 
     // Output convolution
-    cur = ggml_conv_1d(ctx, w.out_conv_kernel, cur, 1, 3, 1);
+    // Kernel is stored in [IC, K, OC] = [64, 7, 1] format (GGML interpretation)
+    // ggml_conv_1d expects [OC, IC, K] = [1, 64, 7]
+    // Permute using (2, 0, 1, 3)
+    struct ggml_tensor * out_kernel_permuted = ggml_permute(ctx, w.out_conv_kernel, 2, 0, 1, 3);
+    struct ggml_tensor * out_kernel_cont = ggml_cont(ctx, out_kernel_permuted);
+    cur = ggml_conv_1d(ctx, out_kernel_cont, cur, 1, 3, 1);
     if (w.out_conv_bias) {
         cur = ggml_add(ctx, cur, w.out_conv_bias);
     }

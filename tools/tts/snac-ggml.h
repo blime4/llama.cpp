@@ -18,8 +18,8 @@ static const int SNAC_GGML_FRAME_SIZE = 7;
 static const int SNAC_GGML_SAMPLE_RATE = 24000;
 static const int SNAC_GGML_UPSAMPLE_FACTOR = 512;
 static const int SNAC_GGML_CODEBOOK_SIZE = 4096;
-static const int SNAC_GGML_DECODER_DIM = 1536;  // Internal decoder dimension after up_conv
-static const int SNAC_GGML_QUANTIZER_DIM = 1024;  // Quantizer output dimension
+static const int SNAC_GGML_DECODER_DIM = 1024;     // Decoder dimension (from config.json decoder_dim)
+static const int SNAC_GGML_QUANTIZER_DIM = 768;     // Quantizer output dimension (latent_dim = encoder_dim * 16 = 48 * 16)
 static const int SNAC_GGML_CODEBOOK_DIM = 8;
 static const int SNAC_GGML_N_QUANTIZERS = 3;
 static const int SNAC_GGML_N_DECODER_LAYERS = 4;
@@ -27,10 +27,10 @@ static const int SNAC_GGML_N_DECODER_LAYERS = 4;
 // SNAC ggml weights structure - holds all model weights as ggml tensors
 struct snac_ggml_weights {
     // Input convolutions
-    struct ggml_tensor * in_conv_kernel;   // [768, 7] depthwise conv
-    struct ggml_tensor * in_conv_bias;     // [768]
-    struct ggml_tensor * up_conv_kernel;   // [1024, 768] 1x1 conv
-    struct ggml_tensor * up_conv_bias;     // [1024]
+    struct ggml_tensor * in_conv_kernel;   // [1024, 7] depthwise conv (QUANTIZER_DIM, kernel_size)
+    struct ggml_tensor * in_conv_bias;     // [1024]
+    struct ggml_tensor * up_conv_kernel;   // [1536, 1024] 1x1 conv (first_decoder_ch, QUANTIZER_DIM)
+    struct ggml_tensor * up_conv_bias;     // [1536]
 
     // Attention layer (optional)
     struct ggml_tensor * attn_norm_weight; // [1024]
@@ -60,8 +60,8 @@ struct snac_ggml_weights {
 
     // Quantizers (3 quantizers for TTS)
     struct ggml_tensor * quant_codebook[3];       // [4096, 8]
-    struct ggml_tensor * quant_out_proj[3];       // [768, 8]
-    struct ggml_tensor * quant_out_bias[3];       // [768]
+    struct ggml_tensor * quant_out_proj[3];       // [8, 1024] - projects from codebook_dim to quantizer_dim
+    struct ggml_tensor * quant_out_bias[3];       // [1024]
 
     snac_ggml_weights() {
         memset(this, 0, sizeof(*this));
@@ -76,8 +76,8 @@ struct snac_ggml_context {
     struct snac_ggml_weights weights;
 
     int n_quantizers = SNAC_GGML_N_QUANTIZERS;
-    int decoder_rates[4] = {8, 8, 4, 2};
-    int vq_strides[4] = {4, 2, 1, 1};
+    int decoder_rates[4] = {8, 8, 4, 2};  // From GGUF metadata: decoder_rate_0..3
+    int vq_strides[4] = {4, 2, 1, 1};     // From GGUF metadata: vq_stride_0..3 (snac_24khz has [4, 2, 1])
 
     bool loaded = false;
 };
