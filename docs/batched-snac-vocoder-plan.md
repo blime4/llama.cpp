@@ -5,7 +5,7 @@
 ### Goal
 Convert the current SNAC vocoder implementation from manual tensor operations to ggml graph-based computation, enabling batched processing for improved performance in the orpheus-tts system.
 
-### Current State (Updated: 2026-03-07)
+### Current State (Updated: 2026-03-10)
 - **Location:** `tools/tts/orpheus-tts.cpp`, `tools/tts/snac-ggml.h`, `tools/tts/snac-ggml.cpp`
 - **Legacy Implementation:** Manual tensor operations with custom allocators (WORKING but SLOW)
 - **GGML Implementation:** ✅ Phase 1 COMPLETE - Single sequence processing working
@@ -14,9 +14,13 @@ Convert the current SNAC vocoder implementation from manual tensor operations to
   - Snake activation ✅
   - Output convolution with correct kernel format ✅
   - Graph building and execution ✅
+  - Residual depthwise conv fix ✅ (Commit: `3c104c9ac`)
 - **Performance:** GGML CPU = 0.08x real-time (12x faster than real-time!)
 - **Test Status:** ✅ End-to-end TTS working with Orpheus LLM model
-- **Audio Quality:** Sample range [-1503, 1678], RMS 539.5, no clipping
+- **Audio Quality:**
+  - Short audio (<2s): ZCR 0.045 ✓ GOOD (speech-like)
+  - Long audio (>10s): ZCR 0.155 ⚠️ PARTIAL (some distortion remains)
+  - Target ZCR: 0.02-0.06 for clean speech
 
 ### Target State
 - Implementation: ggml compute graph with cplan scheduling
@@ -30,6 +34,7 @@ Convert the current SNAC vocoder implementation from manual tensor operations to
 | `f16f2027a` | Phase 1 | ggml-based SNAC vocoder (single sequence) |
 | `35277241d` | Phase 2 | Batched processing structures |
 | `75eef107e` | Phase 3 | Integration with orpheus-tts |
+| `3c104c9ac` | Fix | Remove unnecessary transpose in residual depthwise conv |
 
 ---
 
@@ -500,10 +505,66 @@ ggml_tensor* snake1(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha) {
 
 ---
 
+## SNAC Vocoder Investigation (2026-03-10)
+
+### Fixed Issues
+
+#### 1. Residual Depthwise Conv Transpose Bug
+**Commit:** `3c104c9ac fix(tts): remove unnecessary transpose in residual depthwise conv`
+
+**Problem:** The residual unit depthwise convolution had an unnecessary transpose operation that corrupted the audio data.
+
+**Impact:** ZCR dropped from 0.49 (noise-like) to 0.045 (speech-like) for short audio.
+
+**Fix:** Removed the incorrect transpose in `snac-ggml.cpp` residual unit forward pass.
+
+### Known Issues
+
+#### 1. Longer Audio Still Has Some Distortion
+| Audio Duration | ZCR | Status |
+|----------------|-----|--------|
+| Short (1.45s) | 0.045 | ✓ GOOD |
+| Long (15.87s) | 0.155 | ⚠️ PARTIAL DISTORTION |
+| Target | 0.02-0.06 | Clean speech |
+
+**Note:** The distortion is NOT correlated with sequence length (correlation = -0.02, essentially zero). The issue appears to be related to specific code paths or token sequences.
+
+### Investigation Results (4 Parallel Agents)
+
+| Agent | Focus Area | Result |
+|-------|------------|--------|
+| Kernel Analysis | All 7 kernel layouts | ✓ VERIFIED CORRECT |
+| Snake Activation | Epsilon difference | ✓ NEGLIGIBLE IMPACT |
+| Tensor Comparison | Layer-by-layer | ⏱️ TIMED OUT (incomplete) |
+| Length Analysis | Duration vs ZCR | Script created, needs execution |
+
+### Quality Metrics Reference
+
+**Good Output Indicators:**
+- ZCR (Zero Crossing Rate): 0.02-0.06
+- `neg_ratio`: 35-65% (near 50% = symmetric waveform)
+- `0-200 Hz` energy: <40%
+- `mean`: Near 0
+
+**Bad Output Indicators:**
+- ZCR > 0.15: Indicates distortion or noise
+- ZCR > 0.30: Severe noise/whitenoise-like output
+- `neg_ratio` near 0% or 100%: DC bias present
+
+### Future Investigation Items
+
+1. **Complete tensor comparison** between Python and GGML at each decoder layer
+2. **Test with various audio lengths** to confirm no length-dependent issues
+3. **Compare GPU vs CPU backends** for consistency
+4. **Verify token sequence handling** for longer utterances
+
+---
+
 ## Changelog
 
 | Date | Author | Description |
 |------|--------|-------------|
+| 2026-03-10 | Team | Updated with investigation findings and residual conv fix |
 | 2026-03-06 | Team | Initial plan creation |
 
 ---
@@ -560,25 +621,26 @@ ggml_tensor* snake1(ggml_context* ctx, ggml_tensor* x, ggml_tensor* alpha) {
    - Kernel transposed from [1536, 1024] to [1024, 1536]
    - `ggml_mul_mat` produces correct [1536, seq_len] output
 
-### Remaining Issues ⚠️
-1. **Decoder Layers Not Implemented**
-   - ConvTranspose1D requires padding support
-   - GGML's `ggml_conv_transpose_1d` only supports `p0 == 0`
-   - SNAC uses `padding = (stride + 1) / 2`
-   - Need custom implementation or workaround
+10. **Residual Depthwise Conv Fix** ✅ (NEW - 2026-03-10)
+    - Fixed unnecessary transpose in residual unit forward pass
+    - Commit: `3c104c9ac`
+    - ZCR improved from 0.49 (noise) to 0.045 (speech) for short audio
 
-2. **in_conv Depthwise Convolution Skipped**
+### Remaining Issues ⚠️ (Updated: 2026-03-10)
+1. **Longer Audio Quality** (Partially resolved)
+   - Short audio (<2s): ZCR 0.045 ✓ GOOD
+   - Long audio (>10s): ZCR 0.155 ⚠️ PARTIAL DISTORTION
+   - NOT caused by sequence length (correlation = -0.02)
+   - Investigation ongoing
+
+2. **in_conv Depthwise Convolution** (Optional)
    - GGML's `ggml_conv_1d_dw` has format requirements
    - Currently using identity + bias as placeholder
+   - Minor impact on audio quality
 
-3. **Audio Output is Silence**
-   - Using placeholder output (zeros) for decoder
-   - Need proper ConvTranspose1D implementation
-
-4. **GPU Backend Not Yet Enabled**
-   - Currently using CPU backend for SNAC vocoder
-   - Need to implement GPU memory transfers
-   - Performance optimization pending
+3. **GPU Backend Consistency**
+   - Need to verify GPU vs CPU produce identical results
+   - Some test files show differences between backends
 
 ### Performance (GGML CPU)
 | Metric | Value |

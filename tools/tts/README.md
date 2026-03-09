@@ -264,11 +264,35 @@ Frequency distribution: 0-200Hz: 12.3%, 200-500Hz: 45.6%, 500-1000Hz: 28.9%
 - `neg_ratio` should be 35-65% (values near 50% indicate symmetric waveform)
 - `0-200 Hz` energy should be <40% (higher values indicate DC bias or noise)
 - `mean` should be near 0 (values > 0.3 indicate DC bias)
+- **ZCR (Zero Crossing Rate)** should be 0.02-0.06 for clean speech
+
+**Quality Metrics Reference:**
+
+| Metric | Good Range | Warning | Problem |
+|--------|------------|---------|---------|
+| ZCR | 0.02-0.06 | 0.06-0.15 | > 0.15 |
+| neg_ratio | 35-65% | 25-75% | < 25% or > 75% |
+| mean | | 0.01-0.1 | > 0.1 |
+| 0-200Hz | < 40% | 40-60% | > 60% |
 
 **Troubleshooting:**
 - If audio is muffled or has buzzing artifacts, check that both models are correctly converted
 - If output is all positive (DC bias), vocoder weights may be corrupted
 - If audio degrades after initial speech, ensure repetition penalty is applied
+- **If ZCR > 0.15:** Check residual unit convolutions for incorrect transposes
+
+### Known Issues (Updated: 2026-03-10)
+
+#### 1. Longer Audio Quality
+- **Status:** Partially fixed
+- **Details:** Audio longer than ~10 seconds may have elevated ZCR (>0.10)
+- **Impact:** Some distortion in longer utterances
+- **Workaround:** Break long text into shorter segments
+
+#### 2. Fixed: Residual Depthwise Conv Bug
+- **Commit:** `3c104c9ac fix(tts): remove unnecessary transpose in residual depthwise conv`
+- **Impact:** Fixed ZCR from 0.49 (noise) to 0.045 (speech) for short audio
+- **Files:** `tools/tts/snac-ggml.cpp`, `tools/tts/snac-ggml.h`
 
 ### Complete Example
 
