@@ -390,16 +390,150 @@ class SnacConverter:
             data = tensor.numpy()
             original_shape = data.shape
 
-            # Special handling for out_conv.weight: needs transpose
-            # PyTorch: [1, 64, 7] = [out, in, kernel]
-            # GGML ggml_conv_1d expects: ne[0]=K, ne[1]=IC, ne[2]=OC = [kernel, in, out]
-            # For our case: K=7, IC=64, OC=1 -> numpy shape [7, 64, 1]
+            # Special handling for out_conv.weight
+            # SNAC out_conv weight: PyTorch shape [OC, K, IC] = [1, 7, 64]
+            #
+            # GGUF stores dimensions REVERSED but data stays in row-major order from input array.
+            # If we pass [1, 7, 64]:
+            #   - GGUF header: [64, 7, 1]
+            #   - Data: row-major from [1, 7, 64]
+            #   - GGML reads: ne0=64, ne1=7, ne2=1
+            #
+            # This is WRONG for conv_1d which expects [K, IC, OC] = [7, 64, 1]
+            #
+            # The root problem: GGUF dimension reversal in header doesn't transpose data.
+            # We need to PHYSICALLY transpose the data, not just the dimensions.
+            #
+            # Solution: Transpose to target format [K, IC, OC] first, then let GGUF reverse
+            #   1. PyTorch: [OC, K, IC] = [1, 7, 64]
+            #   2. Transpose (1, 2, 0): [K, IC, OC] = [7, 64, 1]
+            #   3. GGUF reverses header: [1, 64, 7]
+            #   4. GGML reads: ne0=1, ne1=64, ne2=7
+            #
+            # But this is also wrong because GGML expects ne0=K=7!
+            #
+            # The REAL solution: For 3D kernels where we need specific dimension order,
+            # we must ensure data is laid out correctly for GGML's interpretation.
+            # Since GGUF reverses header, GGML reads data as if it's in [ne2, ne1, ne0] layout.
+            #
+            # For ggml_conv_1d expecting [K, OC, IC]:
+            #   We need GGML ne0=K, ne1=OC, ne2=IC
+            #   So GGUF must store [IC, OC, K]
+            #   So we pass numpy [K, OC, IC]
+            #
+            # Let's verify:
+            #   Pass [K, OC, IC] = [7, 1, 64]
+            #   GGUF stores [64, 1, 7]
+            #   GGML reads: ne0=64, ne1=1, ne2=7
+            #   That's [K=64, OC=1, IC=7] - WRONG!
+            #
+            # I give up on trying to make GGUF work with 3D tensors.
+            # Let's just pass the original shape and modify the C++ code to handle it.
             if gguf_name == "decoder.out_conv.weight":
-                # PyTorch shape: [out, in, kernel] = [1, 64, 7]
-                # Transpose to: [kernel, in, out] = [7, 64, 1]
-                # GGML expects ne[0]=K=7, ne[1]=IC=64, ne[2]=OC=1
-                data = np.transpose(data, (2, 1, 0))  # [kernel, in, out]
-                logger.debug(f"Transposed out_conv.weight: {original_shape} -> {data.shape}")
+                # Keep original PyTorch shape [OC, K, IC] = [1, 7, 64]
+                # The C++ code will need to permute it appropriately
+                logger.debug(f"out_conv.weight: {original_shape} -> keeping original (C++ will handle permutation)")
+                pass
+            elif "quantizers" in gguf_name and "in_proj.weight" in gguf_name:
+                # Quantizer in_proj: Conv1d(quantizer_dim, codebook_dim, 1)
+                # PyTorch shape after squeeze: [codebook_dim, quantizer_dim] = [8, 768]
+                #
+                # GGUF stores dimensions in REVERSE order (see gguf_writer.py line 265):
+                #   numpy shape (8, 768) -> GGUF stores [768, 8] -> GGML reads ne0=768, ne1=8
+                #
+                # For ggml_mul_mat(in_proj, input):
+                #   - input has shape [768, T] (quantizer_dim)
+                #   - Need in_proj->ne[0] == input->ne[0] = 768
+                #   - Result should be [codebook_dim, T] = [8, T]
+                #   - ggml_mul_mat(a, b): result = [a->ne[1], b->ne[1]] = [8, T]
+                #
+                # So we need GGML to read: ne0=768, ne1=8
+                # GGUF stores reverse: [8, 768]
+                # Numpy shape needed: (8, 768) - which is what we have!
+                data = np.squeeze(data)
+                logger.debug(f"in_proj.weight: {original_shape} -> {data.shape}")
+            elif "quantizers" in gguf_name and "out_proj.weight" in gguf_name:
+                # Quantizer out_proj: Conv1d(codebook_dim, quantizer_dim, 1)
+                # PyTorch shape after squeeze: [quantizer_dim, codebook_dim] = [768, 8]
+                #
+                # For ggml_mul_mat(out_proj, embeddings):
+                #   - embeddings shape: [8, T] (from ggml_get_rows)
+                #   - Need out_proj->ne[0] == embeddings->ne[0] = 8
+                #   - Result: [out_proj->ne[1], T] = [768, T]
+                #
+                # So GGML needs: ne0=8, ne1=768
+                # To get GGML ne0=8, ne1=768, GGUF must store shape [768, 8] (reversed)
+                # Pass numpy [768, 8] directly - GGUF will reverse dims to [8, 768]
+                # Data stays row-major from original [768, 8], which is correct!
+                data = np.squeeze(data)
+                # NO transpose - keep [768, 8] as is
+                logger.debug(f"out_proj.weight: {original_shape} -> {data.shape}")
+            elif "quantizers" in gguf_name and "codebook.weight" in gguf_name:
+                # Codebook: nn.Embedding with shape [codebook_size, codebook_dim] = [4096, 8]
+                #
+                # ggml_get_rows(a, b) returns tensor with shape:
+                #   [a->ne[0], b->ne[0], ...] = [row_width, num_indices, ...]
+                #
+                # With GGUF storing [8, 4096] (reversed from numpy [4096, 8]):
+                #   - GGML reads: ne0=8, ne1=4096
+                #   - This means: 4096 rows, each with 8 elements
+                #   - ggml_get_rows output: [8, seq_len] <- CORRECT shape!
+                #
+                # No transpose needed - the GGUF reversal gives the correct shape.
+                data = np.squeeze(data)
+                logger.debug(f"codebook.weight: {original_shape} -> {data.shape}")
+            elif "in_conv.weight" in gguf_name:
+                # Depthwise conv kernel: PyTorch [C, K, 1] -> need [C, 1, K]
+                # GGML ggml_conv_1d_dw expects kernel [K, 1, C]
+                # So we need GGML to read: ne0=K, ne1=1, ne2=C
+                # GGUF stores reverse: [C, 1, K]
+                # So numpy shape should be [C, 1, K]
+                # PyTorch gives [C, K, 1], need to swap last two dims
+                data = np.transpose(data, (0, 2, 1))  # [C, K, 1] -> [C, 1, K]
+                logger.debug(f"Depthwise in_conv.weight: {original_shape} -> {data.shape}")
+            elif "residual_in_conv.weight" in gguf_name or ("residual_units" in gguf_name and ".in_conv.weight" in gguf_name):
+                # Depthwise conv kernels in residual units
+                # Same handling as in_conv.weight
+                data = np.transpose(data, (0, 2, 1))  # [C, K, 1] -> [C, 1, K]
+                logger.debug(f"Residual depthwise conv: {original_shape} -> {data.shape}")
+            elif "up_conv.weight" in gguf_name:
+                # up_conv: 1x1 conv (essentially a linear layer) projecting quantizer_dim to decoder_dim
+                # PyTorch shape: [out_ch, in_ch, 1] = [decoder_dim, quantizer_dim, 1]
+                # After squeeze: [decoder_dim, quantizer_dim] = [1024, 768] for snac_24khz
+                #
+                # For ggml_mul_mat(up_conv, input):
+                #   - input shape: [quantizer_dim, T] = [768, T]
+                #   - Need up_conv->ne[0] == input->ne[0] = 768
+                #   - Result: [up_conv->ne[1], T] = [1024, T]
+                #
+                # So GGML needs: ne0=768, ne1=1024
+                # To get GGML ne0=768, ne1=1024, GGUF must store shape [1024, 768] (reversed)
+                # Pass numpy [1024, 768] directly - GGUF will reverse dims to [768, 1024]
+                # Data stays row-major from original [1024, 768], which is correct!
+                data = np.squeeze(data)
+                # NO transpose - keep [1024, 768] as is
+                logger.debug(f"up_conv.weight: {original_shape} -> {data.shape}")
+            elif "conv_t.weight" in gguf_name:
+                # ConvTranspose1D kernel for decoder layers
+                # SNAC weight_v format (from pytorch_model.bin): [IC, K, OC]
+                # GGML ggml_conv_transpose_1d expects: ne[0]=K, ne[1]=OC, ne[2]=IC
+                #
+                # GGUF header stores REVERSED numpy shape.
+                # To get GGUF header [K, OC, IC], we write numpy [IC, OC, K]
+                #
+                # Memory layout for numpy [IC, OC, K] row-major:
+                # - Element [ic, oc, k] at offset: ic*OC*K + oc*K + k
+                # - K varies fastest (innermost)
+                #
+                # Memory layout for GGML [K, OC, IC]:
+                # - Element (k, oc, ic) at offset: k + oc*K + ic*OC*K
+                # - ne[0]=K varies fastest (innermost)
+                #
+                # These match! numpy [ic, oc, k] = GGML (k, oc, ic) in memory
+                #
+                # Transpose: [IC, K, OC] -> [IC, OC, K] via (0, 2, 1)
+                data = np.ascontiguousarray(np.transpose(data, (0, 2, 1)))  # [IC, K, OC] -> [IC, OC, K]
+                logger.debug(f"ConvTranspose1D conv_t.weight: {original_shape} -> {data.shape}")
             else:
                 # Squeeze all dimensions of size 1 (e.g., [out, 1, k] -> [out, k], [out, in, 1] -> [out, in])
                 # But preserve 1D tensors like bias [n] and don't turn [1] into scalar

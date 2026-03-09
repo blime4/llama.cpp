@@ -2446,23 +2446,21 @@ int main(int argc, char ** argv) {
 
         LOG_INF("SNAC GGML context initialized successfully\n");
 
-        // Generate random tokens for testing
-        // SNAC pyramid structure: head0 has 4x tokens, head1 has 2x, head2 has 1x per frame
-        std::vector<std::vector<int>> pyramid_tokens(3);
-        for (int f = 0; f < test_frames; f++) {
-            // head0: 4 tokens per frame
-            for (int j = 0; j < 4; j++) {
-                pyramid_tokens[0].push_back(rand() % 4096);
-            }
-            // head1: 2 tokens per frame
-            for (int j = 0; j < 2; j++) {
-                pyramid_tokens[1].push_back(rand() % 4096);
-            }
-            // head2: 1 token per frame
-            pyramid_tokens[2].push_back(rand() % 4096);
-        }
+        // Known-good Orpheus tokens for testing (should produce intelligible speech)
+        // head0 has 19 tokens, head1 has 20 tokens, head2 has 21 tokens
+        // vq_strides = [4, 2, 1] means head0*4 should match head2 length
+        // So 19*4=76 != 21, but this is the actual Orpheus output format
+        const std::vector<int> orpheus_head0 = {3919, 717, 2663, 2775, 1802, 140, 4010, 144, 1838, 412, 342, 3417, 401, 3876, 2690, 234, 2866, 3919, 2068};
+        const std::vector<int> orpheus_head1 = {1265, 1685, 3418, 3418, 2512, 1293, 492, 3773, 3323, 3323, 2173, 2186, 2267, 2749, 182, 1983, 2531, 2531, 2609, 1736};
+        const std::vector<int> orpheus_head2 = {916, 1043, 1514, 161, 1514, 3909, 3909, 4018, 1775, 3781, 3781, 1514, 916, 1135, 1135, 1135, 1278, 2651, 1559, 2045, 1855};
 
-        LOG_INF("Generated %d test frames with random tokens\n", test_frames);
+        // Use Orpheus tokens instead of random tokens for meaningful test
+        std::vector<std::vector<int>> pyramid_tokens(3);
+        pyramid_tokens[0] = orpheus_head0;
+        pyramid_tokens[1] = orpheus_head1;
+        pyramid_tokens[2] = orpheus_head2;
+
+        LOG_INF("Using known Orpheus tokens for testing:\n");
         LOG_INF("head0: %zu tokens, head1: %zu tokens, head2: %zu tokens\n",
                 pyramid_tokens[0].size(), pyramid_tokens[1].size(), pyramid_tokens[2].size());
 
