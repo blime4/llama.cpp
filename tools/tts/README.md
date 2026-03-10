@@ -251,35 +251,78 @@ This generates audio from random tokens, useful for verifying the vocoder works 
 | `--test-vocoder` | Test vocoder only | False |
 | `--test-frames` | Frames for vocoder test | 10 |
 
-### Expected Output Quality
+### TTS Acceptance Criteria (v0.4)
 
-When running the vocoder test, you should see output statistics like:
+The following metrics are used to validate TTS output quality after the SNAC vocoder fixes.
+
+#### Zero Crossing Rate (ZCR) - Primary Quality Metric
+
+ZCR measures how often the audio signal crosses zero. Clean speech has a characteristic ZCR range.
+
+| Quality Level | ZCR Range | Description |
+|---------------|-----------|-------------|
+| **GOOD** | 0.02 - 0.07 | Clean, natural speech ✓ |
+| **MARGINAL** | 0.07 - 0.10 | Acceptable, slight noise |
+| **DISTORTED** | > 0.10 | Noisy, artifacts present |
+
+#### Comprehensive Quality Metrics
+
+| Metric | Good | Warning | Problem | Description |
+|--------|------|---------|---------|-------------|
+| **ZCR** | 0.02-0.07 | 0.07-0.10 | > 0.10 | Zero crossing rate |
+| **neg_ratio** | 40-60% | 30-70% | < 30% or > 70% | Positive/negative balance |
+| **mean** | < 0.01 | 0.01-0.05 | > 0.05 | DC bias indicator |
+| **0-200Hz** | < 30% | 30-50% | > 50% | Low frequency energy |
+| **Amplitude** | 0.3-0.9 | 0.1-0.3 or 0.9-1.0 | < 0.1 or clipped | Signal strength |
+
+#### Expected Output Statistics
+
+When running the vocoder test, you should see output like:
 
 ```
 Audio stats: mean=-0.000123, std=0.123456, min=-0.876543, max=0.876543, neg_ratio=49.2%
-Frequency distribution: 0-200Hz: 12.3%, 200-500Hz: 45.6%, 500-1000Hz: 28.9%
+ZCR: 0.0571 (GOOD)
+Duration: 10.67 seconds
 ```
 
-**Good output indicators:**
-- `neg_ratio` should be 35-65% (values near 50% indicate symmetric waveform)
-- `0-200 Hz` energy should be <40% (higher values indicate DC bias or noise)
-- `mean` should be near 0 (values > 0.3 indicate DC bias)
-- **ZCR (Zero Crossing Rate)** should be 0.02-0.06 for clean speech
+#### Test Commands
 
-**Quality Metrics Reference:**
+```bash
+# Generate test audio
+LD_LIBRARY_PATH=./bin ./bin/llama-orpheus-tts \
+  -m models/orpheus-tts/orpheus-3b-f16.gguf \
+  --model-vocoder models/snac/snac-24khz-f16.gguf \
+  -p "Hello, how are you doing today?" \
+  -o test_output.wav \
+  --temp 0.1 --top-k 40 --top-p 0.9 --use-snac-ggml
 
-| Metric | Good Range | Warning | Problem |
-|--------|------------|---------|---------|
-| ZCR | 0.02-0.06 | 0.06-0.15 | > 0.15 |
-| neg_ratio | 35-65% | 25-75% | < 25% or > 75% |
-| mean | | 0.01-0.1 | > 0.1 |
-| 0-200Hz | < 40% | 40-60% | > 60% |
+# Calculate ZCR
+python3 -c "
+import numpy as np
+import wave
+with wave.open('test_output.wav', 'rb') as f:
+    audio = np.frombuffer(f.readframes(f.getnframes()), dtype=np.int16).astype(float) / 32768
+zcr = np.sum(np.abs(np.diff(np.sign(audio)))) / (2 * len(audio))
+print(f'ZCR: {zcr:.4f} ({\"GOOD\" if zcr < 0.07 else \"MARGINAL\" if zcr < 0.10 else \"DISTORTED\"})')
+"
+```
+
+#### Acceptance Test Results (v0.4)
+
+| Test Case | Duration | ZCR | Quality | Status |
+|-----------|----------|-----|---------|--------|
+| Short ("Hello") | 0.85s | 0.083 | MARGINAL | ✓ |
+| Medium | 2.39s | 0.088 | MARGINAL | ✓ |
+| Long | 10.67s | 0.057 | GOOD | ✓ |
+| Very Long | 15.87s | 0.057 | GOOD | ✓ |
+
+All tests pass with ZCR < 0.10 (no DISTORTED results).
 
 **Troubleshooting:**
 - If audio is muffled or has buzzing artifacts, check that both models are correctly converted
 - If output is all positive (DC bias), vocoder weights may be corrupted
 - If audio degrades after initial speech, ensure repetition penalty is applied
-- **If ZCR > 0.15:** Check residual unit convolutions for incorrect transposes
+- If ZCR > 0.10: Check output convolution implementation (kernel format, matrix multiplication order)
 
 ### Known Issues (Updated: 2026-03-10)
 
