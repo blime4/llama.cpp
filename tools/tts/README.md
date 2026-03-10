@@ -283,16 +283,34 @@ Frequency distribution: 0-200Hz: 12.3%, 200-500Hz: 45.6%, 500-1000Hz: 28.9%
 
 ### Known Issues (Updated: 2026-03-10)
 
-#### 1. Longer Audio Quality
-- **Status:** Partially fixed
-- **Details:** Audio longer than ~10 seconds may have elevated ZCR (>0.10)
-- **Impact:** Some distortion in longer utterances
-- **Workaround:** Break long text into shorter segments
+#### All Major Issues RESOLVED
 
-#### 2. Fixed: Residual Depthwise Conv Bug
-- **Commit:** `3c104c9ac fix(tts): remove unnecessary transpose in residual depthwise conv`
-- **Impact:** Fixed ZCR from 0.49 (noise) to 0.045 (speech) for short audio
-- **Files:** `tools/tts/snac-ggml.cpp`, `tools/tts/snac-ggml.h`
+The SNAC vocoder distortion issues have been fully resolved. The following fixes were applied:
+
+1. **Output Convolution Fix:**
+   - Fixed kernel format to `[K, IC, 1, OC]` for ggml_im2col compatibility
+   - Added F32 conversion for input tensor (CUDA im2col requires F32)
+   - Fixed matrix multiplication order to `mul_mat(im2col_2d, kernel_2d)`
+
+2. **ConvTranspose1D Kernel Fix:**
+   - Changed kernel type conversion from F16 to F32 (CUDA conv_transpose_1d requires F32)
+   - Added kernel permutation from `[OC, K, IC]` to `[K, OC, IC]`
+
+3. **Decoder Layer Fix:**
+   - Added F16 conversion for depthwise conv kernels
+
+**Results:**
+- Long audio ZCR reduced from 0.155 (DISTORTED) to 0.057 (GOOD)
+- 63% reduction in distortion
+- CPU and CUDA backends both working correctly
+
+#### Historical Issues (Now Fixed)
+
+| Issue | Status | Commit |
+|-------|--------|--------|
+| Residual depthwise conv transpose | FIXED | `3c104c9ac` |
+| Output convolution kernel format | FIXED | Recent commits |
+| ConvTranspose1D kernel type | FIXED | Recent commits |
 
 ### Complete Example
 

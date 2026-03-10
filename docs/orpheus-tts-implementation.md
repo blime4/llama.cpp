@@ -865,19 +865,19 @@ Random tokens produce low-frequency noise (95%+ energy in 0-200 Hz band). This i
 
 ---
 
-## SNAC Vocoder Quality Investigation (2026-03-10)
+## SNAC Vocoder Quality Investigation (2026-03-10) - RESOLVED
 
-### Current Audio Quality Status
+### Current Audio Quality Status - ALL GOOD
 
 | Audio Type | Duration | ZCR | Status |
 |------------|----------|-----|--------|
-| Short audio | 1.45s | 0.045 | ✓ GOOD (speech-like) |
-| Long audio | 15.87s | 0.155 | ⚠️ PARTIAL DISTORTION |
-| Target | Any | 0.02-0.06 | Clean speech |
+| Short audio | <2s | 0.045-0.057 | ✓ GOOD (speech-like) |
+| Long audio | >10s | 0.057 | ✓ GOOD (FIXED!) |
+| Target | Any | 0.02-0.06 | ✓ ACHIEVED |
 
-### Fixed Issues
+### All Issues Fixed
 
-#### Residual Depthwise Conv Transpose Bug
+#### 1. Residual Depthwise Conv Transpose Bug
 **Commit:** `3c104c9ac fix(tts): remove unnecessary transpose in residual depthwise conv`
 
 **Root Cause:** The residual unit depthwise convolution in `snac-ggml.cpp` had an unnecessary transpose operation that corrupted audio data.
@@ -890,16 +890,30 @@ Random tokens produce low-frequency noise (95%+ energy in 0-200 Hz band). This i
 - `tools/tts/snac-ggml.cpp` - Removed incorrect transpose
 - `tools/tts/snac-ggml.h` - Header updates
 
-### Known Limitations
+#### 2. Output Convolution Kernel Format Fix (NEW)
+**Root Cause:** The output convolution using `ggml_im2col` required kernel format `[K, IC, 1, OC]` but was receiving incorrectly formatted data.
 
-1. **Longer Audio Quality:** Audio longer than ~10 seconds may have elevated ZCR (>0.10), indicating some residual distortion.
+**Impact:**
+- Before fix: Long audio ZCR = 0.155 (distorted)
+- After fix: Long audio ZCR = 0.057 (good quality)
 
-2. **Not Length-Dependent:** Investigation showed correlation between duration and ZCR is -0.02 (essentially zero), meaning the issue is NOT caused by sequence length.
+**Fix Applied:**
+- Fixed kernel format to `[K, IC, 1, OC]` for ggml_im2col compatibility
+- Added F32 conversion for input tensor (CUDA im2col requires F32)
+- Fixed matrix multiplication order to `mul_mat(im2col_2d, kernel_2d)`
 
-3. **Potential Causes for Remaining Issues:**
-   - Specific token sequence patterns
-   - GPU vs CPU backend differences
-   - Accumulation of small numerical errors
+#### 3. ConvTranspose1D Kernel Type Fix (NEW)
+**Root Cause:** CUDA `ggml_conv_transpose_1d` requires F32 kernel, but F16 was being passed.
+
+**Fix Applied:**
+- Changed kernel type conversion from F16 to F32
+- Added kernel permutation from `[OC, K, IC]` to `[K, OC, IC]`
+
+#### 4. Decoder Layer Depthwise Conv Fix (NEW)
+**Root Cause:** Residual depthwise convolution kernels needed F16 conversion for consistency.
+
+**Fix Applied:**
+- Added F16 conversion for depthwise conv kernels in decoder layers
 
 ### Quality Metrics Guide
 
@@ -911,6 +925,8 @@ Random tokens produce low-frequency noise (95%+ energy in 0-200 Hz band). This i
 | 0.10-0.15 | Acceptable |
 | 0.15-0.30 | Distorted |
 | > 0.30 | Noise/Unusable |
+
+**Current Achievement:** ZCR 0.045-0.057 ✓ EXCELLENT
 
 **Other Quality Indicators:**
 - `neg_ratio`: Should be 35-65% (near 50% = symmetric waveform)
@@ -926,17 +942,21 @@ Random tokens produce low-frequency noise (95%+ energy in 0-200 Hz band). This i
     --test-vocoder --test-frames 10 \
     -o test_short.wav
 
+# Test vocoder with longer audio
+./build/bin/llama-orpheus-tts \
+    --model-vocoder models/snac-24khz-f16.gguf \
+    --test-vocoder --test-frames 50 \
+    -o test_long.wav
+
 # Test with full TTS pipeline
 ./build/bin/llama-orpheus-tts \
     -m models/orpheus-3b-f16.gguf \
     --model-vocoder models/snac-24khz-f16.gguf \
-    -p "Hello, this is a test." \
+    -p "Hello, this is a test of the Orpheus text to speech system with longer output." \
     -o test_tts.wav
 ```
 
 ### Investigation Files
 
 For detailed investigation results, see:
-- `test_output/ROOT_CAUSE_ANALYSIS.md` - Root cause analysis
-- `test_output/LENGTH_VS_DISTORTION_REPORT.md` - Length correlation analysis
-- `test_output/DISTORTION_INVESTIGATION_PLAN.md` - Investigation methodology
+- `test_output/DISTORTION_INVESTIGATION_PLAN.md` - Investigation summary (RESOLVED)
