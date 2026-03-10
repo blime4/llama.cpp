@@ -764,21 +764,22 @@ static struct ggml_tensor * snac_build_graph(
             kernel_for_conv = ggml_cpy(ctx, w.out_conv_kernel, kernel_f16);
         }
 
-        // Permute from [IC, K, OC] = [64, 7, 1] to [K, IC, OC] = [7, 64, 1]
-        // ggml_conv_1d expects kernel with ne[0]=K (kernel size)
-        // Using permutation (1, 0, 2, 3):
-        //   output ne[0] = input ne[1] = 7 (K)
+        // Permute from [IC, K, OC] = [64, 7, 1] to [OC, IC, K] = [1, 64, 7]
+        // ggml_conv_1d expects kernel in format [OC, IC, K]
+        // Current tensor from GGUF: ne[0]=64, ne[1]=7, ne[2]=1 = [IC, K, OC]
+        // Using permutation (2, 0, 1, 3):
+        //   output ne[0] = input ne[2] = 1 (OC)
         //   output ne[1] = input ne[0] = 64 (IC)
-        //   output ne[2] = input ne[2] = 1 (OC)
-        struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel_for_conv, 1, 0, 2, 3);
+        //   output ne[2] = input ne[1] = 7 (K)
+        struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel_for_conv, 2, 0, 1, 3);
         kernel_for_conv = ggml_cont(ctx, kernel_permuted);
 
-        LOG_INF("%s: Kernel for conv_1d after permute: [%lld, %lld, %lld] = [K, IC, OC]\n", __func__,
+        LOG_INF("%s: Kernel for conv_1d after permute: [%lld, %lld, %lld] = [OC, IC, K]\n", __func__,
                 (long long)kernel_for_conv->ne[0], (long long)kernel_for_conv->ne[1],
                 (long long)kernel_for_conv->ne[2]);
 
         // ggml_conv_1d expects:
-        //   - kernel (first param 'a'): [OC, IC, K]
+        //   - kernel (first param 'a'): [OC, IC, K] - NOW CORRECT
         //   - input (second param 'b'): [L, IC, N]
         //   - result: [OW, OC, N]
 
