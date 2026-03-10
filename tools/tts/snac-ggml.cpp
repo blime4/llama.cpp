@@ -55,11 +55,18 @@ static struct ggml_tensor * snac_conv_transpose_1d_custom(
     int64_t output_padding)
 {
     // Get dimensions from kernel
-    // Converter writes numpy [IC, OC, K] -> GGUF header [K, OC, IC]
-    // So: ne[0]=K, ne[1]=OC, ne[2]=IC
-    int64_t K = kernel->ne[0];     // Kernel size
-    int64_t OC = kernel->ne[1];    // Output channels
-    int64_t IC = kernel->ne[2];    // Input channels
+    // GGUF stores the kernel in [OC, K, IC] format (shape=[OC, K, IC])
+    // This is because GGUF header reverses numpy shape, and the numpy shape
+    // is [IC, K, OC] from PyTorch (without transpose).
+    //
+    // For ggml_conv_transpose_1d, we need [K, OC, IC] format.
+    // So we need to permute from [OC, K, IC] to [K, OC, IC].
+    //
+    // Current GGUF: ne[0]=OC, ne[1]=K, ne[2]=IC
+    // After permutation (1, 0, 2, 3): ne[0]=K, ne[1]=OC, ne[2]=IC
+    int64_t OC = kernel->ne[0];    // Output channels (from GGUF ne[0])
+    int64_t K = kernel->ne[1];     // Kernel size (from GGUF ne[1])
+    int64_t IC = kernel->ne[2];    // Input channels (from GGUF ne[2])
 
     // Input is [L, IC] format (temporal first)
     int64_t L = input->ne[0];      // Temporal dimension
@@ -74,12 +81,25 @@ static struct ggml_tensor * snac_conv_transpose_1d_custom(
     LOG_INF("%s: Kernel shape: [%lld,%lld,%lld] = [K,OC,IC]\n", __func__,
             (long long)kernel->ne[0], (long long)kernel->ne[1], (long long)kernel->ne[2]);
 
-    // Convert kernel to F16 if needed (ggml_conv_transpose_1d requires F16)
-    struct ggml_tensor * kernel_for_conv = kernel;
-    if (kernel->type != GGML_TYPE_F16) {
-        struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
-            kernel->ne[0], kernel->ne[1], kernel->ne[2]);
-        kernel_for_conv = ggml_cpy(ctx, kernel, kernel_f16_tensor);
+    // Permute kernel from [OC, K, IC] to [K, OC, IC] for ggml_conv_transpose_1d
+    // ggml_conv_transpose_1d expects kernel in format [K, OC, IC]
+    // Current tensor from GGUF: ne[0]=OC, ne[1]=K, ne[2]=IC
+    // Using permutation (1, 0, 2, 3):
+    //   output ne[0] = input ne[1] = K
+    //   output ne[1] = input ne[0] = OC
+    //   output ne[2] = input ne[2] = IC
+    struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel, 1, 0, 2, 3);
+    struct ggml_tensor * kernel_cont = ggml_cont(ctx, kernel_permuted);
+
+    LOG_INF("%s: Kernel after permute: [%lld,%lld,%lld] = [K,OC,IC]\n", __func__,
+            (long long)kernel_cont->ne[0], (long long)kernel_cont->ne[1], (long long)kernel_cont->ne[2]);
+
+    // Convert kernel to F32 if needed (CUDA ggml_conv_transpose_1d requires F32)
+    struct ggml_tensor * kernel_for_conv = kernel_cont;
+    if (kernel_cont->type != GGML_TYPE_F32) {
+        struct ggml_tensor * kernel_f32_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F32,
+            kernel_cont->ne[0], kernel_cont->ne[1], kernel_cont->ne[2]);
+        kernel_for_conv = ggml_cpy(ctx, kernel_cont, kernel_f32_tensor);
     }
 
     // Reshape input from [L, IC] to [L, IC, 1] for ggml_conv_transpose_1d
@@ -325,9 +345,15 @@ static struct ggml_tensor * snac_decoder_layer_forward_ggml(
         // Kernel is stored in GGUF with header [K, 1, C] = [7, 1, 512]
         // The GGUF data layout is: GGML[k, 0, c] = numpy[c, 0, k]
         // This is ALREADY the correct layout for ggml_conv_1d_dw - no transpose needed!
+        // ggml_conv_1d_dw requires F16 kernel
         if (residual_in_kernel[u]) {
-            // Use kernel directly - data is already in correct layout
+            // Convert to F16 if needed
             struct ggml_tensor * kernel_for_dw = residual_in_kernel[u];
+            if (residual_in_kernel[u]->type != GGML_TYPE_F16) {
+                struct ggml_tensor * kernel_f16 = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                    residual_in_kernel[u]->ne[0], residual_in_kernel[u]->ne[1], residual_in_kernel[u]->ne[2]);
+                kernel_for_dw = ggml_cpy(ctx, residual_in_kernel[u], kernel_f16);
+            }
 
             // cur is [T, C], reshape to [T, C, 1] for ggml_conv_1d_dw
             struct ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur, output_len, channels, 1);
@@ -658,10 +684,12 @@ static struct ggml_tensor * snac_build_graph(
         }
 
         // Get dimensions from the loaded kernel
-        // Converter writes numpy [IC, OC, K] -> GGUF header [K, OC, IC]
-        // So: ne[0]=K (kernel_size), ne[1]=OC (output_channels), ne[2]=IC (input_channels)
-        int64_t ks = w.layer_kernel[l]->ne[0];       // kernel_size
-        int64_t out_ch = w.layer_kernel[l]->ne[1];   // output channels
+        // GGUF stores the kernel in [OC, K, IC] format (shape=[OC, K, IC])
+        // This is because GGUF header reverses numpy shape, and the numpy shape
+        // is [IC, K, OC] from PyTorch (without transpose).
+        // So: ne[0]=OC (output_channels), ne[1]=K (kernel_size), ne[2]=IC (input_channels)
+        int64_t out_ch = w.layer_kernel[l]->ne[0];   // output channels
+        int64_t ks = w.layer_kernel[l]->ne[1];       // kernel_size
         int64_t in_ch = w.layer_kernel[l]->ne[2];    // input channels
         int stride = decoder_rates[l];
         int padding = (stride + 1) / 2;
@@ -744,56 +772,107 @@ static struct ggml_tensor * snac_build_graph(
     //   ne[1] = IC = 64
     //   ne[2] = K = 7
     //
-    // From current GGML view [64, 7, 1] = [K, IC, OC] to [1, 64, 7] = [OC, IC, K]:
-    //   Permutation (2, 1, 0, 3):
-    //   output ne[0] = input ne[2] = 1 (OC)
-    //   output ne[1] = input ne[1] = 64 (IC)
-    //   output ne[2] = input ne[0] = 7 (K)
+    // Output convolution using ggml_im2col
+    // ggml_im2col for 1D expects:
+    //   - kernel (src0): [KW, KH, IC, OC] = [K, 1, IC, OC] where ne[0]=K, ne[1]=1, ne[2]=IC, ne[3]=OC
+    //   - input (src1): [IW, IC, N, ...] = [T, IC, N, 1] where ne[0]=T, ne[1]=IC, ne[2]=N
+    //   - result: [N, OH, OW, IC*KH*KW] = [N, 1, OW, IC*K]
     if (w.out_conv_kernel) {
-        LOG_INF("%s: Applying output conv, kernel shape [%lld, %lld, %lld], input shape [%lld, %lld]\n", __func__,
+        LOG_INF("%s: Before output conv: cur shape [%lld, %lld], expected [C, T] = [64, T]\n", __func__,
+                (long long)cur->ne[0], (long long)cur->ne[1]);
+        LOG_INF("%s: out_conv_kernel shape [%lld, %lld, %lld]\n", __func__,
                 (long long)w.out_conv_kernel->ne[0], (long long)w.out_conv_kernel->ne[1],
-                (long long)w.out_conv_kernel->ne[2],
+                (long long)w.out_conv_kernel->ne[2]);
+
+        // Kernel from GGUF is [K, IC, OC] = [7, 64, 1]
+        // ggml_im2col for 1D expects [KW, IC, KH, OC] = [K, IC, 1, OC]
+        // where ne[0]=K, ne[1]=IC, ne[2]=1, ne[3]=OC
+        // The assertion b->ne[1] == a->ne[1] requires kernel ne[1] = IC = 64
+        // Expand to 4D
+        struct ggml_tensor * kernel_4d = ggml_reshape_4d(ctx, w.out_conv_kernel,
+            w.out_conv_kernel->ne[0],  // K = 7
+            w.out_conv_kernel->ne[1],  // IC = 64
+            1,                          // 1 (KH)
+            w.out_conv_kernel->ne[2]); // OC = 1
+        LOG_INF("%s: kernel_4d [K, IC, 1, OC] = [%lld, %lld, %lld, %lld]\n", __func__,
+                (long long)kernel_4d->ne[0], (long long)kernel_4d->ne[1],
+                (long long)kernel_4d->ne[2], (long long)kernel_4d->ne[3]);
+
+        // Convert to F16 if needed (ggml_im2col requires F16 kernel)
+        struct ggml_tensor * kernel_for_conv = kernel_4d;
+        if (kernel_4d->type != GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_f16 = ggml_new_tensor_4d(ctx, GGML_TYPE_F16,
+                kernel_4d->ne[0], kernel_4d->ne[1], kernel_4d->ne[2], kernel_4d->ne[3]);
+            kernel_for_conv = ggml_cpy(ctx, kernel_4d, kernel_f16);
+        }
+
+        int64_t K = kernel_for_conv->ne[0];    // 7
+        int64_t IC = kernel_for_conv->ne[1];   // 64
+        int64_t OC = kernel_for_conv->ne[3];   // 1
+        int64_t T_len = cur->ne[1];            // temporal length
+
+        LOG_INF("%s: Kernel K=%lld, IC=%lld, OC=%lld, T_len=%lld\n", __func__,
+                (long long)K, (long long)IC, (long long)OC, (long long)T_len);
+
+        // Input: cur is [C, T] = [64, T]
+        // ggml_im2col expects [T, IC, N, 1] = [T, 64, 1, 1]
+        // First transpose cur from [C, T] to [T, C] = [T, 64]
+        struct ggml_tensor * cur_T = ggml_cont(ctx, ggml_transpose(ctx, cur));  // [T, C]
+        // Then expand to 4D [T, IC, N, 1] = [T, 64, 1, 1]
+        struct ggml_tensor * cur_4d = ggml_reshape_4d(ctx, cur_T, T_len, IC, 1, 1);
+
+        // CUDA im2col requires F32 input - convert if needed
+        struct ggml_tensor * cur_4d_f32 = cur_4d;
+        if (cur_4d->type != GGML_TYPE_F32) {
+            struct ggml_tensor * cur_f32 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32,
+                cur_4d->ne[0], cur_4d->ne[1], cur_4d->ne[2], cur_4d->ne[3]);
+            cur_4d_f32 = ggml_cpy(ctx, cur_4d, cur_f32);
+        }
+
+        LOG_INF("%s: Input for im2col [T, IC, N, 1] = [%lld, %lld, %lld, %lld], type=%d\n", __func__,
+                (long long)cur_4d_f32->ne[0], (long long)cur_4d_f32->ne[1],
+                (long long)cur_4d_f32->ne[2], (long long)cur_4d_f32->ne[3], cur_4d_f32->type);
+
+        // Apply im2col: input [T, IC, N, 1] -> [N, 1, OW, IC*K] with stride=1, padding=3
+        // For stride=1, padding=3 (K/2), dilation=1:
+        // OW = (T + 2*3 - 7)/1 + 1 = T
+        struct ggml_tensor * im2col_out = ggml_im2col(ctx, kernel_for_conv, cur_4d_f32, 1, 0, 3, 0, 1, 0, false, GGML_TYPE_F32);
+
+        LOG_INF("%s: im2col output [IC*K, OW, N, 1] = [%lld, %lld, %lld, %lld]\n", __func__,
+                (long long)im2col_out->ne[0], (long long)im2col_out->ne[1],
+                (long long)im2col_out->ne[2], (long long)im2col_out->ne[3]);
+
+        // Reshape kernel from [K, IC, 1, OC] to [IC*K, OC] = [448, 1]
+        // Note: ggml_mul_mat(a, b) computes a^T @ b, result is [a->ne[1], b->ne[1]]
+        // The requirement is a->ne[0] == b->ne[0]
+        struct ggml_tensor * kernel_2d_f16 = ggml_reshape_2d(ctx, kernel_for_conv, K * IC, OC);  // [IC*K, OC] = [448, 1]
+        struct ggml_tensor * kernel_2d = kernel_2d_f16;
+        if (kernel_2d_f16->type == GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_2d_f32 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, K * IC, OC);
+            kernel_2d = ggml_cpy(ctx, kernel_2d_f16, kernel_2d_f32);
+        }
+
+        // im2col output is [IC*K, OW, N, 1] = [448, T, 1, 1]
+        // Reshape to [IC*K, OW] = [448, T]
+        struct ggml_tensor * im2col_2d = ggml_reshape_2d(ctx, im2col_out, im2col_out->ne[0], im2col_out->ne[1]);
+
+        LOG_INF("%s: im2col_2d [IC*K, OW] = [%lld, %lld], kernel_2d [IC*K, OC] = [%lld, %lld]\n", __func__,
+                (long long)im2col_2d->ne[0], (long long)im2col_2d->ne[1],
+                (long long)kernel_2d->ne[0], (long long)kernel_2d->ne[1]);
+
+        // Matrix multiplication: im2col_2d^T @ kernel_2d
+        // Following ggml_conv_2d pattern: mul_mat(im2col, kernel)
+        // im2col_2d: [IC*K, OW] = [448, T]
+        // kernel_2d: [IC*K, OC] = [448, 1]
+        // For mul_mat(a, b): a->ne[0] == b->ne[0] must hold (448 == 448 ✓)
+        // mul_mat(im2col_2d, kernel_2d): [448, T]^T @ [448, 1] = [T, 448] @ [448, 1] = [T, 1]
+        cur = ggml_mul_mat(ctx, im2col_2d, kernel_2d);
+
+        // Result is [T, 1] which is [OW, OC] - already correct format
+
+        LOG_INF("%s: Manual conv output [OW, OC] = [%lld, %lld]\n", __func__,
                 (long long)cur->ne[0], (long long)cur->ne[1]);
 
-        struct ggml_tensor * kernel_for_conv = w.out_conv_kernel;
-
-        // Convert to F16 if needed
-        if (w.out_conv_kernel->type != GGML_TYPE_F16) {
-            struct ggml_tensor * kernel_f16 = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
-                w.out_conv_kernel->ne[0], w.out_conv_kernel->ne[1], w.out_conv_kernel->ne[2]);
-            kernel_for_conv = ggml_cpy(ctx, w.out_conv_kernel, kernel_f16);
-        }
-
-        // Permute from [IC, K, OC] = [64, 7, 1] to [OC, IC, K] = [1, 64, 7]
-        // ggml_conv_1d expects kernel in format [OC, IC, K]
-        // Current tensor from GGUF: ne[0]=64, ne[1]=7, ne[2]=1 = [IC, K, OC]
-        // Using permutation (2, 0, 1, 3):
-        //   output ne[0] = input ne[2] = 1 (OC)
-        //   output ne[1] = input ne[0] = 64 (IC)
-        //   output ne[2] = input ne[1] = 7 (K)
-        struct ggml_tensor * kernel_permuted = ggml_permute(ctx, kernel_for_conv, 2, 0, 1, 3);
-        kernel_for_conv = ggml_cont(ctx, kernel_permuted);
-
-        LOG_INF("%s: Kernel for conv_1d after permute: [%lld, %lld, %lld] = [OC, IC, K]\n", __func__,
-                (long long)kernel_for_conv->ne[0], (long long)kernel_for_conv->ne[1],
-                (long long)kernel_for_conv->ne[2]);
-
-        // ggml_conv_1d expects:
-        //   - kernel (first param 'a'): [OC, IC, K] - NOW CORRECT
-        //   - input (second param 'b'): [L, IC, N]
-        //   - result: [OW, OC, N]
-
-        // Reshape cur from [C, T] to [L, IC, N] for ggml_conv_1d
-        struct ggml_tensor * cur_3d = ggml_reshape_3d(ctx, cur, cur->ne[1], cur->ne[0], 1);  // [L, IC, N]
-
-        // Input should be F32
-        if (cur_3d->type != GGML_TYPE_F32) {
-            struct ggml_tensor * cur_3d_f32 = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, cur_3d->ne[0], cur_3d->ne[1], cur_3d->ne[2]);
-            cur_3d = ggml_cpy(ctx, cur_3d, cur_3d_f32);
-        }
-
-        // Conv1D with padding=3 (K/2) to maintain length
-        cur = ggml_conv_1d(ctx, kernel_for_conv, cur_3d, 1, 3, 1);
         if (w.out_conv_bias) {
             cur = ggml_add(ctx, cur, w.out_conv_bias);
         }
@@ -1522,7 +1601,16 @@ static struct ggml_tensor * snac_build_batch_graph(
     }
 
     // Step 5: Up convolution (1x1 conv) - project to decoder_dim
-    cur = ggml_conv_1d(ctx, w.up_conv_kernel, cur, 1, 0, 1);
+    // ggml_conv_1d requires F16 kernel
+    {
+        struct ggml_tensor * kernel_f16 = w.up_conv_kernel;
+        if (w.up_conv_kernel->type != GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                w.up_conv_kernel->ne[0], w.up_conv_kernel->ne[1], w.up_conv_kernel->ne[2]);
+            kernel_f16 = ggml_cpy(ctx, w.up_conv_kernel, kernel_f16_tensor);
+        }
+        cur = ggml_conv_1d(ctx, kernel_f16, cur, 1, 0, 1);
+    }
     if (w.up_conv_bias) {
         cur = ggml_add(ctx, cur, w.up_conv_bias);
     }
@@ -1648,10 +1736,17 @@ static struct ggml_tensor * snac_build_batch_graph(
 
             // 1x1 conv out
             // Reshape kernel from 2D [C, C] to 3D [OC, IC, K] = [C, C, 1] for ggml_conv_1d
+            // ggml_conv_1d requires F16 kernel
             if (w.residual_out_kernel[l][u]) {
                 struct ggml_tensor * out_kernel_3d = ggml_reshape_3d(ctx, w.residual_out_kernel[l][u],
                     w.residual_out_kernel[l][u]->ne[0], w.residual_out_kernel[l][u]->ne[1], 1);  // [OC, IC, K]
-                cur = ggml_conv_1d(ctx, out_kernel_3d, cur, 1, 0, 1);
+                struct ggml_tensor * kernel_f16 = out_kernel_3d;
+                if (out_kernel_3d->type != GGML_TYPE_F16) {
+                    struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                        out_kernel_3d->ne[0], out_kernel_3d->ne[1], out_kernel_3d->ne[2]);
+                    kernel_f16 = ggml_cpy(ctx, out_kernel_3d, kernel_f16_tensor);
+                }
+                cur = ggml_conv_1d(ctx, kernel_f16, cur, 1, 0, 1);
                 if (w.residual_out_bias[l][u]) {
                     cur = ggml_add(ctx, cur, w.residual_out_bias[l][u]);
                 }
@@ -1684,9 +1779,18 @@ static struct ggml_tensor * snac_build_batch_graph(
     // Kernel is stored in [IC, K, OC] = [64, 7, 1] format (GGML interpretation)
     // ggml_conv_1d expects [OC, IC, K] = [1, 64, 7]
     // Permute using (2, 0, 1, 3)
-    struct ggml_tensor * out_kernel_permuted = ggml_permute(ctx, w.out_conv_kernel, 2, 0, 1, 3);
-    struct ggml_tensor * out_kernel_cont = ggml_cont(ctx, out_kernel_permuted);
-    cur = ggml_conv_1d(ctx, out_kernel_cont, cur, 1, 3, 1);
+    // ggml_conv_1d requires F16 kernel
+    {
+        struct ggml_tensor * kernel_f16 = w.out_conv_kernel;
+        if (w.out_conv_kernel->type != GGML_TYPE_F16) {
+            struct ggml_tensor * kernel_f16_tensor = ggml_new_tensor_3d(ctx, GGML_TYPE_F16,
+                w.out_conv_kernel->ne[0], w.out_conv_kernel->ne[1], w.out_conv_kernel->ne[2]);
+            kernel_f16 = ggml_cpy(ctx, w.out_conv_kernel, kernel_f16_tensor);
+        }
+        struct ggml_tensor * out_kernel_permuted = ggml_permute(ctx, kernel_f16, 2, 0, 1, 3);
+        struct ggml_tensor * out_kernel_cont = ggml_cont(ctx, out_kernel_permuted);
+        cur = ggml_conv_1d(ctx, out_kernel_cont, cur, 1, 3, 1);
+    }
     if (w.out_conv_bias) {
         cur = ggml_add(ctx, cur, w.out_conv_bias);
     }
