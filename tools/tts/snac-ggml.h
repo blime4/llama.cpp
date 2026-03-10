@@ -169,3 +169,54 @@ std::vector<std::vector<float>> snac_batch_decode_pyramid(
     struct snac_ggml_context & model_ctx,
     struct snac_batch_context & batch_ctx,
     const std::vector<std::vector<std::vector<int>>> & pyramid_tokens_batch);
+
+// ============================================================================
+// Phase 4: Streaming Processing Structures
+// ============================================================================
+
+// Streaming token buffer - accumulates tokens until frame boundary
+// The SNAC vocoder uses a pyramid token structure where each frame consists
+// of 7 tokens distributed across 3 quantizer heads:
+//   Position: |  0  |  1  |  2  |  3  |  4  |  5  |  6  |
+//   Head:     |  0  |  1  |  2  |  2  |  1  |  2  |  2  |
+// This means per frame: 1 token for head0, 2 for head1, 4 for head2
+struct snac_streaming_buffer {
+    // Pyramid token buffers for each head
+    std::vector<int32_t> head0_tokens;  // Quantizer 0 tokens (1 per frame)
+    std::vector<int32_t> head1_tokens;  // Quantizer 1 tokens (2 per frame)
+    std::vector<int32_t> head2_tokens;  // Quantizer 2 tokens (4 per frame)
+
+    // Frame accumulation state
+    int frame_position = 0;  // Current position in frame (0-6)
+
+    // Pyramid mapping: position -> which head this token belongs to
+    // [0, 1, 2, 2, 1, 2, 2] means: pos0->head0, pos1->head1, pos2->head2, etc.
+    static constexpr int PYRAMID_MAP[7] = {0, 1, 2, 2, 1, 2, 2};
+
+    // Token value constants
+    static constexpr int CODEBOOK_SIZE = SNAC_GGML_CODEBOOK_SIZE;
+
+    // Statistics
+    int total_frames_completed = 0;
+
+    // Reset buffer state
+    void reset();
+
+    // Add a single audio token, returns true if frame completed
+    // raw_token: token value in range [0, CODEBOOK_SIZE-1]
+    bool add_token(int32_t raw_token);
+
+    // Check if we have at least N complete frames
+    bool has_frames(int n) const;
+
+    // Get completed frames (does not consume)
+    // Returns vector of 3 token vectors (head0, head1, head2)
+    // max_frames: -1 for all, otherwise limit to N frames
+    std::vector<std::vector<int32_t>> get_completed_frames(int max_frames = -1) const;
+
+    // Consume frames from buffer (after successful decode)
+    void consume_frames(int n_frames);
+
+    // Get total frame count
+    int get_frame_count() const { return total_frames_completed; }
+};

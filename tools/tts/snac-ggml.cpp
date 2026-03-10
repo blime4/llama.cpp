@@ -2007,3 +2007,120 @@ std::vector<std::vector<float>> snac_batch_decode_pyramid(
     std::vector<snac_batch_input> batches = {batch};
     return snac_batch_decode(model_ctx, batch_ctx, batches);
 }
+
+// ============================================================================
+// Phase 4: Streaming Buffer Implementation
+// ============================================================================
+
+// Static member definition for PYRAMID_MAP
+constexpr int snac_streaming_buffer::PYRAMID_MAP[7];
+
+void snac_streaming_buffer::reset() {
+    head0_tokens.clear();
+    head1_tokens.clear();
+    head2_tokens.clear();
+    frame_position = 0;
+    total_frames_completed = 0;
+}
+
+bool snac_streaming_buffer::add_token(int32_t raw_token) {
+    // Determine which head this position maps to
+    int head = PYRAMID_MAP[frame_position];
+
+    // Clamp token to valid range
+    int32_t token_value = raw_token;
+    if (token_value < 0) {
+        token_value = 0;
+    } else if (token_value >= CODEBOOK_SIZE) {
+        token_value = CODEBOOK_SIZE - 1;
+    }
+
+    // Add to appropriate head buffer
+    switch (head) {
+        case 0:
+            head0_tokens.push_back(token_value);
+            break;
+        case 1:
+            head1_tokens.push_back(token_value);
+            break;
+        case 2:
+            head2_tokens.push_back(token_value);
+            break;
+        default:
+            // Should never happen
+            break;
+    }
+
+    // Advance frame position
+    frame_position++;
+
+    // Check if frame completed (7 tokens = 1 frame)
+    bool frame_completed = (frame_position >= SNAC_GGML_FRAME_SIZE);
+    if (frame_completed) {
+        frame_position = 0;
+        total_frames_completed++;
+    }
+
+    return frame_completed;
+}
+
+bool snac_streaming_buffer::has_frames(int n) const {
+    return total_frames_completed >= n;
+}
+
+std::vector<std::vector<int32_t>> snac_streaming_buffer::get_completed_frames(int max_frames) const {
+    std::vector<std::vector<int32_t>> result(3);
+
+    int n = (max_frames < 0) ? total_frames_completed :
+            std::min(max_frames, total_frames_completed);
+
+    if (n <= 0) {
+        return result;
+    }
+
+    // Copy first n frames worth of tokens from each head
+    // Note: head0 has 1 token/frame, head1 has 2 tokens/frame, head2 has 4 tokens/frame
+    // This is based on the pyramid structure: [0, 1, 2, 2, 1, 2, 2]
+    // Position mapping: head0 appears once, head1 appears twice, head2 appears four times
+
+    // head0: 1 token per frame
+    if ((int)head0_tokens.size() >= n) {
+        result[0].assign(head0_tokens.begin(), head0_tokens.begin() + n);
+    }
+
+    // head1: 2 tokens per frame
+    if ((int)head1_tokens.size() >= n * 2) {
+        result[1].assign(head1_tokens.begin(), head1_tokens.begin() + n * 2);
+    }
+
+    // head2: 4 tokens per frame
+    if ((int)head2_tokens.size() >= n * 4) {
+        result[2].assign(head2_tokens.begin(), head2_tokens.begin() + n * 4);
+    }
+
+    return result;
+}
+
+void snac_streaming_buffer::consume_frames(int n_frames) {
+    if (n_frames <= 0 || n_frames > total_frames_completed) {
+        return;
+    }
+
+    // Remove consumed tokens from each head
+    // head0: 1 token per frame
+    if ((int)head0_tokens.size() >= n_frames) {
+        head0_tokens.erase(head0_tokens.begin(), head0_tokens.begin() + n_frames);
+    }
+
+    // head1: 2 tokens per frame
+    if ((int)head1_tokens.size() >= n_frames * 2) {
+        head1_tokens.erase(head1_tokens.begin(), head1_tokens.begin() + n_frames * 2);
+    }
+
+    // head2: 4 tokens per frame
+    if ((int)head2_tokens.size() >= n_frames * 4) {
+        head2_tokens.erase(head2_tokens.begin(), head2_tokens.begin() + n_frames * 4);
+    }
+
+    total_frames_completed -= n_frames;
+}

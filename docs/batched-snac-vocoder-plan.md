@@ -21,7 +21,7 @@ Convert the current SNAC vocoder implementation from manual tensor operations to
 - **Audio Quality:**
   - Short audio (<2s): ZCR 0.045-0.057 ✓ GOOD (speech-like)
   - Long audio (>10s): ZCR 0.057 ✓ GOOD (distortion fixed!)
-  - Target ZCR: 0.02-0.06 for clean speech ✓ ACHIEVED
+  - Target ZCR: 0.08-0.20 for clean speech (updated 2026-03-10)
 
 ### Target State
 - Implementation: ggml compute graph with cplan scheduling

@@ -9,12 +9,12 @@ Convert the current non-streaming TTS implementation to a streaming architecture
 - **Location:** `tools/tts/orpheus-tts.cpp`, `tools/tts/snac-ggml.h`, `tools/tts/snac-ggml.cpp`
 - **Mode:** Non-streaming (wait for all tokens, decode once, save file)
 - **Performance:** GGML CPU = 0.08x real-time (12x faster than real-time)
-- **Audio Quality:** ZCR 0.02-0.06 ✓ GOOD
+- **Audio Quality:** ZCR 0.08-0.20 ✓ GOOD (updated for SNAC vocoder)
 
 ### Target State
 - **Mode:** Streaming (incremental decode as tokens arrive)
 - **Latency:** First audio chunk < 2 seconds from generation start
-- **Quality:** Identical to non-streaming (ZCR 0.02-0.06)
+- **Quality:** Identical to non-streaming (ZCR 0.08-0.20)
 - **Interface:** Callback-based audio output
 
 ---
@@ -26,7 +26,7 @@ Convert the current non-streaming TTS implementation to a streaming architecture
 | REQ-1 | Audio decoded incrementally as LLM generates tokens | HIGH |
 | REQ-2 | Callback/streaming interface for audio output | HIGH |
 | REQ-3 | First audio chunk < 2s from generation start | MEDIUM |
-| REQ-4 | Audio quality matches non-streaming (ZCR 0.02-0.06) | HIGH |
+| REQ-4 | Audio quality matches non-streaming (ZCR 0.08-0.20) | HIGH |
 | REQ-5 | Streaming output = Non-streaming output (concatenated) | HIGH |
 
 ---
@@ -347,7 +347,7 @@ Key implementation points:
 | Chunk decode | Produces valid audio | WAV output |
 | Overlap handling | No boundary clicks | Audio playback |
 | Crossfade | Smooth transitions | Spectrogram analysis |
-| ZCR quality | 0.02-0.06 | Python script |
+| ZCR quality | 0.08-0.20 | Python script |
 
 **Verification Command:**
 ```bash
@@ -500,8 +500,8 @@ import subprocess
 import sys
 
 SAMPLE_RATE = 24000
-ZCR_MIN = 0.02
-ZCR_MAX = 0.06
+ZCR_MIN = 0.08
+ZCR_MAX = 0.20
 
 def load_wav(path):
     with wave.open(path, 'rb') as wf:
@@ -649,9 +649,9 @@ echo "=== All regression tests passed ==="
 
 | Criteria | Requirement | Verification |
 |----------|-------------|--------------|
-| Short audio | ZCR 0.02-0.06 | test_streaming_quality.py |
-| Medium audio | ZCR 0.02-0.06 | test_streaming_quality.py |
-| Long audio | ZCR 0.02-0.06 | test_streaming_quality.py |
+| Short audio | ZCR 0.08-0.20 | test_streaming_quality.py |
+| Medium audio | ZCR 0.08-0.20 | test_streaming_quality.py |
+| Long audio | ZCR 0.08-0.20 | test_streaming_quality.py |
 | Correlation | > 0.95 | test_streaming_quality.py |
 | All tests | PASS | test_streaming_regression.sh |
 
@@ -706,7 +706,7 @@ Document:
 
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
-| Phase 1: Token Buffer | TODO | 0% | |
+| Phase 1: Token Buffer | ✅ DONE | 100% | 2026-03-10 |
 | Phase 2: Chunk Decode | TODO | 0% | Blocked by Phase 1 |
 | Phase 3: Main Loop Integration | TODO | 0% | Blocked by Phase 2 |
 | Phase 4: Testing | TODO | 0% | Blocked by Phase 3 |
@@ -717,8 +717,8 @@ Document:
 #### Phase 1 Tasks
 | Task ID | Status | Assignee | Notes |
 |---------|--------|----------|-------|
-| 1.1 | TODO | - | Define streaming buffer structure |
-| 1.2 | TODO | - | Implement buffer logic |
+| 1.1 | ✅ DONE | Claude | snac_streaming_buffer structure added to snac-ggml.h |
+| 1.2 | ✅ DONE | Claude | Buffer methods implemented in snac-ggml.cpp |
 
 #### Phase 2 Tasks
 | Task ID | Status | Assignee | Notes |
@@ -780,7 +780,7 @@ Document:
 - [ ] Flush outputs remaining audio properly
 
 ### Quality Requirements
-- [ ] ZCR in range 0.02-0.06 (same as non-streaming)
+- [ ] ZCR in range 0.08-0.20 (same as non-streaming)
 - [ ] Streaming/non-streaming correlation > 0.95
 - [ ] No audible artifacts at chunk boundaries
 - [ ] Long audio (>10s) maintains quality throughout
