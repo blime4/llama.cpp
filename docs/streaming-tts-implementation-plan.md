@@ -707,7 +707,7 @@ Document:
 | Phase | Status | Completion | Notes |
 |-------|--------|------------|-------|
 | Phase 1: Token Buffer | ✅ DONE | 100% | 2026-03-10 |
-| Phase 2: Chunk Decode | TODO | 0% | Blocked by Phase 1 |
+| Phase 2: Chunk Decode | ✅ DONE | 100% | 2026-03-10 |
 | Phase 3: Main Loop Integration | TODO | 0% | Blocked by Phase 2 |
 | Phase 4: Testing | TODO | 0% | Blocked by Phase 3 |
 | Phase 5: Documentation | TODO | 0% | Blocked by Phase 4 |
@@ -719,6 +719,13 @@ Document:
 |---------|--------|----------|-------|
 | 1.1 | ✅ DONE | Claude | snac_streaming_buffer structure added to snac-ggml.h |
 | 1.2 | ✅ DONE | Claude | Buffer methods implemented in snac-ggml.cpp |
+
+#### Phase 2 Tasks
+| Task ID | Status | Assignee | Notes |
+|---------|--------|----------|-------|
+| 2.1 | ✅ DONE | Claude | Analyzed overlap requirements (4-8 frames safe) |
+| 2.2 | ✅ DONE | Claude | Added snac_streaming_config, callback type, context |
+| 2.3 | ✅ DONE | Claude | Implemented chunk decode with crossfade |
 
 #### Phase 2 Tasks
 | Task ID | Status | Assignee | Notes |

@@ -220,3 +220,60 @@ struct snac_streaming_buffer {
     // Get total frame count
     int get_frame_count() const { return total_frames_completed; }
 };
+
+// ============================================================================
+// Phase 4.2: Streaming Decode Configuration and Context
+// ============================================================================
+
+// Streaming decode configuration
+struct snac_streaming_config {
+    int min_chunk_frames = 8;      // Minimum frames before decode
+    int overlap_frames = 4;         // Overlap context for clean boundaries
+    bool crossfade_chunks = true;   // Apply crossfade at chunk boundaries
+    int crossfade_samples = 256;    // Crossfade duration in samples
+};
+
+// Audio output callback type
+// Parameters: pcm_data, num_samples, user_data
+// Returns: true to continue, false to abort
+typedef bool (*snac_audio_callback)(
+    const float * pcm_data,
+    int num_samples,
+    void * user_data
+);
+
+// Streaming decode context - manages state for incremental decoding
+struct snac_streaming_context {
+    snac_ggml_context * model_ctx = nullptr;
+    snac_streaming_buffer buffer;
+    snac_streaming_config config;
+
+    // Overlap buffer for crossfading between chunks
+    std::vector<float> overlap_buffer;
+    bool has_overlap = false;
+
+    // Statistics
+    int total_pcm_samples = 0;
+    int chunks_decoded = 0;
+
+    // Initialize streaming context
+    bool init(snac_ggml_context * ctx, const snac_streaming_config & cfg);
+
+    // Add token and decode if chunk ready
+    // Returns true if audio was output via callback
+    bool add_token_and_decode(
+        int raw_token,
+        snac_audio_callback callback,
+        void * user_data
+    );
+
+    // Flush remaining tokens (call at end of stream)
+    void flush(snac_audio_callback callback, void * user_data);
+
+    // Reset for new stream
+    void reset();
+
+    // Get statistics
+    int get_total_samples() const { return total_pcm_samples; }
+    int get_chunks_decoded() const { return chunks_decoded; }
+};
