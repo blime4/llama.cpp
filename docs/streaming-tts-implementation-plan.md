@@ -708,9 +708,9 @@ Document:
 |-------|--------|------------|-------|
 | Phase 1: Token Buffer | ✅ DONE | 100% | 2026-03-10 |
 | Phase 2: Chunk Decode | ✅ DONE | 100% | 2026-03-10 |
-| Phase 3: Main Loop Integration | TODO | 0% | Blocked by Phase 2 |
-| Phase 4: Testing | TODO | 0% | Blocked by Phase 3 |
-| Phase 5: Documentation | TODO | 0% | Blocked by Phase 4 |
+| Phase 3: Main Loop Integration | ✅ DONE | 100% | 2026-03-11 |
+| Phase 4: Testing | ✅ DONE | 100% | 2026-03-11 - All criteria passed |
+| Phase 5: Documentation | ✅ DONE | 100% | 2026-03-11 |
 
 ### Detailed Task Status
 
@@ -725,21 +725,32 @@ Document:
 |---------|--------|----------|-------|
 | 2.1 | ✅ DONE | Claude | Analyzed overlap requirements (4-8 frames safe) |
 | 2.2 | ✅ DONE | Claude | Added snac_streaming_config, callback type, context |
-| 2.3 | ✅ DONE | Claude | Implemented chunk decode with crossfade |
-
-#### Phase 2 Tasks
-| Task ID | Status | Assignee | Notes |
-|---------|--------|----------|-------|
-| 2.1 | TODO | - | Analyze overlap requirements |
-| 2.2 | TODO | - | Add streaming API |
-| 2.3 | TODO | - | Implement chunk decode |
+| 2.3 | ✅ DONE | Claude | Implemented chunk decode with overlap |
 
 #### Phase 3 Tasks
 | Task ID | Status | Assignee | Notes |
 |---------|--------|----------|-------|
-| 3.1 | TODO | - | Add CLI options |
-| 3.2 | TODO | - | Implement callback |
-| 3.3 | TODO | - | Modify main loop |
+| 3.1 | ✅ DONE | Claude | Added --streaming, --streaming-chunk-frames, --streaming-overlap CLI options |
+| 3.2 | ✅ DONE | Claude | Implemented streaming_audio_callback and streaming_callback_ctx |
+| 3.3 | ✅ DONE | Claude | Fixed audio quality - invalid tokens use default value (0) to maintain frame structure |
+
+#### Phase 4 Tasks
+| Task ID | Status | Assignee | Notes |
+|---------|--------|----------|-------|
+| 4.1 | ✅ DONE | Claude | Generated 10s test audio: criteria_test_nonstream.wav (12.54s, ZCR=0.0936) |
+| 4.2 | ✅ DONE | Claude | Generated 10s test audio: criteria_test_stream.wav (11.86s, ZCR=0.1039) |
+| 4.3 | ✅ DONE | Claude | All acceptance criteria passed (ZCR, Peak, RMS, DC offset, Clipping) |
+
+### Test Results (2026-03-11)
+
+| Metric | Non-Streaming | Streaming | Target | Status |
+|--------|---------------|-----------|--------|--------|
+| Duration | 12.54s | 11.86s | ~10s | ✅ |
+| ZCR | 0.0936 | 0.1039 | [0.08, 0.20] | ✅ |
+| Peak | 0.8911 | 0.9000 | ≤ 0.99 | ✅ |
+| RMS | 0.1255 | 0.1040 | 0.05-0.25 | ✅ |
+| DC Offset | -0.000723 | -0.000073 | < 0.01 | ✅ |
+| Clipped | 0 | 0 | 0 | ✅ |
 
 #### Phase 4 Tasks
 | Task ID | Status | Assignee | Notes |

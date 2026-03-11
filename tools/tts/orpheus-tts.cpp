@@ -112,10 +112,52 @@ static void print_usage(int, char ** argv) {
     LOG("  --use-snac-ggml       use ggml-based SNAC vocoder (enables GPU acceleration)\n");
     LOG("  --batch-size N        batch size for SNAC processing (default: 1)\n");
     LOG("  --gpu                 use GPU backend for SNAC vocoder\n");
+    LOG("  --streaming           enable streaming TTS (incremental audio output)\n");
+    LOG("  --streaming-chunk-frames N  frames per chunk (default: 8)\n");
+    LOG("  --streaming-overlap N overlap frames for clean boundaries (default: 4)\n");
     LOG("\nexample:\n");
     LOG("  %s -m orpheus-3b-f16.gguf --model-vocoder snac-24khz-f16.gguf \\\n", argv[0]);
     LOG("      -p \"Hello, how are you?\" -o greeting.wav\n");
     LOG("\n");
+}
+
+// ============================================================================
+// Streaming TTS Support (Phase 3)
+// ============================================================================
+
+// Streaming callback context for collecting audio chunks
+struct streaming_callback_ctx {
+    std::vector<float> * all_samples;  // Accumulate all PCM samples
+    int chunks_received;
+    bool verbose;
+
+    streaming_callback_ctx() : all_samples(nullptr), chunks_received(0), verbose(true) {}
+};
+
+// Audio callback for streaming TTS - receives decoded audio chunks
+static bool streaming_audio_callback(
+    const float * pcm_data,
+    int num_samples,
+    void * user_data
+) {
+    auto * ctx = static_cast<streaming_callback_ctx *>(user_data);
+    if (!ctx) return false;
+
+    // Accumulate samples for final output
+    if (ctx->all_samples) {
+        ctx->all_samples->insert(ctx->all_samples->end(),
+                                  pcm_data, pcm_data + num_samples);
+    }
+
+    ctx->chunks_received++;
+
+    if (ctx->verbose) {
+        float duration = (float)num_samples / SNAC_GGML_SAMPLE_RATE;
+        LOG_INF("Streaming chunk %d: %d samples (%.2fs)\n",
+                ctx->chunks_received, num_samples, duration);
+    }
+
+    return true;  // Continue streaming
 }
 
 // Build the prompt for Orpheus-TTS
@@ -2312,6 +2354,11 @@ int main(int argc, char ** argv) {
     int batch_size = 1;  // Batch size for SNAC processing
     bool use_gpu = false;  // Use GPU backend for SNAC
 
+    // Streaming TTS parameters
+    bool streaming_mode = false;
+    int streaming_chunk_frames = 8;
+    int streaming_overlap = 4;
+
     // Parse arguments
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -2355,6 +2402,20 @@ int main(int argc, char ** argv) {
             }
         } else if (arg == "--gpu") {
             use_gpu = true;
+        } else if (arg == "--streaming") {
+            streaming_mode = true;
+        } else if (arg == "--streaming-chunk-frames" && i + 1 < argc) {
+            streaming_chunk_frames = std::stoi(argv[++i]);
+            if (streaming_chunk_frames < 4) {
+                LOG_ERR("Error: streaming-chunk-frames must be >= 4\n");
+                return 1;
+            }
+        } else if (arg == "--streaming-overlap" && i + 1 < argc) {
+            streaming_overlap = std::stoi(argv[++i]);
+            if (streaming_overlap < 2 || streaming_overlap > 16) {
+                LOG_ERR("Error: streaming-overlap must be in range [2, 16]\n");
+                return 1;
+            }
         } else {
             LOG_ERR("Unknown argument: %s\n", arg.c_str());
             print_usage(argc, argv);
@@ -2548,6 +2609,13 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Streaming mode requires SNAC GGML
+    if (streaming_mode && !use_snac_ggml) {
+        LOG_ERR("Error: Streaming mode requires --use-snac-ggml\n");
+        print_usage(argc, argv);
+        return 1;
+    }
+
     // Initialize llama.cpp
     llama_backend_init();
     llama_numa_init(GGML_NUMA_STRATEGY_DISABLED);
@@ -2632,6 +2700,33 @@ int main(int argc, char ** argv) {
         LOG_INF("Legacy SNAC vocoder loaded successfully\n");
     }
 
+    // Initialize streaming context if streaming mode is enabled
+    snac_streaming_context streaming_ctx;
+    streaming_callback_ctx streaming_cb_ctx;
+    std::vector<float> streaming_pcm_samples;  // To collect all streaming output
+
+    if (streaming_mode) {
+        snac_streaming_config streaming_cfg;
+        streaming_cfg.min_chunk_frames = streaming_chunk_frames;
+        streaming_cfg.overlap_frames = streaming_overlap;
+        streaming_cfg.crossfade_chunks = true;
+        streaming_cfg.crossfade_samples = 256;
+
+        if (!streaming_ctx.init(&snac_ggml_ctx, streaming_cfg)) {
+            LOG_ERR("Failed to initialize streaming context\n");
+            llama_free(ctx);
+            llama_model_free(model);
+            if (use_snac_ggml) snac_ggml_free(snac_ggml_ctx);
+            if (snac_backend) ggml_backend_free(snac_backend);
+            return 1;
+        }
+
+        streaming_cb_ctx.all_samples = &streaming_pcm_samples;
+        streaming_cb_ctx.verbose = true;
+        LOG_INF("Streaming mode enabled (chunk_frames=%d, overlap=%d)\n",
+                streaming_chunk_frames, streaming_overlap);
+    }
+
     // Build prompt
     LOG_INF("Building prompt for: \"%s\"\n", prompt_text.c_str());
     std::vector<llama_token> prompt_tokens = build_orpheus_prompt(vocab, prompt_text, voice_name);
@@ -2700,6 +2795,16 @@ int main(int argc, char ** argv) {
                 fflush(stdout);
             }
             audio_token_count++;
+
+            // Streaming mode: feed token to streaming decoder
+            if (streaming_mode) {
+                int normalized_token = token - AUDIO_TOKEN_START;
+                streaming_ctx.add_token_and_decode(
+                    normalized_token,
+                    streaming_audio_callback,
+                    &streaming_cb_ctx
+                );
+            }
         } else if (i < 20) {
             // Debug: print first 20 non-audio tokens
             printf("[tok:%d]", token);
@@ -2723,70 +2828,79 @@ int main(int argc, char ** argv) {
 
     LOG_INF("Generated %d tokens\n", (int)generated_tokens.size());
 
-    // Collect audio tokens in pyramid structure
-    printf("DEBUG: Collecting audio tokens...\n");
-    fflush(stdout);
-    auto pyramid_tokens = collect_audio_tokens_pyramid(generated_tokens);
-    printf("DEBUG: pyramid_tokens collected, heads=%zu\n", pyramid_tokens.size());
-    fflush(stdout);
-    LOG_INF("Audio tokens per head: head0=%zu, head1=%zu, head2=%zu\n",
-            pyramid_tokens[0].size(), pyramid_tokens[1].size(), pyramid_tokens[2].size());
-
-    // Dump first and last few tokens from each head for analysis
-    printf("\n=== TOKEN DUMP FOR ANALYSIS ===\n");
-    for (int h = 0; h < 3; h++) {
-        printf("HEAD%d (%zu tokens): ", h, pyramid_tokens[h].size());
-        size_t show = std::min((size_t)10, pyramid_tokens[h].size());
-        printf("FIRST[%zu]: ", show);
-        for (size_t i = 0; i < show; i++) {
-            printf("%d ", pyramid_tokens[h][i]);
-        }
-        if (pyramid_tokens[h].size() > 10) {
-            printf("... LAST[%zu]: ", show);
-            for (size_t i = pyramid_tokens[h].size() - show; i < pyramid_tokens[h].size(); i++) {
-                printf("%d ", pyramid_tokens[h][i]);
-            }
-        }
-        printf("\n");
-
-        // Check for invalid tokens
-        int invalid = 0;
-        for (size_t i = 0; i < pyramid_tokens[h].size(); i++) {
-            if (pyramid_tokens[h][i] < 0 || pyramid_tokens[h][i] >= 4096) {
-                invalid++;
-            }
-        }
-        if (invalid > 0) {
-            printf("  WARNING: %d INVALID TOKENS (outside 0-4095 range)\n", invalid);
-        }
-    }
-    printf("=== END TOKEN DUMP ===\n\n");
-
-    // Decode audio tokens to PCM using SNAC
-    printf("DEBUG: Decoding audio tokens...\n");
-    fflush(stdout);
     std::vector<float> pcm_samples;
-
-    // Performance timing
     auto decode_start = std::chrono::high_resolution_clock::now();
 
-    if (use_snac_ggml) {
-        // Use ggml-based SNAC implementation
-        LOG_INF("Using SNAC GGML decoder (batch_size=%d)\n", batch_size);
+    if (streaming_mode) {
+        // Streaming mode: flush remaining tokens and use collected PCM
+        LOG_INF("Flushing streaming decoder...\n");
+        streaming_ctx.flush(streaming_audio_callback, &streaming_cb_ctx);
 
-        if (batch_size > 1) {
-            // Batched processing (for future multi-sequence support)
-            // For now, we'll process single sequence in batch format
-            // TODO: Implement true batching when we have multiple sequences
-            LOG_WRN("Batch mode requested but currently processing single sequence\n");
-        }
+        pcm_samples = std::move(streaming_pcm_samples);
 
-        // Single sequence decode
-        pcm_samples = snac_ggml_decode(snac_ggml_ctx, pyramid_tokens);
+        LOG_INF("Streaming decode complete:\n");
+        LOG_INF("  Total chunks: %d\n", streaming_cb_ctx.chunks_received);
+        LOG_INF("  Total samples: %zu (%.2fs)\n",
+                pcm_samples.size(), (float)pcm_samples.size() / SNAC_GGML_SAMPLE_RATE);
 
     } else {
-        // Use legacy SNAC implementation
-        decode_snac_tokens(snac, pyramid_tokens, pcm_samples);
+        // Non-streaming mode: collect tokens and decode all at once
+        printf("DEBUG: Collecting audio tokens...\n");
+        fflush(stdout);
+        auto pyramid_tokens = collect_audio_tokens_pyramid(generated_tokens);
+        printf("DEBUG: pyramid_tokens collected, heads=%zu\n", pyramid_tokens.size());
+        fflush(stdout);
+        LOG_INF("Audio tokens per head: head0=%zu, head1=%zu, head2=%zu\n",
+                pyramid_tokens[0].size(), pyramid_tokens[1].size(), pyramid_tokens[2].size());
+
+        // Dump first and last few tokens from each head for analysis
+        printf("\n=== TOKEN DUMP FOR ANALYSIS ===\n");
+        for (int h = 0; h < 3; h++) {
+            printf("HEAD%d (%zu tokens): ", h, pyramid_tokens[h].size());
+            size_t show = std::min((size_t)10, pyramid_tokens[h].size());
+            printf("FIRST[%zu]: ", show);
+            for (size_t i = 0; i < show; i++) {
+                printf("%d ", pyramid_tokens[h][i]);
+            }
+            if (pyramid_tokens[h].size() > 10) {
+                printf("... LAST[%zu]: ", show);
+                for (size_t i = pyramid_tokens[h].size() - show; i < pyramid_tokens[h].size(); i++) {
+                    printf("%d ", pyramid_tokens[h][i]);
+                }
+            }
+            printf("\n");
+
+            // Check for invalid tokens
+            int invalid = 0;
+            for (size_t i = 0; i < pyramid_tokens[h].size(); i++) {
+                if (pyramid_tokens[h][i] < 0 || pyramid_tokens[h][i] >= 4096) {
+                    invalid++;
+                }
+            }
+            if (invalid > 0) {
+                printf("  WARNING: %d INVALID TOKENS (outside 0-4095 range)\n", invalid);
+            }
+        }
+        printf("=== END TOKEN DUMP ===\n\n");
+
+        // Decode audio tokens to PCM using SNAC
+        printf("DEBUG: Decoding audio tokens...\n");
+        fflush(stdout);
+
+        if (use_snac_ggml) {
+            // Use ggml-based SNAC implementation
+            LOG_INF("Using SNAC GGML decoder (batch_size=%d)\n", batch_size);
+
+            if (batch_size > 1) {
+                LOG_WRN("Batch mode requested but currently processing single sequence\n");
+            }
+
+            pcm_samples = snac_ggml_decode(snac_ggml_ctx, pyramid_tokens);
+
+        } else {
+            // Use legacy SNAC implementation
+            decode_snac_tokens(snac, pyramid_tokens, pcm_samples);
+        }
     }
 
     auto decode_end = std::chrono::high_resolution_clock::now();
@@ -2796,19 +2910,18 @@ int main(int argc, char ** argv) {
     fflush(stdout);
 
     // Report performance metrics
-    size_t total_tokens = pyramid_tokens[0].size() + pyramid_tokens[1].size() + pyramid_tokens[2].size();
-    if (decode_duration.count() > 0) {
-        float tokens_per_sec = total_tokens * 1000.0f / decode_duration.count();
+    if (decode_duration.count() > 0 && !pcm_samples.empty()) {
         float audio_duration = (float)pcm_samples.size() / SNAC_SAMPLE_RATE;
         float real_time_factor = (decode_duration.count() / 1000.0f) / audio_duration;
 
         LOG_INF("SNAC decode performance:\n");
         LOG_INF("  Decode time: %ld ms\n", (long)decode_duration.count());
-        LOG_INF("  Tokens processed: %zu\n", total_tokens);
-        LOG_INF("  Tokens/second: %.1f\n", tokens_per_sec);
         LOG_INF("  Audio duration: %.2f seconds\n", audio_duration);
         LOG_INF("  Real-time factor: %.2fx\n", real_time_factor);
-        if (use_snac_ggml) {
+        if (streaming_mode) {
+            LOG_INF("  Mode: Streaming (chunk_frames=%d, overlap=%d)\n",
+                    streaming_chunk_frames, streaming_overlap);
+        } else if (use_snac_ggml) {
             LOG_INF("  Backend: GGML (%s)\n", use_gpu ? "GPU" : "CPU");
         } else {
             LOG_INF("  Backend: Legacy CPU\n");

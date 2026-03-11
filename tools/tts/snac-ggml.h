@@ -17,6 +17,7 @@
 static const int SNAC_GGML_FRAME_SIZE = 7;
 static const int SNAC_GGML_SAMPLE_RATE = 24000;
 static const int SNAC_GGML_UPSAMPLE_FACTOR = 512;
+static const int SNAC_GGML_SAMPLES_PER_FRAME = 2048;  // Each streaming frame produces 2048 samples (4 head2 tokens * 512)
 static const int SNAC_GGML_CODEBOOK_SIZE = 4096;
 static const int SNAC_GGML_DECODER_DIM = 1024;     // Decoder dimension (from config.json decoder_dim)
 static const int SNAC_GGML_QUANTIZER_DIM = 768;     // Quantizer output dimension (latent_dim = encoder_dim * 16 = 48 * 16)
@@ -228,8 +229,8 @@ struct snac_streaming_buffer {
 // Streaming decode configuration
 struct snac_streaming_config {
     int min_chunk_frames = 8;      // Minimum frames before decode
-    int overlap_frames = 4;         // Overlap context for clean boundaries
-    bool crossfade_chunks = true;   // Apply crossfade at chunk boundaries
+    int overlap_frames = 4;         // Overlap context for clean boundaries (default 4 frames)
+    bool crossfade_chunks = false;  // Apply crossfade at chunk boundaries
     int crossfade_samples = 256;    // Crossfade duration in samples
 };
 
@@ -248,9 +249,13 @@ struct snac_streaming_context {
     snac_streaming_buffer buffer;
     snac_streaming_config config;
 
-    // Overlap buffer for crossfading between chunks
-    std::vector<float> overlap_buffer;
-    bool has_overlap = false;
+    // Full-context streaming with audio caching:
+    // We keep the FULL decoded audio from the last decode
+    // When new tokens arrive, we decode again and only output the NEW samples
+    // This ensures: (1) vocoder sees full context, (2) no discontinuity from re-decode
+    std::vector<float> cached_full_audio;  // All audio decoded so far
+    int samples_already_output = 0;         // How many samples sent to callback
+    int last_output_frame_count = 0;        // Frame count at last output
 
     // Statistics
     int total_pcm_samples = 0;

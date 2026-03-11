@@ -2027,12 +2027,21 @@ bool snac_streaming_buffer::add_token(int32_t raw_token) {
     // Determine which head this position maps to
     int head = PYRAMID_MAP[frame_position];
 
-    // Clamp token to valid range
-    int32_t token_value = raw_token;
-    if (token_value < 0) {
+    // Apply position-based offset adjustment (same as collect_audio_tokens_pyramid)
+    // Orpheus encodes tokens from different codebooks at different offsets:
+    // Position 0: tokens 0-4095 (codebook 0)
+    // Position 1: tokens 4096-8191 (codebook 1)
+    // Position 2: tokens 8192-12287 (codebook 2)
+    // etc.
+    // We need to subtract pos * CODEBOOK_SIZE to get the actual codebook index
+    int32_t token_value = raw_token - frame_position * CODEBOOK_SIZE;
+
+    // Validate token range - use default (0) for invalid tokens
+    // This maintains frame structure which is critical for streaming
+    if (token_value < 0 || token_value >= CODEBOOK_SIZE) {
+        // Invalid token - use 0 as default to maintain frame structure
         token_value = 0;
-    } else if (token_value >= CODEBOOK_SIZE) {
-        token_value = CODEBOOK_SIZE - 1;
+        // Don't return early - continue to store the default value
     }
 
     // Add to appropriate head buffer
@@ -2138,14 +2147,13 @@ bool snac_streaming_context::init(snac_ggml_context * ctx, const snac_streaming_
     model_ctx = ctx;
     config = cfg;
     buffer.reset();
-    overlap_buffer.clear();
-    has_overlap = false;
+    samples_already_output = 0;
     total_pcm_samples = 0;
     chunks_decoded = 0;
+    last_output_frame_count = 0;
 
-    LOG_INF("%s: Streaming context initialized (min_chunk=%d, overlap=%d, crossfade=%d)\n",
-            __func__, config.min_chunk_frames, config.overlap_frames,
-            config.crossfade_chunks ? config.crossfade_samples : 0);
+    LOG_INF("%s: Streaming context initialized (min_chunk=%d, full-context mode)\n",
+            __func__, config.min_chunk_frames);
 
     return true;
 }
@@ -2163,27 +2171,48 @@ bool snac_streaming_context::add_token_and_decode(
     // Add token to buffer
     buffer.add_token(raw_token);
 
-    // Check if we have enough frames for a chunk with overlap
-    // Required: min_chunk_frames + 2 * overlap_frames
-    // (overlap on both sides for clean boundary handling)
-    int required_frames = config.min_chunk_frames + 2 * config.overlap_frames;
+    int current_frames = buffer.get_frame_count();
 
-    if (!buffer.has_frames(required_frames)) {
-        return false;  // Not enough data yet
+    // TWO-SIDED OVERLAP STREAMING:
+    // SNAC decoder needs BOTH left and right context for correct boundary handling.
+    // - Left context: first few frames of each decode don't have proper left padding
+    // - Right context: last few frames don't have proper right padding
+    //
+    // We need overlap frames on BOTH sides to get clean output.
+    // This means we need (min_chunk_frames + 2*overlap) total frames to output min_chunk_frames.
+
+    int overlap = config.overlap_frames > 0 ? config.overlap_frames : 4;  // Default 4 frames overlap
+
+    // For first decode, we have no "left overlap" to skip
+    // So we use a different strategy:
+    // - First decode: skip right overlap only (output frames 0 to current-overlap)
+    // - Subsequent decodes: use left_offset to skip left overlap
+
+    // Calculate how many frames we can output (skipping right overlap)
+    int outputable_end = current_frames - overlap;
+
+    // On first decode, we output from frame 0
+    // On subsequent decodes, we need to skip the left overlap (which was already output with crossfade)
+    int output_start = last_output_frame_count;
+
+    // Check if we have enough NEW frames to output
+    int new_outputable = outputable_end - output_start;
+    if (new_outputable < config.min_chunk_frames) {
+        return false;  // Not enough outputable frames yet
     }
 
-    // Get frames for decoding (includes overlap context)
-    auto tokens = buffer.get_completed_frames(required_frames);
+    // Decode ALL tokens (decoder needs full context)
+    auto tokens = buffer.get_completed_frames();
 
     if (tokens.size() != 3 || tokens[0].empty()) {
-        LOG_WRN("%s: Failed to get completed frames\n", __func__);
+        LOG_WRN("%s: Failed to get frames\n", __func__);
         return false;
     }
 
-    LOG_DBG("%s: Decoding chunk with %d frames (tokens: head0=%zu, head1=%zu, head2=%zu)\n",
-            __func__, required_frames, tokens[0].size(), tokens[1].size(), tokens[2].size());
+    LOG_DBG("%s: Decoding %d frames, outputting frames %d to %d (%d new, keeping %d right overlap)\n",
+            __func__, current_frames, output_start, outputable_end, new_outputable, overlap);
 
-    // Decode chunk using existing snac_ggml_decode
+    // Decode ALL tokens
     std::vector<float> pcm = snac_ggml_decode(*model_ctx, tokens);
 
     if (pcm.empty()) {
@@ -2191,65 +2220,24 @@ bool snac_streaming_context::add_token_and_decode(
         return false;
     }
 
-    // Calculate sample positions for chunk extraction
-    // Each frame produces UPSAMPLE_FACTOR (512) samples
-    const int UPSAMPLE = SNAC_GGML_UPSAMPLE_FACTOR;
-    int overlap_samples = config.overlap_frames * UPSAMPLE;
-    int output_samples = config.min_chunk_frames * UPSAMPLE;
+    // Calculate sample positions
+    // Each frame produces SNAC_GGML_SAMPLES_PER_FRAME (2048) samples
+    const int samples_per_frame = SNAC_GGML_SAMPLES_PER_FRAME;
 
-    // Output region: skip overlap prefix, take min_chunk_frames
-    int output_start = overlap_samples;
-    int output_end = output_start + output_samples;
+    // Output samples from output_start to outputable_end
+    int start_sample = output_start * samples_per_frame;
+    int end_sample = outputable_end * samples_per_frame;
 
-    if (output_end > (int)pcm.size()) {
-        output_end = pcm.size();
-    }
-
-    // Extract output region
     std::vector<float> output_pcm;
-    output_pcm.reserve(output_samples);
-
-    // Apply crossfade with previous chunk's overlap if available
-    if (has_overlap && config.crossfade_chunks && !overlap_buffer.empty()) {
-        int crossfade_len = std::min(config.crossfade_samples,
-                                     std::min((int)overlap_buffer.size(), output_samples));
-
-        for (int i = 0; i < output_samples; i++) {
-            int pcm_idx = output_start + i;
-
-            if (pcm_idx >= output_end) {
-                break;
-            }
-
-            float sample;
-            if (i < crossfade_len && i < (int)overlap_buffer.size()) {
-                // Crossfade: blend end of previous overlap with start of new output
-                float alpha = (float)(i + 1) / (crossfade_len + 1);
-                sample = (1.0f - alpha) * overlap_buffer[i] + alpha * pcm[pcm_idx];
-            } else {
-                sample = pcm[pcm_idx];
-            }
-
-            output_pcm.push_back(sample);
-        }
-
-        LOG_DBG("%s: Applied crossfade (len=%d)\n", __func__, crossfade_len);
-    } else {
-        // No crossfade needed (first chunk or disabled)
-        for (int i = output_start; i < output_end; i++) {
-            output_pcm.push_back(pcm[i]);
+    if (start_sample < (int)pcm.size()) {
+        int actual_end = std::min(end_sample, (int)pcm.size());
+        if (actual_end > start_sample) {
+            output_pcm.assign(pcm.begin() + start_sample, pcm.begin() + actual_end);
         }
     }
 
-    // Save overlap for next chunk (last overlap_samples of output region)
-    int overlap_start = output_end - overlap_samples;
-    if (overlap_start >= 0 && overlap_start < (int)pcm.size()) {
-        overlap_buffer.assign(pcm.begin() + overlap_start, pcm.begin() + output_end);
-        has_overlap = true;
-    }
-
-    // Consume processed frames from buffer (only the output part, keep overlap for next)
-    buffer.consume_frames(config.min_chunk_frames);
+    // Update tracking
+    last_output_frame_count = outputable_end;
 
     // Output via callback
     bool continue_stream = true;
@@ -2260,9 +2248,10 @@ bool snac_streaming_context::add_token_and_decode(
     total_pcm_samples += output_pcm.size();
     chunks_decoded++;
 
-    LOG_DBG("%s: Chunk %d decoded: %zu samples (%.2fs), total: %d samples\n",
+    LOG_DBG("%s: Chunk %d: %zu samples (%.2fs), frames %d-%d, total: %d samples\n",
             __func__, chunks_decoded, output_pcm.size(),
             (float)output_pcm.size() / SNAC_GGML_SAMPLE_RATE,
+            output_start, outputable_end,
             total_pcm_samples);
 
     return true;
@@ -2275,80 +2264,69 @@ void snac_streaming_context::flush(snac_audio_callback callback, void * user_dat
 
     // Get all remaining frames
     int remaining_frames = buffer.get_frame_count();
-    auto tokens = buffer.get_completed_frames();
 
-    if (tokens.size() != 3 || tokens[0].empty()) {
+    // If we've already output some frames, only output the remaining
+    if (last_output_frame_count >= remaining_frames) {
+        buffer.reset();
+        last_output_frame_count = 0;
         return;
     }
 
-    LOG_INF("%s: Flushing %d remaining frames\n", __func__, remaining_frames);
+    auto tokens = buffer.get_completed_frames();
 
-    // Decode final chunk
+    if (tokens.size() != 3 || tokens[0].empty()) {
+        buffer.reset();
+        last_output_frame_count = 0;
+        return;
+    }
+
+    LOG_INF("%s: Flushing remaining %d frames (frames %d to %d)\n",
+            __func__, remaining_frames - last_output_frame_count,
+            last_output_frame_count, remaining_frames);
+
+    // Decode ALL remaining tokens
     std::vector<float> pcm = snac_ggml_decode(*model_ctx, tokens);
 
     if (pcm.empty()) {
         buffer.reset();
+        last_output_frame_count = 0;
         return;
     }
 
-    // For final chunk, skip overlap prefix if we have previous overlap
-    const int UPSAMPLE = SNAC_GGML_UPSAMPLE_FACTOR;
-    int skip_samples = has_overlap ? config.overlap_frames * UPSAMPLE : 0;
+    // Calculate sample positions for remaining output
+    const int samples_per_frame = SNAC_GGML_SAMPLES_PER_FRAME;
+    int start_sample = last_output_frame_count * samples_per_frame;
+    int end_sample = remaining_frames * samples_per_frame;
 
-    // Apply crossfade and extract output
+    // Output remaining samples
     std::vector<float> output_pcm;
-    int output_len = pcm.size() - skip_samples;
-    output_pcm.reserve(output_len);
-
-    if (has_overlap && config.crossfade_chunks && !overlap_buffer.empty()) {
-        int crossfade_len = std::min(config.crossfade_samples,
-                                     std::min((int)overlap_buffer.size(), output_len));
-
-        for (int i = 0; i < output_len; i++) {
-            int pcm_idx = skip_samples + i;
-            if (pcm_idx >= (int)pcm.size()) {
-                break;
-            }
-
-            float sample;
-            if (i < crossfade_len && i < (int)overlap_buffer.size()) {
-                float alpha = (float)(i + 1) / (crossfade_len + 1);
-                sample = (1.0f - alpha) * overlap_buffer[i] + alpha * pcm[pcm_idx];
-            } else {
-                sample = pcm[pcm_idx];
-            }
-
-            output_pcm.push_back(sample);
-        }
-    } else {
-        for (int i = skip_samples; i < (int)pcm.size(); i++) {
-            output_pcm.push_back(pcm[i]);
+    if (start_sample < (int)pcm.size()) {
+        int actual_end = std::min(end_sample, (int)pcm.size());
+        if (actual_end > start_sample) {
+            output_pcm.assign(pcm.begin() + start_sample, pcm.begin() + actual_end);
         }
     }
 
-    // Output final chunk
     if (!output_pcm.empty() && callback) {
         callback(output_pcm.data(), output_pcm.size(), user_data);
+        total_pcm_samples += output_pcm.size();
+        chunks_decoded++;
     }
-
-    total_pcm_samples += output_pcm.size();
-    chunks_decoded++;
 
     LOG_INF("%s: Final chunk: %zu samples (%.2fs), total: %d samples\n",
             __func__, output_pcm.size(),
             (float)output_pcm.size() / SNAC_GGML_SAMPLE_RATE,
             total_pcm_samples);
 
-    // Reset buffer state
+    // Reset state
     buffer.reset();
-    overlap_buffer.clear();
-    has_overlap = false;
+    last_output_frame_count = 0;
 }
 
 void snac_streaming_context::reset() {
     buffer.reset();
-    overlap_buffer.clear();
-    has_overlap = false;
+    samples_already_output = 0;
+    last_output_frame_count = 0;
     total_pcm_samples = 0;
     chunks_decoded = 0;
 }
