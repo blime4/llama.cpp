@@ -262,6 +262,7 @@ struct snac_streaming_context {
     // Statistics
     int total_pcm_samples = 0;
     int chunks_decoded = 0;
+    int64_t total_decode_time_ms = 0;  // Total SNAC decode time in streaming mode
 
     // Initialize streaming context
     bool init(snac_ggml_context * ctx, const snac_streaming_config & cfg);
@@ -283,4 +284,5 @@ struct snac_streaming_context {
     // Get statistics
     int get_total_samples() const { return total_pcm_samples; }
     int get_chunks_decoded() const { return chunks_decoded; }
+    int64_t get_decode_time_ms() const { return total_decode_time_ms; }
 };

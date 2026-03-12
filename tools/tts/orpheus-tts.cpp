@@ -2852,10 +2852,21 @@ int main(int argc, char ** argv) {
     std::vector<float> pcm_samples;
     auto decode_start = std::chrono::high_resolution_clock::now();
 
+    // For streaming mode, track SNAC time before flush (inside LLM loop)
+    int64_t snac_time_before_flush = 0;
+
     if (streaming_mode) {
         // Streaming mode: flush remaining tokens and use collected PCM
+        // Note: flush SNAC time is tracked in streaming context but happens after LLM loop
+        // We need to exclude flush time from SNAC timing for accurate RTF calculation
+        snac_time_before_flush = streaming_ctx.get_decode_time_ms();
+        LOG_INF("  SNAC time inside LLM loop: %ld ms\n", (long)snac_time_before_flush);
+
         LOG_INF("Flushing streaming decoder...\n");
         streaming_ctx.flush(streaming_audio_callback, &streaming_cb_ctx);
+
+        int64_t snac_flush_time = streaming_ctx.get_decode_time_ms() - snac_time_before_flush;
+        LOG_INF("  SNAC flush time: %ld ms\n", (long)snac_flush_time);
 
         pcm_samples = std::move(streaming_pcm_samples);
 
@@ -2935,9 +2946,24 @@ int main(int argc, char ** argv) {
         float audio_duration = (float)pcm_samples.size() / SNAC_SAMPLE_RATE;
 
         // Calculate individual RTFs
-        float llm_rtf = (llm_duration_ms.count() / 1000.0f) / audio_duration;
-        float snac_rtf = (decode_duration.count() / 1000.0f) / audio_duration;
-        float total_time_ms = llm_duration_ms.count() + decode_duration.count();
+        // For streaming mode, the timing is complex because SNAC decode happens interleaved with LLM
+        // The total time (llm_duration_ms for streaming) is the wall-clock time
+        // SNAC time is tracked separately but happens inside the LLM loop
+        int64_t pure_llm_ms, snac_ms, total_time_ms;
+        if (streaming_mode) {
+            snac_ms = snac_time_before_flush;  // SNAC time from inside LLM loop
+            // For streaming, total time is just the LLM loop time (SNAC is inside it)
+            total_time_ms = llm_duration_ms.count();
+            // Pure LLM time cannot be negative - if SNAC > total, just show 0
+            pure_llm_ms = std::max((int64_t)0, total_time_ms - snac_ms);
+        } else {
+            snac_ms = decode_duration.count();
+            pure_llm_ms = llm_duration_ms.count();
+            total_time_ms = pure_llm_ms + snac_ms;
+        }
+
+        float llm_rtf = (pure_llm_ms / 1000.0f) / audio_duration;
+        float snac_rtf = (snac_ms / 1000.0f) / audio_duration;
         float total_rtf = (total_time_ms / 1000.0f) / audio_duration;
 
         LOG_INF("\n");
@@ -2945,10 +2971,10 @@ int main(int argc, char ** argv) {
         LOG_INF("PERFORMANCE REPORT (RTF Breakdown)\n");
         LOG_INF("========================================\n");
         LOG_INF("  Audio duration:    %.2f seconds\n", audio_duration);
-        LOG_INF("  LLM inference:     %ld ms  (RTF: %.2fx)\n", (long)llm_duration_ms.count(), llm_rtf);
-        LOG_INF("  SNAC vocoder:      %ld ms  (RTF: %.2fx)\n", (long)decode_duration.count(), snac_rtf);
+        LOG_INF("  LLM inference:     %ld ms  (RTF: %.2fx)\n", (long)pure_llm_ms, llm_rtf);
+        LOG_INF("  SNAC vocoder:      %ld ms  (RTF: %.2fx)\n", (long)snac_ms, snac_rtf);
         LOG_INF("  ----------------------------------------\n");
-        LOG_INF("  Total processing:  %.0f ms  (RTF: %.2fx)\n", total_time_ms, total_rtf);
+        LOG_INF("  Total processing:  %ld ms  (RTF: %.2fx)\n", (long)total_time_ms, total_rtf);
         LOG_INF("========================================\n");
 
         if (total_rtf < 1.0f) {

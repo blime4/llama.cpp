@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
+#include <chrono>
 
 // Snake activation: snake(x, alpha) = x + sin²(alpha * x) / (alpha + eps)
 // Matches Python: x + (alpha + 1e-9).reciprocal() * torch.sin(alpha * x).pow(2)
@@ -2231,8 +2232,17 @@ bool snac_streaming_context::add_token_and_decode(
     LOG_DBG("%s: Decoding %d frames (window), total_frames=%d, outputting frames %d to %d\n",
             __func__, decode_frame_count, current_frames, output_start, outputable_end);
 
+    // Track SNAC decode time separately
+    auto snac_decode_start = std::chrono::high_resolution_clock::now();
+
     // Decode the sliding window
     std::vector<float> pcm = snac_ggml_decode(*model_ctx, tokens);
+
+    auto snac_decode_end = std::chrono::high_resolution_clock::now();
+    auto snac_decode_duration = std::chrono::duration_cast<std::chrono::milliseconds>(snac_decode_end - snac_decode_start);
+    total_decode_time_ms += snac_decode_duration.count();
+    LOG_INF("%s: SNAC decode took %ld ms, total accumulated: %ld ms\n",
+            __func__, (long)snac_decode_duration.count(), (long)total_decode_time_ms);
 
     if (pcm.empty()) {
         LOG_WRN("%s: Decode returned empty audio\n", __func__);
@@ -2307,8 +2317,15 @@ void snac_streaming_context::flush(snac_audio_callback callback, void * user_dat
             __func__, remaining_frames - last_output_frame_count,
             last_output_frame_count, remaining_frames);
 
+    // Track SNAC decode time
+    auto decode_start = std::chrono::high_resolution_clock::now();
+
     // Decode ALL remaining tokens
     std::vector<float> pcm = snac_ggml_decode(*model_ctx, tokens);
+
+    auto decode_end = std::chrono::high_resolution_clock::now();
+    auto decode_duration = std::chrono::duration_cast<std::chrono::milliseconds>(decode_end - decode_start);
+    total_decode_time_ms += decode_duration.count();
 
     if (pcm.empty()) {
         buffer.reset();
