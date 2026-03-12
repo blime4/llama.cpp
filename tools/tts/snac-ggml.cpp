@@ -2077,34 +2077,39 @@ bool snac_streaming_buffer::has_frames(int n) const {
     return total_frames_completed >= n;
 }
 
-std::vector<std::vector<int32_t>> snac_streaming_buffer::get_completed_frames(int max_frames) const {
+std::vector<std::vector<int32_t>> snac_streaming_buffer::get_completed_frames(int max_frames, int start_frame) const {
     std::vector<std::vector<int32_t>> result(3);
 
-    int n = (max_frames < 0) ? total_frames_completed :
-            std::min(max_frames, total_frames_completed);
+    // If start_frame is not specified, use 0
+    int start = (start_frame < 0) ? 0 : start_frame;
+    int total_frames = total_frames_completed;
 
-    if (n <= 0) {
+    // Calculate how many frames to return
+    int n = (max_frames < 0) ? (total_frames - start) :
+            std::min(max_frames, total_frames - start);
+
+    if (n <= 0 || start >= total_frames) {
         return result;
     }
 
-    // Copy first n frames worth of tokens from each head
+    // Copy n frames worth of tokens from each head, starting at start_frame
     // Note: head0 has 1 token/frame, head1 has 2 tokens/frame, head2 has 4 tokens/frame
     // This is based on the pyramid structure: [0, 1, 2, 2, 1, 2, 2]
     // Position mapping: head0 appears once, head1 appears twice, head2 appears four times
 
     // head0: 1 token per frame
-    if ((int)head0_tokens.size() >= n) {
-        result[0].assign(head0_tokens.begin(), head0_tokens.begin() + n);
+    if ((int)head0_tokens.size() >= start + n) {
+        result[0].assign(head0_tokens.begin() + start, head0_tokens.begin() + start + n);
     }
 
     // head1: 2 tokens per frame
-    if ((int)head1_tokens.size() >= n * 2) {
-        result[1].assign(head1_tokens.begin(), head1_tokens.begin() + n * 2);
+    if ((int)head1_tokens.size() >= (start + n) * 2) {
+        result[1].assign(head1_tokens.begin() + start * 2, head1_tokens.begin() + (start + n) * 2);
     }
 
     // head2: 4 tokens per frame
-    if ((int)head2_tokens.size() >= n * 4) {
-        result[2].assign(head2_tokens.begin(), head2_tokens.begin() + n * 4);
+    if ((int)head2_tokens.size() >= (start + n) * 4) {
+        result[2].assign(head2_tokens.begin() + start * 4, head2_tokens.begin() + (start + n) * 4);
     }
 
     return result;
@@ -2201,18 +2206,32 @@ bool snac_streaming_context::add_token_and_decode(
         return false;  // Not enough outputable frames yet
     }
 
-    // Decode ALL tokens (decoder needs full context)
-    auto tokens = buffer.get_completed_frames();
+    // SLIDING WINDOW OPTIMIZATION:
+    // Instead of decoding ALL tokens every time (O(n²) complexity),
+    // we use a sliding window of recent frames for decoding context.
+    // The decoder needs context for clean boundaries, but not ALL history.
+    int window_frames = config.sliding_window_frames > 0 ? config.sliding_window_frames : 64;
+    int decode_start_frame = 0;
+    int decode_frame_count = current_frames;
+
+    if (current_frames > window_frames) {
+        // Use sliding window: decode only the last window_frames
+        decode_start_frame = current_frames - window_frames;
+        decode_frame_count = window_frames;
+    }
+
+    // Get tokens for the sliding window
+    auto tokens = buffer.get_completed_frames(decode_frame_count, decode_start_frame);
 
     if (tokens.size() != 3 || tokens[0].empty()) {
         LOG_WRN("%s: Failed to get frames\n", __func__);
         return false;
     }
 
-    LOG_DBG("%s: Decoding %d frames, outputting frames %d to %d (%d new, keeping %d right overlap)\n",
-            __func__, current_frames, output_start, outputable_end, new_outputable, overlap);
+    LOG_DBG("%s: Decoding %d frames (window), total_frames=%d, outputting frames %d to %d\n",
+            __func__, decode_frame_count, current_frames, output_start, outputable_end);
 
-    // Decode ALL tokens
+    // Decode the sliding window
     std::vector<float> pcm = snac_ggml_decode(*model_ctx, tokens);
 
     if (pcm.empty()) {
@@ -2225,11 +2244,15 @@ bool snac_streaming_context::add_token_and_decode(
     const int samples_per_frame = SNAC_GGML_SAMPLES_PER_FRAME;
 
     // Output samples from output_start to outputable_end
-    int start_sample = output_start * samples_per_frame;
-    int end_sample = outputable_end * samples_per_frame;
+    // Adjust for sliding window offset
+    int adjusted_output_start = output_start - decode_start_frame;
+    int adjusted_outputable_end = outputable_end - decode_start_frame;
+
+    int start_sample = adjusted_output_start * samples_per_frame;
+    int end_sample = adjusted_outputable_end * samples_per_frame;
 
     std::vector<float> output_pcm;
-    if (start_sample < (int)pcm.size()) {
+    if (start_sample >= 0 && start_sample < (int)pcm.size()) {
         int actual_end = std::min(end_sample, (int)pcm.size());
         if (actual_end > start_sample) {
             output_pcm.assign(pcm.begin() + start_sample, pcm.begin() + actual_end);

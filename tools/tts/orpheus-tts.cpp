@@ -109,6 +109,7 @@ static void print_usage(int, char ** argv) {
     LOG("  --temp N              temperature (default: 0.1)\n");
     LOG("  --top-k N             top-k sampling (default: 40)\n");
     LOG("  --top-p N             top-p sampling (default: 0.9)\n");
+    LOG("  -ngl, --n-gpu-layers N  number of layers to offload to GPU (default: -1 = all)\n");
     LOG("  --use-snac-ggml       use ggml-based SNAC vocoder (enables GPU acceleration)\n");
     LOG("  --batch-size N        batch size for SNAC processing (default: 1)\n");
     LOG("  --gpu                 use GPU backend for SNAC vocoder\n");
@@ -2353,10 +2354,11 @@ int main(int argc, char ** argv) {
     bool use_snac_ggml = false;  // Use ggml-based SNAC implementation
     int batch_size = 1;  // Batch size for SNAC processing
     bool use_gpu = false;  // Use GPU backend for SNAC
+    int n_gpu_layers = -1;  // Number of layers to offload to GPU (-1 = all)
 
     // Streaming TTS parameters
     bool streaming_mode = false;
-    int streaming_chunk_frames = 8;
+    int streaming_chunk_frames = 32;  // Increased from 8 to reduce re-decode frequency (O(n²) -> O(n))
     int streaming_overlap = 4;
 
     // Parse arguments
@@ -2386,6 +2388,8 @@ int main(int argc, char ** argv) {
             top_k = std::stoi(argv[++i]);
         } else if (arg == "--top-p" && i + 1 < argc) {
             top_p = std::stof(argv[++i]);
+        } else if ((arg == "-ngl" || arg == "--n-gpu-layers") && i + 1 < argc) {
+            n_gpu_layers = std::stoi(argv[++i]);
         } else if (arg == "--test-vocoder") {
             test_vocoder = true;
         } else if (arg == "--test-snac-ggml") {
@@ -2622,8 +2626,9 @@ int main(int argc, char ** argv) {
 
     // Load LLM model
     llama_model_params model_params = llama_model_default_params();
+    model_params.n_gpu_layers = n_gpu_layers;
 
-    LOG_INF("Loading model from %s...\n", model_path.c_str());
+    LOG_INF("Loading model from %s (n_gpu_layers=%d)...\n", model_path.c_str(), n_gpu_layers);
     llama_model * model = llama_model_load_from_file(model_path.c_str(), model_params);
     if (!model) {
         LOG_ERR("Failed to load model from %s\n", model_path.c_str());
@@ -2663,9 +2668,17 @@ int main(int argc, char ** argv) {
         } else {
             LOG_WRN("CUDA backend initialization failed, falling back to CPU\n");
             snac_backend = ggml_backend_cpu_init();
+            if (snac_backend && n_threads > 0) {
+                ggml_backend_cpu_set_n_threads(snac_backend, n_threads);
+                LOG_INF("SNAC CPU backend using %d threads\n", n_threads);
+            }
         }
     } else {
         snac_backend = ggml_backend_cpu_init();
+        if (snac_backend && n_threads > 0) {
+            ggml_backend_cpu_set_n_threads(snac_backend, n_threads);
+            LOG_INF("SNAC CPU backend using %d threads\n", n_threads);
+        }
     }
 
     snac_ggml_context snac_ggml_ctx;
@@ -2770,6 +2783,9 @@ int main(int argc, char ** argv) {
     std::vector<llama_token> generated_tokens;
     int n_pos = prompt_tokens.size();
 
+    // LLM inference timing (starts after prompt encoding)
+    auto llm_start = std::chrono::high_resolution_clock::now();
+
     for (int i = 0; i < n_predict; i++) {
         // Sample next token
         llama_token token = common_sampler_sample(sampler, ctx, batch.n_tokens - 1);
@@ -2826,7 +2842,12 @@ int main(int argc, char ** argv) {
     }
     printf("\n");
 
+    // LLM inference timing (ends after generation)
+    auto llm_end = std::chrono::high_resolution_clock::now();
+    auto llm_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(llm_end - llm_start);
+
     LOG_INF("Generated %d tokens\n", (int)generated_tokens.size());
+    LOG_INF("LLM inference time: %ld ms\n", (long)llm_duration_ms.count());
 
     std::vector<float> pcm_samples;
     auto decode_start = std::chrono::high_resolution_clock::now();
@@ -2909,22 +2930,41 @@ int main(int argc, char ** argv) {
     printf("DEBUG: Decode returned, samples=%zu\n", pcm_samples.size());
     fflush(stdout);
 
-    // Report performance metrics
-    if (decode_duration.count() > 0 && !pcm_samples.empty()) {
+    // Report performance metrics with RTF breakdown
+    if (!pcm_samples.empty()) {
         float audio_duration = (float)pcm_samples.size() / SNAC_SAMPLE_RATE;
-        float real_time_factor = (decode_duration.count() / 1000.0f) / audio_duration;
 
-        LOG_INF("SNAC decode performance:\n");
-        LOG_INF("  Decode time: %ld ms\n", (long)decode_duration.count());
-        LOG_INF("  Audio duration: %.2f seconds\n", audio_duration);
-        LOG_INF("  Real-time factor: %.2fx\n", real_time_factor);
+        // Calculate individual RTFs
+        float llm_rtf = (llm_duration_ms.count() / 1000.0f) / audio_duration;
+        float snac_rtf = (decode_duration.count() / 1000.0f) / audio_duration;
+        float total_time_ms = llm_duration_ms.count() + decode_duration.count();
+        float total_rtf = (total_time_ms / 1000.0f) / audio_duration;
+
+        LOG_INF("\n");
+        LOG_INF("========================================\n");
+        LOG_INF("PERFORMANCE REPORT (RTF Breakdown)\n");
+        LOG_INF("========================================\n");
+        LOG_INF("  Audio duration:    %.2f seconds\n", audio_duration);
+        LOG_INF("  LLM inference:     %ld ms  (RTF: %.2fx)\n", (long)llm_duration_ms.count(), llm_rtf);
+        LOG_INF("  SNAC vocoder:      %ld ms  (RTF: %.2fx)\n", (long)decode_duration.count(), snac_rtf);
+        LOG_INF("  ----------------------------------------\n");
+        LOG_INF("  Total processing:  %.0f ms  (RTF: %.2fx)\n", total_time_ms, total_rtf);
+        LOG_INF("========================================\n");
+
+        if (total_rtf < 1.0f) {
+            LOG_INF("✓ RTF < 1.0: REAL-TIME CAPABLE\n");
+        } else {
+            LOG_INF("✗ RTF >= 1.0: NOT REAL-TIME (need optimization)\n");
+        }
+        LOG_INF("\n");
+
         if (streaming_mode) {
             LOG_INF("  Mode: Streaming (chunk_frames=%d, overlap=%d)\n",
                     streaming_chunk_frames, streaming_overlap);
         } else if (use_snac_ggml) {
-            LOG_INF("  Backend: GGML (%s)\n", use_gpu ? "GPU" : "CPU");
+            LOG_INF("  SNAC Backend: GGML (%s)\n", use_gpu ? "GPU" : "CPU");
         } else {
-            LOG_INF("  Backend: Legacy CPU\n");
+            LOG_INF("  SNAC Backend: Legacy CPU\n");
         }
     }
 

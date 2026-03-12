@@ -213,7 +213,8 @@ struct snac_streaming_buffer {
     // Get completed frames (does not consume)
     // Returns vector of 3 token vectors (head0, head1, head2)
     // max_frames: -1 for all, otherwise limit to N frames
-    std::vector<std::vector<int32_t>> get_completed_frames(int max_frames = -1) const;
+    // start_frame: starting frame index for sliding window (default -1 = from beginning)
+    std::vector<std::vector<int32_t>> get_completed_frames(int max_frames = -1, int start_frame = -1) const;
 
     // Consume frames from buffer (after successful decode)
     void consume_frames(int n_frames);
@@ -228,10 +229,11 @@ struct snac_streaming_buffer {
 
 // Streaming decode configuration
 struct snac_streaming_config {
-    int min_chunk_frames = 8;      // Minimum frames before decode
+    int min_chunk_frames = 32;     // Minimum frames before decode (increased from 8 to reduce re-decode frequency)
     int overlap_frames = 4;         // Overlap context for clean boundaries (default 4 frames)
     bool crossfade_chunks = false;  // Apply crossfade at chunk boundaries
     int crossfade_samples = 256;    // Crossfade duration in samples
+    int sliding_window_frames = 64; // Maximum frames to decode per chunk (sliding window)
 };
 
 // Audio output callback type
