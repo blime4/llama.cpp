@@ -116,6 +116,8 @@ static void print_usage(int, char ** argv) {
     LOG("  --streaming           enable streaming TTS (incremental audio output)\n");
     LOG("  --streaming-chunk-frames N  frames per chunk (default: 8)\n");
     LOG("  --streaming-overlap N overlap frames for clean boundaries (default: 4)\n");
+    LOG("  --pipeline            enable pipeline mode (LLM+SNAC parallel execution)\n");
+    LOG("  --pipeline-chunk-frames N  frames per pipeline chunk (default: 16)\n");
     LOG("\nexample:\n");
     LOG("  %s -m orpheus-3b-f16.gguf --model-vocoder snac-24khz-f16.gguf \\\n", argv[0]);
     LOG("      -p \"Hello, how are you?\" -o greeting.wav\n");
@@ -2361,6 +2363,10 @@ int main(int argc, char ** argv) {
     int streaming_chunk_frames = 32;  // Increased from 8 to reduce re-decode frequency (O(n²) -> O(n))
     int streaming_overlap = 4;
 
+    // Pipeline mode parameters (LLM + SNAC parallel execution)
+    bool pipeline_mode = false;
+    int pipeline_chunk_frames = 16;  // Frames per pipeline chunk
+
     // Parse arguments
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -2418,6 +2424,14 @@ int main(int argc, char ** argv) {
             streaming_overlap = std::stoi(argv[++i]);
             if (streaming_overlap < 2 || streaming_overlap > 16) {
                 LOG_ERR("Error: streaming-overlap must be in range [2, 16]\n");
+                return 1;
+            }
+        } else if (arg == "--pipeline") {
+            pipeline_mode = true;
+        } else if (arg == "--pipeline-chunk-frames" && i + 1 < argc) {
+            pipeline_chunk_frames = std::stoi(argv[++i]);
+            if (pipeline_chunk_frames < 4 || pipeline_chunk_frames > 64) {
+                LOG_ERR("Error: pipeline-chunk-frames must be in range [4, 64]\n");
                 return 1;
             }
         } else {
@@ -2718,6 +2732,10 @@ int main(int argc, char ** argv) {
     streaming_callback_ctx streaming_cb_ctx;
     std::vector<float> streaming_pcm_samples;  // To collect all streaming output
 
+    // Pipeline mode (async LLM + SNAC)
+    snac_async_decoder async_decoder;
+    int pipeline_chunk_id = 0;
+
     if (streaming_mode) {
         snac_streaming_config streaming_cfg;
         streaming_cfg.min_chunk_frames = streaming_chunk_frames;
@@ -2738,6 +2756,21 @@ int main(int argc, char ** argv) {
         streaming_cb_ctx.verbose = true;
         LOG_INF("Streaming mode enabled (chunk_frames=%d, overlap=%d)\n",
                 streaming_chunk_frames, streaming_overlap);
+
+        // Initialize async decoder for pipeline mode
+        if (pipeline_mode) {
+            if (!async_decoder.init(&snac_ggml_ctx, snac_backend)) {
+                LOG_ERR("Failed to initialize async SNAC decoder\n");
+                llama_free(ctx);
+                llama_model_free(model);
+                if (use_snac_ggml) snac_ggml_free(snac_ggml_ctx);
+                if (snac_backend) ggml_backend_free(snac_backend);
+                return 1;
+            }
+            async_decoder.start();
+            LOG_INF("Pipeline mode enabled (async SNAC decoder started, chunk_frames=%d)\n",
+                    pipeline_chunk_frames);
+        }
     }
 
     // Build prompt
@@ -2815,11 +2848,52 @@ int main(int argc, char ** argv) {
             // Streaming mode: feed token to streaming decoder
             if (streaming_mode) {
                 int normalized_token = token - AUDIO_TOKEN_START;
-                streaming_ctx.add_token_and_decode(
-                    normalized_token,
-                    streaming_audio_callback,
-                    &streaming_cb_ctx
-                );
+
+                if (pipeline_mode) {
+                    // Pipeline mode: use existing streaming buffer for token parsing
+                    // but submit chunks to async decoder instead of synchronous decode
+                    streaming_ctx.buffer.add_token(normalized_token);
+
+                    // Check if we have enough frames for a pipeline chunk
+                    if (streaming_ctx.buffer.has_frames(pipeline_chunk_frames)) {
+                        // Extract tokens for this chunk
+                        auto frames = streaming_ctx.buffer.get_completed_frames(pipeline_chunk_frames);
+
+                        snac_chunk_task task;
+                        task.tokens_head0 = frames[0];
+                        task.tokens_head1 = frames[1];
+                        task.tokens_head2 = frames[2];
+                        task.chunk_id = pipeline_chunk_id++;
+
+                        async_decoder.submit_chunk(task);
+                        streaming_ctx.buffer.consume_frames(pipeline_chunk_frames);
+
+                        LOG_DBG("Submitted pipeline chunk %d (%zu frames)\n",
+                                task.chunk_id, task.tokens_head0.size());
+                    }
+
+                    // Collect completed results (non-blocking)
+                    snac_chunk_result result;
+                    while (async_decoder.try_get_result(result)) {
+                        if (result.success && !result.pcm_samples.empty()) {
+                            streaming_pcm_samples.insert(
+                                streaming_pcm_samples.end(),
+                                result.pcm_samples.begin(),
+                                result.pcm_samples.end()
+                            );
+                            streaming_cb_ctx.chunks_received++;
+                            LOG_DBG("Pipeline chunk %d completed: %zu samples\n",
+                                    result.chunk_id, result.pcm_samples.size());
+                        }
+                    }
+                } else {
+                    // Original synchronous streaming mode
+                    streaming_ctx.add_token_and_decode(
+                        normalized_token,
+                        streaming_audio_callback,
+                        &streaming_cb_ctx
+                    );
+                }
             }
         } else if (i < 20) {
             // Debug: print first 20 non-audio tokens
@@ -2856,24 +2930,74 @@ int main(int argc, char ** argv) {
     int64_t snac_time_before_flush = 0;
 
     if (streaming_mode) {
-        // Streaming mode: flush remaining tokens and use collected PCM
-        // Note: flush SNAC time is tracked in streaming context but happens after LLM loop
-        // We need to exclude flush time from SNAC timing for accurate RTF calculation
-        snac_time_before_flush = streaming_ctx.get_decode_time_ms();
-        LOG_INF("  SNAC time inside LLM loop: %ld ms\n", (long)snac_time_before_flush);
+        if (pipeline_mode) {
+            // Pipeline mode: submit remaining tokens as final chunk
+            if (streaming_ctx.buffer.has_frames(1)) {
+                auto frames = streaming_ctx.buffer.get_completed_frames(-1);  // Get all remaining
+                snac_chunk_task final_task;
+                final_task.tokens_head0 = frames[0];
+                final_task.tokens_head1 = frames[1];
+                final_task.tokens_head2 = frames[2];
+                final_task.chunk_id = pipeline_chunk_id++;
+                async_decoder.submit_chunk(final_task);
+                LOG_DBG("Submitted final pipeline chunk %d (%zu frames)\n",
+                        final_task.chunk_id, final_task.tokens_head0.size());
+            }
 
-        LOG_INF("Flushing streaming decoder...\n");
-        streaming_ctx.flush(streaming_audio_callback, &streaming_cb_ctx);
+            // Submit flush task
+            async_decoder.submit_flush();
 
-        int64_t snac_flush_time = streaming_ctx.get_decode_time_ms() - snac_time_before_flush;
-        LOG_INF("  SNAC flush time: %ld ms\n", (long)snac_flush_time);
+            // Wait for all chunks to complete
+            int pending = async_decoder.pending_count();
+            LOG_INF("Waiting for %d pending pipeline chunks...\n", pending);
 
-        pcm_samples = std::move(streaming_pcm_samples);
+            while (async_decoder.chunks_completed.load() < async_decoder.chunks_submitted.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
-        LOG_INF("Streaming decode complete:\n");
-        LOG_INF("  Total chunks: %d\n", streaming_cb_ctx.chunks_received);
-        LOG_INF("  Total samples: %zu (%.2fs)\n",
-                pcm_samples.size(), (float)pcm_samples.size() / SNAC_GGML_SAMPLE_RATE);
+                // Collect results
+                snac_chunk_result result;
+                while (async_decoder.try_get_result(result)) {
+                    if (result.success && !result.pcm_samples.empty()) {
+                        streaming_pcm_samples.insert(
+                            streaming_pcm_samples.end(),
+                            result.pcm_samples.begin(),
+                            result.pcm_samples.end()
+                        );
+                    }
+                }
+            }
+
+            // Stop async decoder
+            async_decoder.stop();
+
+            pcm_samples = std::move(streaming_pcm_samples);
+
+            LOG_INF("Pipeline decode complete:\n");
+            LOG_INF("  Chunks submitted: %d\n", async_decoder.chunks_submitted.load());
+            LOG_INF("  Chunks completed: %d\n", async_decoder.chunks_completed.load());
+            LOG_INF("  Total samples: %zu (%.2fs)\n",
+                    pcm_samples.size(), (float)pcm_samples.size() / SNAC_GGML_SAMPLE_RATE);
+
+        } else {
+            // Original synchronous streaming mode
+            // Note: flush SNAC time is tracked in streaming context but happens after LLM loop
+            // We need to exclude flush time from SNAC timing for accurate RTF calculation
+            snac_time_before_flush = streaming_ctx.get_decode_time_ms();
+            LOG_INF("  SNAC time inside LLM loop: %ld ms\n", (long)snac_time_before_flush);
+
+            LOG_INF("Flushing streaming decoder...\n");
+            streaming_ctx.flush(streaming_audio_callback, &streaming_cb_ctx);
+
+            int64_t snac_flush_time = streaming_ctx.get_decode_time_ms() - snac_time_before_flush;
+            LOG_INF("  SNAC flush time: %ld ms\n", (long)snac_flush_time);
+
+            pcm_samples = std::move(streaming_pcm_samples);
+
+            LOG_INF("Streaming decode complete:\n");
+            LOG_INF("  Total chunks: %d\n", streaming_cb_ctx.chunks_received);
+            LOG_INF("  Total samples: %zu (%.2fs)\n",
+                    pcm_samples.size(), (float)pcm_samples.size() / SNAC_GGML_SAMPLE_RATE);
+        }
 
     } else {
         // Non-streaming mode: collect tokens and decode all at once
@@ -2984,7 +3108,10 @@ int main(int argc, char ** argv) {
         }
         LOG_INF("\n");
 
-        if (streaming_mode) {
+        if (pipeline_mode) {
+            LOG_INF("  Mode: Pipeline (LLM+SNAC parallel, chunk_frames=%d)\n",
+                    pipeline_chunk_frames);
+        } else if (streaming_mode) {
             LOG_INF("  Mode: Streaming (chunk_frames=%d, overlap=%d)\n",
                     streaming_chunk_frames, streaming_overlap);
         } else if (use_snac_ggml) {

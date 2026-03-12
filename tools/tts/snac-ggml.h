@@ -12,6 +12,12 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <queue>
+#include <future>
 
 // SNAC model constants (snac_24khz from hubertsiuzdak/snac_24khz)
 static const int SNAC_GGML_FRAME_SIZE = 7;
@@ -285,4 +291,86 @@ struct snac_streaming_context {
     int get_total_samples() const { return total_pcm_samples; }
     int get_chunks_decoded() const { return chunks_decoded; }
     int64_t get_decode_time_ms() const { return total_decode_time_ms; }
+};
+
+// ============================================================================
+// Async Pipeline: LLM + SNAC Parallel Execution
+// ============================================================================
+
+// A chunk of tokens ready for SNAC decoding
+struct snac_chunk_task {
+    std::vector<int> tokens_head0;
+    std::vector<int> tokens_head1;
+    std::vector<int> tokens_head2;
+    int chunk_id = 0;
+    bool is_final = false;  // True for flush operation
+};
+
+// Result of SNAC decoding
+struct snac_chunk_result {
+    std::vector<float> pcm_samples;
+    int chunk_id = 0;
+    bool success = false;
+    std::string error_msg;
+};
+
+// Async decoder with double-buffer and background thread
+struct snac_async_decoder {
+    // Model context (shared, read-only)
+    snac_ggml_context * model_ctx = nullptr;
+    ggml_backend_t backend = nullptr;
+
+    // Thread management
+    std::thread worker_thread;
+    std::atomic<bool> running{false};
+    std::atomic<bool> stop_requested{false};
+
+    // Task queue (producer: LLM thread, consumer: SNAC thread)
+    std::queue<snac_chunk_task> task_queue;
+    std::mutex queue_mtx;
+    std::condition_variable queue_cv;
+
+    // Result queue (producer: SNAC thread, consumer: LLM thread)
+    std::queue<snac_chunk_result> result_queue;
+    std::mutex result_mtx;
+    std::condition_variable result_cv;
+
+    // Statistics
+    std::atomic<int> chunks_submitted{0};
+    std::atomic<int> chunks_completed{0};
+
+    // Initialize async decoder
+    bool init(snac_ggml_context * ctx, ggml_backend_t backend);
+
+    // Start background thread
+    void start();
+
+    // Stop background thread (waits for completion)
+    void stop();
+
+    // Submit chunk for async decoding (non-blocking)
+    void submit_chunk(const snac_chunk_task & task);
+
+    // Submit final flush task
+    void submit_flush();
+
+    // Try to get completed result (non-blocking)
+    // Returns true if result was available
+    bool try_get_result(snac_chunk_result & result);
+
+    // Wait for all pending chunks to complete
+    void wait_all();
+
+    // Check if worker is idle
+    bool is_idle() const;
+
+    // Get pending task count
+    int pending_count() const;
+
+private:
+    // Worker thread function
+    void worker_loop();
+
+    // Decode a single chunk (called from worker thread)
+    snac_chunk_result decode_chunk(const snac_chunk_task & task);
 };

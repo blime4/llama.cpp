@@ -2370,3 +2370,189 @@ void snac_streaming_context::reset() {
     total_pcm_samples = 0;
     chunks_decoded = 0;
 }
+
+// ============================================================================
+// snac_async_decoder Implementation
+// ============================================================================
+
+bool snac_async_decoder::init(snac_ggml_context * ctx, ggml_backend_t backend) {
+    if (!ctx || !ctx->loaded) {
+        LOG_ERR("%s: Invalid model context\n", __func__);
+        return false;
+    }
+
+    model_ctx = ctx;
+    this->backend = backend;
+
+    return true;
+}
+
+void snac_async_decoder::start() {
+    if (running.load()) {
+        return;  // Already running
+    }
+
+    stop_requested.store(false);
+    running.store(true);
+    worker_thread = std::thread(&snac_async_decoder::worker_loop, this);
+
+    LOG_INF("%s: Async SNAC decoder started\n", __func__);
+}
+
+void snac_async_decoder::stop() {
+    if (!running.load()) {
+        return;
+    }
+
+    stop_requested.store(true);
+    queue_cv.notify_all();  // Wake up worker
+
+    if (worker_thread.joinable()) {
+        worker_thread.join();
+    }
+
+    running.store(false);
+
+    // Clear queues
+    {
+        std::lock_guard<std::mutex> lock(queue_mtx);
+        while (!task_queue.empty()) {
+            task_queue.pop();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(result_mtx);
+        while (!result_queue.empty()) {
+            result_queue.pop();
+        }
+    }
+
+    LOG_INF("%s: Async SNAC decoder stopped (completed %d chunks)\n",
+            __func__, chunks_completed.load());
+}
+
+void snac_async_decoder::submit_chunk(const snac_chunk_task & task) {
+    {
+        std::lock_guard<std::mutex> lock(queue_mtx);
+        task_queue.push(task);
+        chunks_submitted++;
+    }
+    queue_cv.notify_one();
+}
+
+void snac_async_decoder::submit_flush() {
+    snac_chunk_task flush_task;
+    flush_task.is_final = true;
+    flush_task.chunk_id = -1;
+    submit_chunk(flush_task);
+}
+
+bool snac_async_decoder::try_get_result(snac_chunk_result & result) {
+    std::lock_guard<std::mutex> lock(result_mtx);
+    if (result_queue.empty()) {
+        return false;
+    }
+    result = result_queue.front();
+    result_queue.pop();
+    return true;
+}
+
+void snac_async_decoder::wait_all() {
+    std::unique_lock<std::mutex> lock(queue_mtx);
+    queue_cv.wait(lock, [this]() {
+        return task_queue.empty() || stop_requested.load();
+    });
+}
+
+bool snac_async_decoder::is_idle() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(queue_mtx));
+    return task_queue.empty();
+}
+
+int snac_async_decoder::pending_count() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(queue_mtx));
+    return (int)task_queue.size();
+}
+
+void snac_async_decoder::worker_loop() {
+    while (!stop_requested.load()) {
+        snac_chunk_task task;
+
+        // Wait for task
+        {
+            std::unique_lock<std::mutex> lock(queue_mtx);
+            queue_cv.wait(lock, [this]() {
+                return !task_queue.empty() || stop_requested.load();
+            });
+
+            if (stop_requested.load()) {
+                break;
+            }
+
+            if (task_queue.empty()) {
+                continue;
+            }
+
+            task = task_queue.front();
+            task_queue.pop();
+        }
+
+        // Notify that we took a task (for wait_all)
+        queue_cv.notify_all();
+
+        // Decode the chunk
+        snac_chunk_result result = decode_chunk(task);
+
+        // Store result
+        {
+            std::lock_guard<std::mutex> lock(result_mtx);
+            result_queue.push(result);
+            chunks_completed++;
+        }
+        result_cv.notify_one();
+    }
+}
+
+snac_chunk_result snac_async_decoder::decode_chunk(const snac_chunk_task & task) {
+    snac_chunk_result result;
+    result.chunk_id = task.chunk_id;
+
+    if (task.is_final) {
+        // Flush task - return empty success
+        result.success = true;
+        LOG_DBG("%s: Flush task completed\n", __func__);
+        return result;
+    }
+
+    if (task.tokens_head0.empty()) {
+        result.success = true;
+        return result;
+    }
+
+    // Decode using existing snac_ggml_decode function
+    std::vector<std::vector<int>> pyramid_tokens(3);
+    pyramid_tokens[0] = task.tokens_head0;
+    pyramid_tokens[1] = task.tokens_head1;
+    pyramid_tokens[2] = task.tokens_head2;
+
+    auto decode_start = std::chrono::high_resolution_clock::now();
+
+    result.pcm_samples = snac_ggml_decode(*model_ctx, pyramid_tokens);
+
+    auto decode_end = std::chrono::high_resolution_clock::now();
+    auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        decode_end - decode_start).count();
+
+    result.success = !result.pcm_samples.empty();
+
+    if (!result.success) {
+        result.error_msg = "SNAC decode returned empty audio";
+        LOG_WRN("%s: Chunk %d decode failed: %s\n",
+                __func__, task.chunk_id, result.error_msg.c_str());
+    } else {
+        LOG_DBG("%s: Chunk %d decoded %zu samples in %ld ms\n",
+                __func__, task.chunk_id, result.pcm_samples.size(), decode_ms);
+    }
+
+    return result;
+}
