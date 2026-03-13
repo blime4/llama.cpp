@@ -2384,7 +2384,19 @@ bool snac_async_decoder::init(snac_ggml_context * ctx, ggml_backend_t backend) {
     model_ctx = ctx;
     this->backend = backend;
 
+    // Reset buffer state
+    reset();
+
     return true;
+}
+
+void snac_async_decoder::reset() {
+    buffer_head0.clear();
+    buffer_head1.clear();
+    buffer_head2.clear();
+    total_frames = 0;
+    samples_already_output = 0;
+    frames_already_output = 0;
 }
 
 void snac_async_decoder::start() {
@@ -2392,6 +2404,7 @@ void snac_async_decoder::start() {
         return;  // Already running
     }
 
+    reset();  // Clear buffer for new generation
     stop_requested.store(false);
     running.store(true);
     worker_thread = std::thread(&snac_async_decoder::worker_loop, this);
@@ -2500,8 +2513,40 @@ void snac_async_decoder::worker_loop() {
         // Notify that we took a task (for wait_all)
         queue_cv.notify_all();
 
-        // Decode the chunk
-        snac_chunk_result result = decode_chunk(task);
+        // Process the task
+        snac_chunk_result result;
+
+        if (task.is_final) {
+            // Flush: decode any remaining buffered tokens
+            if (total_frames > frames_already_output) {
+                result = decode_with_sliding_window(total_frames - frames_already_output);
+            } else {
+                result.success = true;
+                result.chunk_id = task.chunk_id;
+            }
+            LOG_DBG("%s: Flush completed, final output frame=%d\n", __func__, frames_already_output);
+        } else {
+            // Add NEW tokens to buffer
+            buffer_head0.insert(buffer_head0.end(), task.tokens_head0.begin(), task.tokens_head0.end());
+            buffer_head1.insert(buffer_head1.end(), task.tokens_head1.begin(), task.tokens_head1.end());
+            buffer_head2.insert(buffer_head2.end(), task.tokens_head2.begin(), task.tokens_head2.end());
+            total_frames += task.num_new_frames;
+
+            LOG_DBG("%s: Added %d new frames, total=%d, already_output=%d\n",
+                    __func__, task.num_new_frames, total_frames, frames_already_output);
+
+            // Check if we have enough new frames to output
+            int outputable_frames = total_frames - frames_already_output;
+            if (outputable_frames >= sliding_window_frames / 2) {
+                result = decode_with_sliding_window(outputable_frames);
+            } else {
+                // Not enough new frames yet, defer decoding
+                // Store empty result to signal task completion (avoid deadlock)
+                result.success = true;
+                result.chunk_id = task.chunk_id;
+                // Do NOT continue - must store result to increment chunks_completed
+            }
+        }
 
         // Store result
         {
@@ -2509,49 +2554,72 @@ void snac_async_decoder::worker_loop() {
             result_queue.push(result);
             chunks_completed++;
         }
-        result_cv.notify_one();
     }
 }
 
-snac_chunk_result snac_async_decoder::decode_chunk(const snac_chunk_task & task) {
+snac_chunk_result snac_async_decoder::decode_with_sliding_window(int new_frames_available) {
     snac_chunk_result result;
-    result.chunk_id = task.chunk_id;
 
-    if (task.is_final) {
-        // Flush task - return empty success
+    // FULL CONTEXT DECODE:
+    // SNAC vocoder requires FULL token context for correct audio output.
+    // We always decode ALL accumulated tokens, then output only NEW samples.
+    // This ensures audio quality while minimizing memory overhead.
+
+    (void)new_frames_available;  // Not used - we decode full buffer
+
+    if (buffer_head0.empty()) {
         result.success = true;
-        LOG_DBG("%s: Flush task completed\n", __func__);
         return result;
     }
 
-    if (task.tokens_head0.empty()) {
-        result.success = true;
-        return result;
-    }
+    int current_frames = (int)buffer_head0.size();
 
-    // Decode using existing snac_ggml_decode function
+    // Decode FULL token buffer (not sliding window) for proper context
     std::vector<std::vector<int>> pyramid_tokens(3);
-    pyramid_tokens[0] = task.tokens_head0;
-    pyramid_tokens[1] = task.tokens_head1;
-    pyramid_tokens[2] = task.tokens_head2;
+    pyramid_tokens[0] = buffer_head0;
+    pyramid_tokens[1] = buffer_head1;
+    pyramid_tokens[2] = buffer_head2;
 
     auto decode_start = std::chrono::high_resolution_clock::now();
 
-    result.pcm_samples = snac_ggml_decode(*model_ctx, pyramid_tokens);
+    std::vector<float> full_pcm = snac_ggml_decode(*model_ctx, pyramid_tokens);
 
     auto decode_end = std::chrono::high_resolution_clock::now();
-    auto decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    total_decode_time_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
         decode_end - decode_start).count();
 
-    result.success = !result.pcm_samples.empty();
-
-    if (!result.success) {
+    if (full_pcm.empty()) {
+        result.success = false;
         result.error_msg = "SNAC decode returned empty audio";
-        LOG_WRN("%s: Chunk %d decode failed: %s\n",
-                __func__, task.chunk_id, result.error_msg.c_str());
+        LOG_WRN("%s: Decode failed\n", __func__);
+        return result;
+    }
+
+    // Calculate sample positions
+    int samples_per_frame = SNAC_GGML_SAMPLES_PER_FRAME;  // 2048
+
+    // Output only NEW samples (not previously output)
+    int output_start_sample = frames_already_output * samples_per_frame;
+    int output_end_sample = std::min(current_frames * samples_per_frame, (int)full_pcm.size());
+
+    if (output_start_sample < output_end_sample) {
+        result.pcm_samples.assign(
+            full_pcm.begin() + output_start_sample,
+            full_pcm.begin() + output_end_sample
+        );
+
+        // Update tracking
+        int new_frames_output = (output_end_sample - output_start_sample) / samples_per_frame;
+        frames_already_output += new_frames_output;
+        samples_already_output += result.pcm_samples.size();
+
+        result.success = true;
+
+        LOG_DBG("%s: Decoded %d frames (full context), output samples [%d, %d], new_frames=%d, total_output_frames=%d\n",
+                __func__, current_frames, output_start_sample, output_end_sample,
+                new_frames_output, frames_already_output);
     } else {
-        LOG_DBG("%s: Chunk %d decoded %zu samples in %ld ms\n",
-                __func__, task.chunk_id, result.pcm_samples.size(), decode_ms);
+        result.success = true;  // No new samples to output
     }
 
     return result;

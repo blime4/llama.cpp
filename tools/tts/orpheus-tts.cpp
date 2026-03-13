@@ -2864,6 +2864,7 @@ int main(int argc, char ** argv) {
                         task.tokens_head1 = frames[1];
                         task.tokens_head2 = frames[2];
                         task.chunk_id = pipeline_chunk_id++;
+                        task.num_new_frames = frames[0].size();  // Number of new frames in this chunk
 
                         async_decoder.submit_chunk(task);
                         streaming_ctx.buffer.consume_frames(pipeline_chunk_frames);
@@ -2939,6 +2940,7 @@ int main(int argc, char ** argv) {
                 final_task.tokens_head1 = frames[1];
                 final_task.tokens_head2 = frames[2];
                 final_task.chunk_id = pipeline_chunk_id++;
+                final_task.num_new_frames = frames[0].size();  // Number of new frames in this chunk
                 async_decoder.submit_chunk(final_task);
                 LOG_DBG("Submitted final pipeline chunk %d (%zu frames)\n",
                         final_task.chunk_id, final_task.tokens_head0.size());

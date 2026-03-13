@@ -297,28 +297,43 @@ struct snac_streaming_context {
 // Async Pipeline: LLM + SNAC Parallel Execution
 // ============================================================================
 
-// A chunk of tokens ready for SNAC decoding
+// A chunk of tokens ready for SNAC decoding (NEW tokens to add)
 struct snac_chunk_task {
-    std::vector<int> tokens_head0;
-    std::vector<int> tokens_head1;
-    std::vector<int> tokens_head2;
+    std::vector<int> tokens_head0;  // NEW tokens for head 0
+    std::vector<int> tokens_head1;  // NEW tokens for head 1
+    std::vector<int> tokens_head2;  // NEW tokens for head 2
     int chunk_id = 0;
     bool is_final = false;  // True for flush operation
+    int num_new_frames = 0;  // Number of NEW frames in this chunk
 };
 
 // Result of SNAC decoding
 struct snac_chunk_result {
-    std::vector<float> pcm_samples;
+    std::vector<float> pcm_samples;  // Only NEW samples (not re-decoded)
     int chunk_id = 0;
     bool success = false;
     std::string error_msg;
 };
 
-// Async decoder with double-buffer and background thread
+// Async decoder with token buffer and background thread
+// Key: Maintains FULL token context and uses sliding window decode
 struct snac_async_decoder {
     // Model context (shared, read-only)
     snac_ggml_context * model_ctx = nullptr;
     ggml_backend_t backend = nullptr;
+
+    // FULL token buffer (accumulates ALL tokens for context)
+    std::vector<int> buffer_head0;  // All head0 tokens accumulated
+    std::vector<int> buffer_head1;  // All head1 tokens accumulated
+    std::vector<int> buffer_head2;  // All head2 tokens accumulated
+    int total_frames = 0;           // Total frames accumulated
+
+    // Output tracking (which samples have been output)
+    int samples_already_output = 0;
+    int frames_already_output = 0;
+
+    // Sliding window config
+    int sliding_window_frames = 64;  // Max frames to decode each time
 
     // Thread management
     std::thread worker_thread;
@@ -333,11 +348,11 @@ struct snac_async_decoder {
     // Result queue (producer: SNAC thread, consumer: LLM thread)
     std::queue<snac_chunk_result> result_queue;
     std::mutex result_mtx;
-    std::condition_variable result_cv;
 
     // Statistics
     std::atomic<int> chunks_submitted{0};
     std::atomic<int> chunks_completed{0};
+    int64_t total_decode_time_ms = 0;  // Total SNAC decode time
 
     // Initialize async decoder
     bool init(snac_ggml_context * ctx, ggml_backend_t backend);
@@ -349,13 +364,13 @@ struct snac_async_decoder {
     void stop();
 
     // Submit chunk for async decoding (non-blocking)
+    // Tokens are ADDED to buffer, not replaced
     void submit_chunk(const snac_chunk_task & task);
 
     // Submit final flush task
     void submit_flush();
 
     // Try to get completed result (non-blocking)
-    // Returns true if result was available
     bool try_get_result(snac_chunk_result & result);
 
     // Wait for all pending chunks to complete
@@ -367,10 +382,13 @@ struct snac_async_decoder {
     // Get pending task count
     int pending_count() const;
 
+    // Reset buffer state for new generation
+    void reset();
+
 private:
     // Worker thread function
     void worker_loop();
 
-    // Decode a single chunk (called from worker thread)
-    snac_chunk_result decode_chunk(const snac_chunk_task & task);
+    // Decode with sliding window and return only NEW samples
+    snac_chunk_result decode_with_sliding_window(int new_frames_available);
 };
