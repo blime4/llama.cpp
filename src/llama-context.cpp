@@ -9,6 +9,8 @@
 #include "llama-model.h"
 #include "llama-ext.h"
 
+#include "ggml-cuda.h"
+
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -2986,6 +2988,24 @@ llama_context * llama_new_context_with_model(
 
 void llama_free(llama_context * ctx) {
     delete ctx;
+}
+
+ggml_backend_t llama_context_get_cuda_backend(llama_context * ctx) {
+    if (!ctx) {
+        return nullptr;
+    }
+    ggml_backend_sched_t sched = ctx->get_sched();
+    if (!sched) {
+        return nullptr;
+    }
+    int n_backends = ggml_backend_sched_get_n_backends(sched);
+    for (int i = 0; i < n_backends; i++) {
+        ggml_backend_t backend = ggml_backend_sched_get_backend(sched, i);
+        if (ggml_backend_is_cuda(backend)) {
+            return backend;
+        }
+    }
+    return nullptr;
 }
 
 uint32_t llama_n_ctx(const llama_context * ctx) {
