@@ -18,6 +18,7 @@
 #include <atomic>
 #include <queue>
 #include <future>
+#include <chrono>
 
 // SNAC model constants (snac_24khz from hubertsiuzdak/snac_24khz)
 static const int SNAC_GGML_FRAME_SIZE = 7;
@@ -105,6 +106,34 @@ void snac_ggml_free(struct snac_ggml_context & ctx);
 std::vector<float> snac_ggml_decode(
     struct snac_ggml_context & ctx,
     const std::vector<std::vector<int>> & pyramid_tokens);
+
+// ============================================================================
+// Chunked GPU Processing for Long Sequences (avoiding IM2COL CUDA limits)
+// ============================================================================
+
+// CUDA IM2COL kernel has grid dimension limits (gridDim.y <= 65535)
+// When processing long sequences, we need to split into GPU-safe chunks
+// Maximum safe chunk: ~50K samples after decoder upsampling
+
+// Chunked decode configuration
+struct snac_chunked_config {
+    int max_chunk_frames = 256;     // Maximum frames per GPU chunk (< 65535/512 for safety)
+    int overlap_frames = 4;         // Context frames for clean boundaries
+    bool enable_crossfade = true;   // Apply crossfade at chunk boundaries
+    int crossfade_samples = 256;    // Crossfade duration in samples
+    int min_chunk_frames = 16;      // Minimum frames for a chunk (merge smaller chunks)
+};
+
+// Chunked decode - splits long sequences into GPU-safe chunks
+// Automatically used when backend is GPU and sequence exceeds threshold
+// Returns: vector of PCM samples in range [-1, 1]
+std::vector<float> snac_ggml_decode_chunked(
+    struct snac_ggml_context & ctx,
+    const std::vector<std::vector<int>> & pyramid_tokens,
+    const snac_chunked_config & config = snac_chunked_config());
+
+// Check if chunked processing is needed for given frame count and backend
+bool snac_needs_chunked_processing(ggml_backend_t backend, int total_frames);
 
 // ============================================================================
 // Phase 2: Batched Processing Structures
@@ -353,6 +382,11 @@ struct snac_async_decoder {
     std::atomic<int> chunks_submitted{0};
     std::atomic<int> chunks_completed{0};
     int64_t total_decode_time_ms = 0;  // Total SNAC decode time
+
+    // Wall-clock timing (for true parallelism measurement)
+    std::chrono::high_resolution_clock::time_point first_decode_start;   // When SNAC starts first decode
+    std::chrono::high_resolution_clock::time_point last_decode_end;      // When SNAC finishes last decode
+    std::atomic<bool> first_decode_started{false};
 
     // Initialize async decoder
     bool init(snac_ggml_context * ctx, ggml_backend_t backend);

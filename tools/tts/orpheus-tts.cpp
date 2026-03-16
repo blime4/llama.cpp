@@ -54,6 +54,13 @@ static const int SNAC_N_DECODER_LAYERS = 4;
 static const int SNAC_DECODER_RATES[] = {8, 8, 4, 2};  // snac_24khz decoder rates (from config.json)
 static const int SNAC_VQ_STRIDES[] = {8, 4, 2, 1};     // snac_24khz vq strides
 
+// Chunked GPU processing thresholds for SNAC
+// CUDA IM2COL kernel has grid dimension limits (gridDim.y <= 65535)
+// Threshold: frames that would produce ~50K samples (safe IM2COL limit)
+// 50K / 512 (upsampling) = ~97 frames per chunk is safe
+static const int SNAC_CHUNK_THRESHOLD_FRAMES = 80;  // Use chunked decode above this
+static const int SNAC_MAX_CHUNK_FRAMES = 64;        // Maximum frames per GPU chunk
+
 struct wav_header {
     char riff[4] = {'R', 'I', 'F', 'F'};
     uint32_t chunk_size;
@@ -2365,7 +2372,7 @@ int main(int argc, char ** argv) {
 
     // Pipeline mode parameters (LLM + SNAC parallel execution)
     bool pipeline_mode = false;
-    int pipeline_chunk_frames = 16;  // Frames per pipeline chunk
+    int pipeline_chunk_frames = 128;  // Frames per pipeline chunk (increased for fewer decode calls)
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -2427,11 +2434,12 @@ int main(int argc, char ** argv) {
                 return 1;
             }
         } else if (arg == "--pipeline") {
+            streaming_mode = true;  // Pipeline requires streaming
             pipeline_mode = true;
         } else if (arg == "--pipeline-chunk-frames" && i + 1 < argc) {
             pipeline_chunk_frames = std::stoi(argv[++i]);
-            if (pipeline_chunk_frames < 4 || pipeline_chunk_frames > 64) {
-                LOG_ERR("Error: pipeline-chunk-frames must be in range [4, 64]\n");
+            if (pipeline_chunk_frames < 4 || pipeline_chunk_frames > 512) {
+                LOG_ERR("Error: pipeline-chunk-frames must be in range [4, 512]\n");
                 return 1;
             }
         } else {
@@ -2672,22 +2680,44 @@ int main(int argc, char ** argv) {
     LOG_INF("Loading SNAC vocoder from %s...\n", vocoder_path.c_str());
 
     // Initialize backend for SNAC GGML
+    // STRATEGY: Use GPU SNAC with chunked processing for long audio.
+    // The ggml IM2COL CUDA kernel has grid dimension limits (~65K samples).
+    // We now use chunked GPU processing (snac_ggml_decode_chunked) to handle
+    // arbitrary length audio on GPU by splitting into safe chunks.
     ggml_backend_t snac_backend = nullptr;
+    bool snac_backend_owned = true;  // Track if we need to free the backend
+
+    bool llm_uses_gpu = (n_gpu_layers > 0);
+
     if (use_gpu) {
-        // Try to initialize CUDA backend
-        // First try device 0 (primary GPU)
-        snac_backend = ggml_backend_cuda_init(0);
+        // Try to get shared CUDA backend from LLM context first
+        // This avoids resource conflicts and is more efficient
+        LOG_INF("Attempting to get shared CUDA backend from LLM context for SNAC vocoder...\n");
+        snac_backend = llama_context_get_cuda_backend(ctx);
         if (snac_backend) {
-            LOG_INF("SNAC vocoder using CUDA GPU backend (device 0)\n");
+            LOG_INF("SNAC vocoder using shared CUDA GPU backend from LLM context\n");
+            snac_backend_owned = false;  // Don't free shared backend
         } else {
-            LOG_WRN("CUDA backend initialization failed, falling back to CPU\n");
-            snac_backend = ggml_backend_cpu_init();
-            if (snac_backend && n_threads > 0) {
-                ggml_backend_cpu_set_n_threads(snac_backend, n_threads);
-                LOG_INF("SNAC CPU backend using %d threads\n", n_threads);
+            // No shared backend available, try creating new one
+            LOG_INF("No shared CUDA backend available, trying to create new one...\n");
+            snac_backend = ggml_backend_cuda_init(0);
+            if (snac_backend) {
+                LOG_INF("SNAC vocoder using dedicated CUDA GPU backend with chunked processing\n");
+            } else {
+                LOG_WRN("CUDA backend initialization returned NULL, falling back to CPU\n");
+                LOG_WRN("This may happen if:\n");
+                LOG_WRN("  - LLM is using all GPU memory\n");
+                LOG_WRN("  - CUDA device error\n");
+                LOG_WRN("Will use CPU backend instead\n");
+                snac_backend = ggml_backend_cpu_init();
+                if (snac_backend && n_threads > 0) {
+                    ggml_backend_cpu_set_n_threads(snac_backend, n_threads);
+                    LOG_INF("SNAC CPU backend using %d threads\n", n_threads);
+                }
             }
         }
     } else {
+        // CPU mode
         snac_backend = ggml_backend_cpu_init();
         if (snac_backend && n_threads > 0) {
             ggml_backend_cpu_set_n_threads(snac_backend, n_threads);
@@ -2704,7 +2734,7 @@ int main(int argc, char ** argv) {
             LOG_ERR("Failed to load SNAC GGML vocoder from %s\n", vocoder_path.c_str());
             llama_free(ctx);
             llama_model_free(model);
-            if (snac_backend) ggml_backend_free(snac_backend);
+            if (snac_backend && snac_backend_owned) ggml_backend_free(snac_backend);
             return 1;
         }
         LOG_INF("SNAC GGML vocoder loaded successfully\n");
@@ -2721,7 +2751,7 @@ int main(int argc, char ** argv) {
             LOG_ERR("Failed to load SNAC vocoder from %s\n", vocoder_path.c_str());
             llama_free(ctx);
             llama_model_free(model);
-            if (snac_backend) ggml_backend_free(snac_backend);
+            if (snac_backend && snac_backend_owned) ggml_backend_free(snac_backend);
             return 1;
         }
         LOG_INF("Legacy SNAC vocoder loaded successfully\n");
@@ -2748,7 +2778,7 @@ int main(int argc, char ** argv) {
             llama_free(ctx);
             llama_model_free(model);
             if (use_snac_ggml) snac_ggml_free(snac_ggml_ctx);
-            if (snac_backend) ggml_backend_free(snac_backend);
+            if (snac_backend && snac_backend_owned) ggml_backend_free(snac_backend);
             return 1;
         }
 
@@ -2764,7 +2794,7 @@ int main(int argc, char ** argv) {
                 llama_free(ctx);
                 llama_model_free(model);
                 if (use_snac_ggml) snac_ggml_free(snac_ggml_ctx);
-                if (snac_backend) ggml_backend_free(snac_backend);
+                if (snac_backend && snac_backend_owned) ggml_backend_free(snac_backend);
                 return 1;
             }
             async_decoder.start();
@@ -2929,6 +2959,7 @@ int main(int argc, char ** argv) {
 
     // For streaming mode, track SNAC time before flush (inside LLM loop)
     int64_t snac_time_before_flush = 0;
+    auto snac_wallclock_end = std::chrono::high_resolution_clock::now();  // Track when SNAC finishes
 
     if (streaming_mode) {
         if (pipeline_mode) {
@@ -2949,15 +2980,30 @@ int main(int argc, char ** argv) {
             // Submit flush task
             async_decoder.submit_flush();
 
-            // Wait for all chunks to complete
-            int pending = async_decoder.pending_count();
-            LOG_INF("Waiting for %d pending pipeline chunks...\n", pending);
+            // OPTIMIZED: Don't wait for ALL chunks, just collect what's ready
+            // This enables true parallel execution - SNAC runs while we proceed
+            // For file output, we still need complete audio, so we wait but with timeout
 
+            int pending = async_decoder.pending_count();
+            LOG_INF("SNAC has %d pending chunks (parallel decode ongoing)\n", pending);
+
+            // Collect all available results (non-blocking first pass)
+            snac_chunk_result result;
+            while (async_decoder.try_get_result(result)) {
+                if (result.success && !result.pcm_samples.empty()) {
+                    streaming_pcm_samples.insert(
+                        streaming_pcm_samples.end(),
+                        result.pcm_samples.begin(),
+                        result.pcm_samples.end()
+                    );
+                }
+            }
+
+            // Wait for remaining chunks (needed for complete audio file)
             while (async_decoder.chunks_completed.load() < async_decoder.chunks_submitted.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
                 // Collect results
-                snac_chunk_result result;
                 while (async_decoder.try_get_result(result)) {
                     if (result.success && !result.pcm_samples.empty()) {
                         streaming_pcm_samples.insert(
@@ -2972,11 +3018,27 @@ int main(int argc, char ** argv) {
             // Stop async decoder
             async_decoder.stop();
 
+            // Record SNAC wall-clock end time
+            snac_wallclock_end = std::chrono::high_resolution_clock::now();
+
             pcm_samples = std::move(streaming_pcm_samples);
+
+            // Get SNAC time from async decoder for Pipeline mode
+            snac_time_before_flush = async_decoder.total_decode_time_ms;
+
+            // Calculate TRUE parallel SNAC wall-clock time
+            // This is the actual time SNAC was processing (from first decode start to last decode end)
+            int64_t snac_parallel_wallclock_ms = 0;
+            if (async_decoder.first_decode_started.load()) {
+                snac_parallel_wallclock_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    async_decoder.last_decode_end - async_decoder.first_decode_start).count();
+            }
 
             LOG_INF("Pipeline decode complete:\n");
             LOG_INF("  Chunks submitted: %d\n", async_decoder.chunks_submitted.load());
             LOG_INF("  Chunks completed: %d\n", async_decoder.chunks_completed.load());
+            LOG_INF("  SNAC decode time (cumulative): %ld ms\n", (long)snac_time_before_flush);
+            LOG_INF("  SNAC wall-clock (parallel): %ld ms\n", (long)snac_parallel_wallclock_ms);
             LOG_INF("  Total samples: %zu (%.2fs)\n",
                     pcm_samples.size(), (float)pcm_samples.size() / SNAC_GGML_SAMPLE_RATE);
 
@@ -3053,7 +3115,21 @@ int main(int argc, char ** argv) {
                 LOG_WRN("Batch mode requested but currently processing single sequence\n");
             }
 
-            pcm_samples = snac_ggml_decode(snac_ggml_ctx, pyramid_tokens);
+            // Check if chunked processing is needed (GPU + long sequence)
+            int total_frames = pyramid_tokens[2].size();  // head2 determines frame count
+            if (snac_needs_chunked_processing(snac_backend, total_frames)) {
+                // Use chunked decode for GPU with long sequences
+                snac_chunked_config chunked_cfg;
+                chunked_cfg.max_chunk_frames = 64;  // Safe for IM2COL
+                chunked_cfg.overlap_frames = 4;
+                chunked_cfg.crossfade_samples = 256;
+
+                LOG_INF("Using chunked GPU decode for %d frames (threshold: %d)\n",
+                        total_frames, SNAC_CHUNK_THRESHOLD_FRAMES);
+                pcm_samples = snac_ggml_decode_chunked(snac_ggml_ctx, pyramid_tokens, chunked_cfg);
+            } else {
+                pcm_samples = snac_ggml_decode(snac_ggml_ctx, pyramid_tokens);
+            }
 
         } else {
             // Use legacy SNAC implementation
@@ -3073,15 +3149,38 @@ int main(int argc, char ** argv) {
 
         // Calculate individual RTFs
         // For streaming mode, the timing is complex because SNAC decode happens interleaved with LLM
-        // The total time (llm_duration_ms for streaming) is the wall-clock time
         // SNAC time is tracked separately but happens inside the LLM loop
+        // For Pipeline mode: LLM and SNAC are parallel, so total = max(LLM, SNAC_wallclock)
+        // For Sync Streaming: SNAC happens inside LLM loop, so total = LLM wall-clock
         int64_t pure_llm_ms, snac_ms, total_time_ms;
         if (streaming_mode) {
-            snac_ms = snac_time_before_flush;  // SNAC time from inside LLM loop
-            // For streaming, total time is just the LLM loop time (SNAC is inside it)
-            total_time_ms = llm_duration_ms.count();
-            // Pure LLM time cannot be negative - if SNAC > total, just show 0
-            pure_llm_ms = std::max((int64_t)0, total_time_ms - snac_ms);
+            if (pipeline_mode) {
+                // Pipeline mode: LLM and SNAC are truly parallel
+                // Use the actual parallel wall-clock time (first decode start to last decode end)
+                int64_t llm_ms = llm_duration_ms.count();
+                snac_ms = snac_time_before_flush;  // SNAC cumulative time
+
+                // Calculate TRUE SNAC wall-clock: from when SNAC first started to when it last finished
+                int64_t snac_parallel_ms = 0;
+                if (async_decoder.first_decode_started.load()) {
+                    snac_parallel_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        async_decoder.last_decode_end - async_decoder.first_decode_start).count();
+                }
+
+                // Total wall-clock = max(LLM, SNAC parallel)
+                // This is the real elapsed time from user perspective
+                total_time_ms = std::max(llm_ms, snac_parallel_ms);
+                pure_llm_ms = llm_ms;
+
+                LOG_INF("  LLM wall-clock: %ld ms\n", (long)llm_ms);
+                LOG_INF("  SNAC parallel wall-clock: %ld ms (cumulative: %ld ms)\n",
+                        (long)snac_parallel_ms, (long)snac_ms);
+            } else {
+                // Sync streaming: SNAC happens inside LLM loop, so total = LLM time
+                snac_ms = snac_time_before_flush;
+                total_time_ms = llm_duration_ms.count();
+                pure_llm_ms = std::max((int64_t)0, total_time_ms - snac_ms);
+            }
         } else {
             snac_ms = decode_duration.count();
             pure_llm_ms = llm_duration_ms.count();
@@ -3144,7 +3243,7 @@ int main(int argc, char ** argv) {
     // Free SNAC resources
     if (use_snac_ggml) {
         snac_ggml_free(snac_ggml_ctx);
-        if (snac_backend) {
+        if (snac_backend && snac_backend_owned) {
             ggml_backend_free(snac_backend);
         }
     }

@@ -1229,6 +1229,260 @@ static std::vector<int> repeat_interleave_tokens(
     return result;
 }
 
+// ============================================================================
+// Chunked GPU Processing for Long Sequences
+// ============================================================================
+
+// CUDA IM2COL kernel has grid dimension limits (gridDim.y <= 65535)
+// Threshold: frames that would produce ~50K samples (safe IM2COL limit)
+// 50K / 512 (upsampling) = ~97 frames per chunk is safe
+static const int SNAC_CHUNK_THRESHOLD_FRAMES = 80;
+static const int SNAC_MAX_CHUNK_FRAMES = 64;
+
+// Check if chunked processing is needed for given frame count and backend
+// Since ggml_backend_is_cuda is not exported, we use a simple heuristic:
+// Check if the backend name contains "CUDA" or if use_gpu flag is set
+bool snac_needs_chunked_processing(ggml_backend_t backend, int total_frames) {
+    // Check if using CUDA backend
+    if (!backend) {
+        return false;
+    }
+
+    // Get backend name to check if it's CUDA
+    const char * backend_name = ggml_backend_name(backend);
+    if (!backend_name) {
+        return false;
+    }
+
+    // Check if backend name contains "CUDA" or "GPU"
+    bool is_cuda = (strstr(backend_name, "CUDA") != nullptr ||
+                      strstr(backend_name, "GPU") != nullptr);
+
+    if (!is_cuda) {
+        return false;  // CPU doesn't need chunking
+    }
+
+    return total_frames > SNAC_CHUNK_THRESHOLD_FRAMES;
+}
+
+// Split pyramid tokens into chunks with overlap context
+// Returns vector of (head0_tokens, head1_tokens, head2_tokens) for each chunk
+static std::vector<std::vector<std::vector<int>>> snac_split_into_chunks(
+    const std::vector<int> & head0,
+    const std::vector<int> & head1,
+    const std::vector<int> & head2,
+    int max_chunk_frames,
+    int overlap_frames)
+{
+    // head2 determines total frames (it's the longest due to pyramid structure)
+    int total_frames = (int)head2.size();
+
+    // If sequence fits in one chunk, return as-is
+    if (total_frames <= max_chunk_frames) {
+        return {{head0, head1, head2}};
+    }
+
+    std::vector<std::vector<std::vector<int>>> chunks;
+
+    // Calculate chunk boundaries with overlap
+    int chunk_start = 0;
+    while (chunk_start < total_frames) {
+        int chunk_end = std::min(chunk_start + max_chunk_frames, total_frames);
+
+        // Expand start/end to include overlap context
+        int context_start = std::max(0, chunk_start - overlap_frames);
+        int context_end = std::min(total_frames, chunk_end + overlap_frames);
+
+        // Extract tokens for this chunk with context
+        // head2: direct slice
+        // head1: slice considering stride=2
+        // head0: slice considering stride=4
+
+        std::vector<int> chunk_head2(
+            head2.begin() + context_start,
+            head2.begin() + context_end);
+
+        // head1 has half the frames of head2 (stride=2)
+        int h1_start = context_start / 2;
+        int h1_end = (context_end + 1) / 2;  // Round up
+        std::vector<int> chunk_head1(
+            head1.begin() + h1_start,
+            head1.begin() + std::min(h1_end, (int)head1.size()));
+
+        // head0 has quarter the frames of head2 (stride=4)
+        int h0_start = context_start / 4;
+        int h0_end = (context_end + 3) / 4;  // Round up
+        std::vector<int> chunk_head0(
+            head0.begin() + h0_start,
+            head0.begin() + std::min(h0_end, (int)head0.size()));
+
+        chunks.push_back({chunk_head0, chunk_head1, chunk_head2});
+
+        // Move to next chunk
+        chunk_start = chunk_end;
+    }
+
+    return chunks;
+}
+
+// Crossfade merge: blend overlap region between two chunks
+// chunk1_pcm: first chunk output (includes overlap region at end)
+// chunk2_pcm: second chunk output (includes overlap region at start)
+// overlap_samples: number of samples in the overlap region
+// chunk1_valid_start: where valid output starts in chunk1
+// chunk1_valid_end: where valid output ends in chunk1
+// chunk2_valid_start: where valid output starts in chunk2
+static std::vector<float> snac_crossfade_merge(
+    const std::vector<float> & chunk1_pcm,
+    const std::vector<float> & chunk2_pcm,
+    int overlap_samples,
+    int chunk1_valid_start,
+    int chunk1_valid_end,
+    int chunk2_valid_start)
+{
+    std::vector<float> result;
+
+    // Add chunk1's valid portion (excluding overlap at end)
+    result.insert(result.end(),
+                  chunk1_pcm.begin() + chunk1_valid_start,
+                  chunk1_pcm.begin() + std::min(chunk1_valid_end, (int)chunk1_pcm.size()));
+
+    // Crossfade the overlap region
+    int actual_overlap = std::min(overlap_samples,
+                                   (int)(chunk1_pcm.size() - chunk1_valid_end));
+    actual_overlap = std::min(actual_overlap,
+                              (int)(chunk2_pcm.size() - chunk2_valid_start));
+
+    for (int i = 0; i < actual_overlap; i++) {
+        float t = (float)i / actual_overlap;  // 0 to 1
+        float weight1 = 1.0f - t;  // 1 to 0
+        float weight2 = t;         // 0 to 1
+
+        int idx1 = chunk1_valid_end + i;
+        int idx2 = chunk2_valid_start + i;
+
+        if (idx1 < (int)chunk1_pcm.size() && idx2 < (int)chunk2_pcm.size()) {
+            float sample = chunk1_pcm[idx1] * weight1 + chunk2_pcm[idx2] * weight2;
+            result.push_back(sample);
+        }
+    }
+
+    // Add chunk2's remaining valid portion (after overlap)
+    int chunk2_after_overlap = chunk2_valid_start + actual_overlap;
+    if (chunk2_after_overlap < (int)chunk2_pcm.size()) {
+        result.insert(result.end(),
+                      chunk2_pcm.begin() + chunk2_after_overlap,
+                      chunk2_pcm.end());
+    }
+
+    return result;
+}
+
+// Main chunked decode function
+std::vector<float> snac_ggml_decode_chunked(
+    struct snac_ggml_context & ctx,
+    const std::vector<std::vector<int>> & pyramid_tokens,
+    const snac_chunked_config & config)
+{
+    if (!ctx.loaded) {
+        LOG_ERR("%s: SNAC context not loaded\n", __func__);
+        return {};
+    }
+
+    const auto & head0 = pyramid_tokens[0];
+    const auto & head1 = pyramid_tokens[1];
+    const auto & head2 = pyramid_tokens[2];
+
+    int total_frames = (int)head2.size();
+
+    // Check if chunking is needed
+    if (total_frames <= config.max_chunk_frames) {
+        // Single chunk - use existing decode directly
+        LOG_INF("%s: Single chunk (%d frames), using direct decode\n", __func__, total_frames);
+        return snac_ggml_decode(ctx, pyramid_tokens);
+    }
+
+    LOG_INF("%s: Processing %d frames in chunks (max=%d, overlap=%d)\n",
+            __func__, total_frames, config.max_chunk_frames, config.overlap_frames);
+
+    // Split into chunks with context
+    auto chunks = snac_split_into_chunks(
+        head0, head1, head2,
+        config.max_chunk_frames, config.overlap_frames);
+
+    LOG_INF("%s: Split into %zu chunks\n", __func__, chunks.size());
+
+    // Decode each chunk
+    std::vector<std::vector<float>> chunk_outputs;
+    std::vector<std::pair<int, int>> chunk_valid_ranges;  // (start, end) in chunk samples
+    std::vector<int> chunk_frame_counts;  // Original frame count for each chunk
+
+    for (size_t i = 0; i < chunks.size(); i++) {
+        const auto & chunk_tokens = chunks[i];
+        int chunk_frame_count = (int)chunk_tokens[2].size();
+
+        // Decode chunk
+        auto chunk_pcm = snac_ggml_decode(ctx, chunk_tokens);
+
+        if (chunk_pcm.empty()) {
+            LOG_ERR("%s: Chunk %zu decode failed\n", __func__, i);
+            return {};
+        }
+
+        chunk_outputs.push_back(std::move(chunk_pcm));
+        chunk_frame_counts.push_back(chunk_frame_count);
+
+        // Calculate valid range (excluding overlap context)
+        // First chunk: valid starts at 0
+        // Other chunks: valid starts after overlap
+        int context_start_frames = (i == 0) ? 0 : config.overlap_frames;
+        // Last chunk: valid ends at chunk end
+        // Other chunks: valid ends before overlap
+        int context_end_frames = (i == chunks.size() - 1) ? chunk_frame_count
+                                                          : chunk_frame_count - config.overlap_frames;
+
+        // Convert frame indices to sample indices (512 samples per frame after decoder)
+        int samples_per_frame = SNAC_GGML_UPSAMPLE_FACTOR;  // 512
+        int valid_start = context_start_frames * samples_per_frame;
+        int valid_end = context_end_frames * samples_per_frame;
+
+        chunk_valid_ranges.push_back({valid_start, valid_end});
+
+        LOG_DBG("%s: Chunk %zu: %d frames, %zu samples, valid [%d, %d)\n",
+                __func__, i, chunk_frame_count, chunk_outputs[i].size(),
+                valid_start, valid_end);
+    }
+
+    // Merge chunks with crossfade
+    std::vector<float> result;
+    for (size_t i = 0; i < chunk_outputs.size(); i++) {
+        if (i == 0) {
+            // First chunk - just add valid portion
+            const auto & pcm = chunk_outputs[i];
+            int valid_start = chunk_valid_ranges[i].first;
+            int valid_end = std::min(chunk_valid_ranges[i].second, (int)pcm.size());
+            result.insert(result.end(),
+                         pcm.begin() + valid_start,
+                         pcm.begin() + valid_end);
+        } else {
+            // Subsequent chunks - crossfade with previous
+            int overlap_samples = config.crossfade_samples;
+            result = snac_crossfade_merge(
+                result,  // Previous merged output
+                chunk_outputs[i],
+                overlap_samples,
+                0,  // result is already trimmed to valid
+                (int)result.size(),  // end of result
+                chunk_valid_ranges[i].first);
+        }
+    }
+
+    LOG_INF("%s: Chunked decode complete, %zu samples (%.2fs)\n",
+            __func__, result.size(), (float)result.size() / SNAC_GGML_SAMPLE_RATE);
+
+    return result;
+}
+
 // Main decode function
 std::vector<float> snac_ggml_decode(
     struct snac_ggml_context & ctx,
@@ -1386,7 +1640,7 @@ std::vector<float> snac_ggml_decode(
 
     // 5. Execute the graph
     if (ggml_backend_is_cpu(ctx.backend)) {
-        ggml_backend_cpu_set_n_threads(ctx.backend, 4);  // Use 4 threads by default
+        ggml_backend_cpu_set_n_threads(ctx.backend, 4);  // Use 4 threads (optimal for SNAC)
     }
 
     ggml_status status = ggml_backend_graph_compute(ctx.backend, gf);
@@ -2397,6 +2651,8 @@ void snac_async_decoder::reset() {
     total_frames = 0;
     samples_already_output = 0;
     frames_already_output = 0;
+    first_decode_started = false;
+    total_decode_time_ms = 0;
 }
 
 void snac_async_decoder::start() {
@@ -2560,12 +2816,10 @@ void snac_async_decoder::worker_loop() {
 snac_chunk_result snac_async_decoder::decode_with_sliding_window(int new_frames_available) {
     snac_chunk_result result;
 
-    // FULL CONTEXT DECODE:
-    // SNAC vocoder requires FULL token context for correct audio output.
-    // We always decode ALL accumulated tokens, then output only NEW samples.
-    // This ensures audio quality while minimizing memory overhead.
-
-    (void)new_frames_available;  // Not used - we decode full buffer
+    // INCREMENTAL DECODE (optimized for true parallelism):
+    // Instead of re-decoding the entire buffer each time (O(n²) complexity),
+    // we decode only the new frames with minimal context for quality.
+    // This allows SNAC to truly run in parallel with LLM generation.
 
     if (buffer_head0.empty()) {
         result.success = true;
@@ -2573,22 +2827,68 @@ snac_chunk_result snac_async_decoder::decode_with_sliding_window(int new_frames_
     }
 
     int current_frames = (int)buffer_head0.size();
+    int frames_to_output = new_frames_available;
 
-    // Decode FULL token buffer (not sliding window) for proper context
-    std::vector<std::vector<int>> pyramid_tokens(3);
-    pyramid_tokens[0] = buffer_head0;
-    pyramid_tokens[1] = buffer_head1;
-    pyramid_tokens[2] = buffer_head2;
+    // Context window for quality (need some previous frames for clean audio)
+    const int CONTEXT_FRAMES = 8;  // Small context for boundary quality
+    int decode_start_frame = std::max(0, frames_already_output - CONTEXT_FRAMES);
+    int decode_end_frame = current_frames;
+
+    // Only decode if we have new frames to output
+    if (frames_to_output <= 0) {
+        result.success = true;
+        return result;
+    }
+
+    // Extract the portion of tokens to decode (context + new frames)
+    std::vector<std::vector<int>> decode_tokens(3);
+    int decode_frames = decode_end_frame - decode_start_frame;
+
+    if (decode_frames <= 0) {
+        result.success = true;
+        return result;
+    }
+
+    // Ensure we don't exceed buffer bounds
+    decode_frames = std::min(decode_frames, (int)buffer_head0.size() - decode_start_frame);
+    if (decode_frames <= 0) {
+        result.success = true;
+        return result;
+    }
+
+    // Extract tokens for this decode window
+    // head0: 1 token per frame
+    decode_tokens[0].assign(
+        buffer_head0.begin() + decode_start_frame,
+        buffer_head0.begin() + decode_start_frame + decode_frames
+    );
+    // head1: 2 tokens per frame
+    decode_tokens[1].assign(
+        buffer_head1.begin() + decode_start_frame * 2,
+        buffer_head1.begin() + decode_start_frame * 2 + decode_frames * 2
+    );
+    // head2: 4 tokens per frame
+    decode_tokens[2].assign(
+        buffer_head2.begin() + decode_start_frame * 4,
+        buffer_head2.begin() + decode_start_frame * 4 + decode_frames * 4
+    );
 
     auto decode_start = std::chrono::high_resolution_clock::now();
 
-    std::vector<float> full_pcm = snac_ggml_decode(*model_ctx, pyramid_tokens);
+    // Record first decode start time (for wall-clock parallelism measurement)
+    if (!first_decode_started.exchange(true)) {
+        first_decode_start = decode_start;
+    }
+
+    // Decode only this chunk (incremental, not full buffer)
+    std::vector<float> chunk_pcm = snac_ggml_decode(*model_ctx, decode_tokens);
 
     auto decode_end = std::chrono::high_resolution_clock::now();
+    last_decode_end = decode_end;  // Always update to latest
     total_decode_time_ms += std::chrono::duration_cast<std::chrono::milliseconds>(
         decode_end - decode_start).count();
 
-    if (full_pcm.empty()) {
+    if (chunk_pcm.empty()) {
         result.success = false;
         result.error_msg = "SNAC decode returned empty audio";
         LOG_WRN("%s: Decode failed\n", __func__);
@@ -2598,26 +2898,33 @@ snac_chunk_result snac_async_decoder::decode_with_sliding_window(int new_frames_
     // Calculate sample positions
     int samples_per_frame = SNAC_GGML_SAMPLES_PER_FRAME;  // 2048
 
-    // Output only NEW samples (not previously output)
-    int output_start_sample = frames_already_output * samples_per_frame;
-    int output_end_sample = std::min(current_frames * samples_per_frame, (int)full_pcm.size());
+    // Skip context frames in output (they were for quality, not for output)
+    int context_samples = 0;
+    if (decode_start_frame < frames_already_output) {
+        // We included some already-output frames for context
+        // Skip their samples in the output
+        context_samples = (frames_already_output - decode_start_frame) * samples_per_frame;
+    }
 
-    if (output_start_sample < output_end_sample) {
+    // Output only NEW samples
+    int output_start = context_samples;
+    int output_end = std::min((int)chunk_pcm.size(), context_samples + frames_to_output * samples_per_frame);
+
+    if (output_start < output_end) {
         result.pcm_samples.assign(
-            full_pcm.begin() + output_start_sample,
-            full_pcm.begin() + output_end_sample
+            chunk_pcm.begin() + output_start,
+            chunk_pcm.begin() + output_end
         );
 
         // Update tracking
-        int new_frames_output = (output_end_sample - output_start_sample) / samples_per_frame;
+        int new_frames_output = frames_to_output;
         frames_already_output += new_frames_output;
         samples_already_output += result.pcm_samples.size();
 
         result.success = true;
 
-        LOG_DBG("%s: Decoded %d frames (full context), output samples [%d, %d], new_frames=%d, total_output_frames=%d\n",
-                __func__, current_frames, output_start_sample, output_end_sample,
-                new_frames_output, frames_already_output);
+        LOG_DBG("%s: Incremental decode: %d frames (context=%d), output %d samples, total_output_frames=%d\n",
+                __func__, decode_frames, CONTEXT_FRAMES, (int)result.pcm_samples.size(), frames_already_output);
     } else {
         result.success = true;  // No new samples to output
     }

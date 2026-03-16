@@ -480,6 +480,11 @@ extern "C" {
     // Frees all allocated memory
     LLAMA_API void llama_free(struct llama_context * ctx);
 
+    // Get the CUDA backend from the llama context's scheduler, if available.
+    // Returns NULL if no CUDA backend is available.
+    // The returned backend is owned by the llama context and should not be freed.
+    LLAMA_API ggml_backend_t llama_context_get_cuda_backend(struct llama_context * ctx);
+
     enum llama_params_fit_status {
         LLAMA_PARAMS_FIT_STATUS_SUCCESS = 0, // found allocations that are projected to fit
         LLAMA_PARAMS_FIT_STATUS_FAILURE = 1, // could not find allocations that are projected to fit
